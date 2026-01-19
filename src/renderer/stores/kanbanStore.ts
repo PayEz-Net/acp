@@ -2,6 +2,22 @@ import { create } from 'zustand';
 import { KanbanBoard, KanbanTask, KanbanStatus, KanbanPriority } from '@shared/types';
 
 const VIBE_API = 'https://api.idealvibe.online/api/vibe';
+const USE_MOCK_DATA = true; // Set to false when backend is ready
+
+// Mock data for demo
+const MOCK_BOARDS: KanbanBoard[] = [
+  { board_id: 1, name: 'Vibe Agents Sprint', created_at: new Date().toISOString() },
+];
+
+const MOCK_TASKS: KanbanTask[] = [
+  { task_id: 1, board_id: 1, title: 'Vibe Agents Backend Endpoints', status: 'IN_PROGRESS', priority: 'high', assigned_agent_id: '2', assigned_agent_name: 'DotNetPert', created_at: new Date().toISOString() },
+  { task_id: 2, board_id: 1, title: 'Provision vibe_agents schema', status: 'TODO', priority: 'urgent', assigned_agent_id: '2', assigned_agent_name: 'DotNetPert', created_at: new Date().toISOString() },
+  { task_id: 3, board_id: 1, title: 'Phase 4: Keyboard shortcuts', status: 'TODO', priority: 'medium', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date().toISOString() },
+  { task_id: 4, board_id: 1, title: 'Code review Phase 3', status: 'IN_PROGRESS', priority: 'high', assigned_agent_id: '4', assigned_agent_name: 'QAPert', created_at: new Date().toISOString() },
+  { task_id: 5, board_id: 1, title: 'Phase 1: Terminal Grid', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 86400000).toISOString() },
+  { task_id: 6, board_id: 1, title: 'Phase 2: Mail Sidebar', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 43200000).toISOString() },
+  { task_id: 7, board_id: 1, title: 'Phase 3: Kanban Sidebar', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 3600000).toISOString() },
+];
 
 interface KanbanStore {
   // State
@@ -43,6 +59,14 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
   fetchBoards: async () => {
     set({ loading: true, error: undefined });
 
+    // Use mock data for demo
+    if (USE_MOCK_DATA) {
+      await new Promise((r) => setTimeout(r, 300));
+      set({ boards: MOCK_BOARDS, loading: false, selectedBoard: MOCK_BOARDS[0] });
+      get().fetchTasks(MOCK_BOARDS[0].board_id);
+      return;
+    }
+
     try {
       const res = await fetch(`${VIBE_API}/query`, {
         method: 'POST',
@@ -80,6 +104,14 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
 
   fetchTasks: async (boardId) => {
     set({ loading: true, error: undefined });
+
+    // Use mock data for demo
+    if (USE_MOCK_DATA) {
+      await new Promise((r) => setTimeout(r, 200));
+      const tasks = MOCK_TASKS.filter((t) => t.board_id === boardId);
+      set({ tasks, loading: false });
+      return;
+    }
 
     try {
       const res = await fetch(`${VIBE_API}/query`, {
@@ -142,6 +174,16 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
   },
 
   updateTask: async (taskId, updates) => {
+    // Mock mode - just update local state
+    if (USE_MOCK_DATA) {
+      set((state) => ({
+        tasks: state.tasks.map((t) =>
+          t.task_id === taskId ? { ...t, ...updates, updated_at: new Date().toISOString() } : t
+        )
+      }));
+      return true;
+    }
+
     try {
       const res = await fetch(`${VIBE_API}/update`, {
         method: 'POST',

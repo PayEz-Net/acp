@@ -2,6 +2,25 @@ import { create } from 'zustand';
 import { MailMessage, AgentMailbox } from '@shared/types';
 
 const VIBE_API = 'https://api.idealvibe.online/api/vibe';
+const USE_MOCK_DATA = true; // Set to false when backend is ready
+
+// Mock data for demo
+const MOCK_MESSAGES: Record<string, MailMessage[]> = {
+  BAPert: [
+    { message_id: 1, from_agent: 'NextPert', to_agent: 'BAPert', subject: 'COMPLETE: Phase 3 Kanban', body: 'Kanban sidebar is done with drag-and-drop.', is_read: false, created_at: new Date().toISOString() },
+    { message_id: 2, from_agent: 'DotNetPert', to_agent: 'BAPert', subject: 'BLOCKED: Need DB schema', body: 'Waiting on vibe_agents schema creation.', is_read: true, created_at: new Date(Date.now() - 3600000).toISOString() },
+  ],
+  NextPert: [
+    { message_id: 3, from_agent: 'BAPert', to_agent: 'NextPert', subject: 'TASK: Phase 4 Polish', body: 'Add keyboard shortcuts and window state persistence.', is_read: false, created_at: new Date().toISOString() },
+    { message_id: 4, from_agent: 'QAPert', to_agent: 'NextPert', subject: 'APPROVED: Code review passed', body: 'Kanban code looks good. Ship it!', is_read: false, created_at: new Date(Date.now() - 1800000).toISOString() },
+  ],
+  DotNetPert: [
+    { message_id: 5, from_agent: 'BAPert', to_agent: 'DotNetPert', subject: 'TASK: Vibe Agents Backend', body: 'Implement the /features/agents endpoints.', is_read: true, created_at: new Date(Date.now() - 7200000).toISOString() },
+  ],
+  QAPert: [
+    { message_id: 6, from_agent: 'BAPert', to_agent: 'QAPert', subject: 'REVIEW: Harness Phase 3', body: 'Please review the Kanban implementation.', is_read: false, created_at: new Date(Date.now() - 900000).toISOString() },
+  ],
+};
 
 interface MailStore {
   // State per agent
@@ -70,6 +89,18 @@ export const useMailStore = create<MailStore>((set, get) => ({
   fetchInbox: async (agent) => {
     const { setMailbox } = get();
     setMailbox(agent, { loading: true, error: undefined });
+
+    // Use mock data for demo
+    if (USE_MOCK_DATA) {
+      await new Promise((r) => setTimeout(r, 300)); // Simulate network delay
+      const messages = MOCK_MESSAGES[agent] || [];
+      setMailbox(agent, {
+        messages,
+        unreadCount: messages.filter((m) => !m.is_read).length,
+        loading: false,
+      });
+      return;
+    }
 
     try {
       const res = await fetch(`${VIBE_API}/query`, {
