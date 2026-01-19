@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { MailMessage, AgentMailbox } from '@shared/types';
 
 const VIBE_API = 'https://api.idealvibe.online/api/vibe';
-const USE_MOCK_DATA = true; // Set to false when backend is ready
+const USE_MOCK_DATA = false; // Backend is live
 
 // Mock data for demo
 const MOCK_MESSAGES: Record<string, MailMessage[]> = {

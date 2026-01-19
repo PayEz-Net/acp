@@ -1,22 +1,22 @@
 import { create } from 'zustand';
-import { KanbanBoard, KanbanTask, KanbanStatus, KanbanPriority } from '@shared/types';
+import { KanbanBoard, KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
 
 const VIBE_API = 'https://api.idealvibe.online/api/vibe';
-const USE_MOCK_DATA = true; // Set to false when backend is ready
+const USE_MOCK_DATA = false; // Backend is live
 
-// Mock data for demo
+// Mock data for demo/fallback
 const MOCK_BOARDS: KanbanBoard[] = [
-  { board_id: 1, name: 'Vibe Agents Sprint', created_at: new Date().toISOString() },
+  { id: 1, name: 'Vibe Agents Sprint', created_at: new Date().toISOString() },
 ];
 
 const MOCK_TASKS: KanbanTask[] = [
-  { task_id: 1, board_id: 1, title: 'Vibe Agents Backend Endpoints', status: 'IN_PROGRESS', priority: 'high', assigned_agent_id: '2', assigned_agent_name: 'DotNetPert', created_at: new Date().toISOString() },
-  { task_id: 2, board_id: 1, title: 'Provision vibe_agents schema', status: 'TODO', priority: 'urgent', assigned_agent_id: '2', assigned_agent_name: 'DotNetPert', created_at: new Date().toISOString() },
-  { task_id: 3, board_id: 1, title: 'Phase 4: Keyboard shortcuts', status: 'TODO', priority: 'medium', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date().toISOString() },
-  { task_id: 4, board_id: 1, title: 'Code review Phase 3', status: 'IN_PROGRESS', priority: 'high', assigned_agent_id: '4', assigned_agent_name: 'QAPert', created_at: new Date().toISOString() },
-  { task_id: 5, board_id: 1, title: 'Phase 1: Terminal Grid', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 86400000).toISOString() },
-  { task_id: 6, board_id: 1, title: 'Phase 2: Mail Sidebar', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 43200000).toISOString() },
-  { task_id: 7, board_id: 1, title: 'Phase 3: Kanban Sidebar', status: 'DONE', priority: 'high', assigned_agent_id: '3', assigned_agent_name: 'NextPert', created_at: new Date(Date.now() - 3600000).toISOString() },
+  { id: 1, board_id: 1, title: 'Vibe Agents Backend Endpoints', lane: 'in_progress', priority: 'high', assigned_agent_id: 2, created_at: new Date().toISOString() },
+  { id: 2, board_id: 1, title: 'Provision vibe_agents schema', lane: 'backlog', priority: 'urgent', assigned_agent_id: 2, created_at: new Date().toISOString() },
+  { id: 3, board_id: 1, title: 'Phase 4: Keyboard shortcuts', lane: 'ready', priority: 'normal', assigned_agent_id: 3, created_at: new Date().toISOString() },
+  { id: 4, board_id: 1, title: 'Code review Phase 3', lane: 'review', priority: 'high', assigned_agent_id: 4, created_at: new Date().toISOString() },
+  { id: 5, board_id: 1, title: 'Phase 1: Terminal Grid', lane: 'done', priority: 'high', assigned_agent_id: 3, created_at: new Date(Date.now() - 86400000).toISOString() },
+  { id: 6, board_id: 1, title: 'Phase 2: Mail Sidebar', lane: 'done', priority: 'high', assigned_agent_id: 3, created_at: new Date(Date.now() - 43200000).toISOString() },
+  { id: 7, board_id: 1, title: 'Phase 3: Kanban Sidebar', lane: 'done', priority: 'high', assigned_agent_id: 3, created_at: new Date(Date.now() - 3600000).toISOString() },
 ];
 
 interface KanbanStore {
@@ -37,9 +37,9 @@ interface KanbanStore {
   // API actions
   fetchBoards: () => Promise<void>;
   fetchTasks: (boardId: number) => Promise<void>;
-  createTask: (task: Omit<KanbanTask, 'task_id' | 'created_at'>) => Promise<boolean>;
+  createTask: (task: Omit<KanbanTask, 'id' | 'created_at'>) => Promise<boolean>;
   updateTask: (taskId: number, updates: Partial<KanbanTask>) => Promise<boolean>;
-  moveTask: (taskId: number, newStatus: KanbanStatus) => Promise<boolean>;
+  moveTask: (taskId: number, newLane: KanbanLane) => Promise<boolean>;
   deleteTask: (taskId: number) => Promise<boolean>;
 }
 
@@ -63,7 +63,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     if (USE_MOCK_DATA) {
       await new Promise((r) => setTimeout(r, 300));
       set({ boards: MOCK_BOARDS, loading: false, selectedBoard: MOCK_BOARDS[0] });
-      get().fetchTasks(MOCK_BOARDS[0].board_id);
+      get().fetchTasks(MOCK_BOARDS[0].id);
       return;
     }
 
@@ -91,7 +91,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
       const { selectedBoard } = get();
       if (!selectedBoard && boards.length > 0) {
         set({ selectedBoard: boards[0] });
-        get().fetchTasks(boards[0].board_id);
+        get().fetchTasks(boards[0].id);
       }
     } catch (err) {
       console.error('[Kanban] Failed to fetch boards:', err);
@@ -163,7 +163,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
       // Refresh tasks
       const { selectedBoard } = get();
       if (selectedBoard) {
-        await get().fetchTasks(selectedBoard.board_id);
+        await get().fetchTasks(selectedBoard.id);
       }
 
       return true;
@@ -178,7 +178,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     if (USE_MOCK_DATA) {
       set((state) => ({
         tasks: state.tasks.map((t) =>
-          t.task_id === taskId ? { ...t, ...updates, updated_at: new Date().toISOString() } : t
+          t.id === taskId ? { ...t, ...updates, updated_at: new Date().toISOString() } : t
         )
       }));
       return true;
@@ -190,7 +190,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           collection: 'agent_kanban_tasks',
-          filter: { task_id: taskId },
+          filter: { id: taskId },
           data: {
             ...updates,
             updated_at: new Date().toISOString()
@@ -205,7 +205,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
       // Update local state optimistically
       set((state) => ({
         tasks: state.tasks.map((t) =>
-          t.task_id === taskId ? { ...t, ...updates } : t
+          t.id === taskId ? { ...t, ...updates } : t
         )
       }));
 
@@ -216,21 +216,21 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     }
   },
 
-  moveTask: async (taskId, newStatus) => {
+  moveTask: async (taskId, newLane) => {
     // Optimistic update
     set((state) => ({
       tasks: state.tasks.map((t) =>
-        t.task_id === taskId ? { ...t, status: newStatus } : t
+        t.id === taskId ? { ...t, lane: newLane } : t
       )
     }));
 
-    const success = await get().updateTask(taskId, { status: newStatus });
+    const success = await get().updateTask(taskId, { lane: newLane });
 
     if (!success) {
       // Revert on failure - refetch tasks
       const { selectedBoard } = get();
       if (selectedBoard) {
-        await get().fetchTasks(selectedBoard.board_id);
+        await get().fetchTasks(selectedBoard.id);
       }
     }
 
@@ -244,7 +244,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           collection: 'agent_kanban_tasks',
-          filter: { task_id: taskId }
+          filter: { id: taskId }
         })
       });
 
@@ -254,8 +254,8 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
 
       // Remove from local state
       set((state) => ({
-        tasks: state.tasks.filter((t) => t.task_id !== taskId),
-        selectedTask: state.selectedTask?.task_id === taskId ? null : state.selectedTask
+        tasks: state.tasks.filter((t) => t.id !== taskId),
+        selectedTask: state.selectedTask?.id === taskId ? null : state.selectedTask
       }));
 
       return true;
@@ -266,9 +266,9 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
   }
 }));
 
-// Helper to get tasks by status
-export function getTasksByStatus(tasks: KanbanTask[], status: KanbanStatus): KanbanTask[] {
-  return tasks.filter((t) => t.status === status);
+// Helper to get tasks by lane
+export function getTasksByLane(tasks: KanbanTask[], lane: KanbanLane): KanbanTask[] {
+  return tasks.filter((t) => t.lane === lane);
 }
 
 // Helper to get priority color
@@ -278,7 +278,7 @@ export function getPriorityColor(priority: KanbanPriority): string {
       return 'text-red-400 bg-red-900/30 border-red-500/50';
     case 'high':
       return 'text-orange-400 bg-orange-900/30 border-orange-500/50';
-    case 'medium':
+    case 'normal':
       return 'text-yellow-400 bg-yellow-900/30 border-yellow-500/50';
     case 'low':
     default:

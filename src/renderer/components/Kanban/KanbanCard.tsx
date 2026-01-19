@@ -31,10 +31,10 @@ export default function KanbanCard({ task, onClick, onDragStart, isDragging }: K
             <span className={`text-xs px-1.5 py-0.5 rounded border ${priorityClass}`}>
               {task.priority}
             </span>
-            {task.assigned_agent_name && (
+            {task.assigned_agent_id && (
               <span className="flex items-center gap-1 text-xs text-gray-400">
                 <User className="h-3 w-3" />
-                {task.assigned_agent_name}
+                Agent #{task.assigned_agent_id}
               </span>
             )}
           </div>

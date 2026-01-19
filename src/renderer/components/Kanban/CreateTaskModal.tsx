@@ -5,14 +5,14 @@ import { X, Plus, Loader2 } from 'lucide-react';
 interface CreateTaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreate: (title: string, description: string, priority: KanbanPriority, assignedAgentId?: string) => Promise<boolean>;
+  onCreate: (title: string, description: string, priority: KanbanPriority, assignedAgentId?: number) => Promise<boolean>;
   agents: { id: string; name: string }[];
 }
 
 export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: CreateTaskModalProps) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [priority, setPriority] = useState<KanbanPriority>('medium');
+  const [priority, setPriority] = useState<KanbanPriority>('normal');
   const [assignedAgent, setAssignedAgent] = useState('');
   const [isSending, setIsSending] = useState(false);
 
@@ -27,13 +27,13 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
       title.trim(),
       description.trim(),
       priority,
-      assignedAgent || undefined
+      assignedAgent ? parseInt(assignedAgent, 10) : undefined
     );
 
     if (success) {
       setTitle('');
       setDescription('');
-      setPriority('medium');
+      setPriority('normal');
       setAssignedAgent('');
       onClose();
     }
@@ -68,7 +68,7 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
           {/* Title */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-normal text-gray-300 mb-1">
               Title *
             </label>
             <input
@@ -83,7 +83,7 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-normal text-gray-300 mb-1">
               Description
             </label>
             <textarea
@@ -97,7 +97,7 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
 
           {/* Priority */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-normal text-gray-300 mb-1">
               Priority
             </label>
             <select
@@ -106,7 +106,7 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
               className="w-full px-3 py-2 bg-[#0d2137] border border-[#2d4a6b] rounded-lg text-white focus:outline-none focus:border-blue-500"
             >
               <option value="low">Low</option>
-              <option value="medium">Medium</option>
+              <option value="normal">Normal</option>
               <option value="high">High</option>
               <option value="urgent">Urgent</option>
             </select>
@@ -114,7 +114,7 @@ export default function CreateTaskModal({ isOpen, onClose, onCreate, agents }: C
 
           {/* Assign to Agent */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">
+            <label className="block text-sm font-normal text-gray-300 mb-1">
               Assign to
             </label>
             <select

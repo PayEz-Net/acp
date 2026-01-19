@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from 'react';
-import { useKanbanStore, getTasksByStatus } from '../stores/kanbanStore';
-import { KanbanStatus, KanbanTask, KanbanPriority } from '@shared/types';
+import { useKanbanStore, getTasksByLane } from '../stores/kanbanStore';
+import { KanbanLane, KanbanTask, KanbanPriority } from '@shared/types';
 
 interface UseKanbanOptions {
   pollInterval?: number;
@@ -37,17 +37,19 @@ export function useKanban({ pollInterval = 60000, enabled = true }: UseKanbanOpt
     // Set up polling
     const interval = setInterval(() => {
       if (selectedBoard) {
-        fetchTasks(selectedBoard.board_id);
+        fetchTasks(selectedBoard.id);
       }
     }, pollInterval);
 
     return () => clearInterval(interval);
-  }, [enabled, pollInterval, fetchBoards, fetchTasks, selectedBoard?.board_id]);
+  }, [enabled, pollInterval, fetchBoards, fetchTasks, selectedBoard?.id]);
 
-  // Get tasks grouped by status
-  const todoTasks = getTasksByStatus(tasks, 'TODO');
-  const inProgressTasks = getTasksByStatus(tasks, 'IN_PROGRESS');
-  const doneTasks = getTasksByStatus(tasks, 'DONE');
+  // Get tasks grouped by lane (5 lanes)
+  const backlogTasks = getTasksByLane(tasks, 'backlog');
+  const readyTasks = getTasksByLane(tasks, 'ready');
+  const inProgressTasks = getTasksByLane(tasks, 'in_progress');
+  const reviewTasks = getTasksByLane(tasks, 'review');
+  const doneTasks = getTasksByLane(tasks, 'done');
 
   // Handle task selection
   const handleSelectTask = useCallback((task: KanbanTask | null) => {
@@ -58,13 +60,13 @@ export function useKanban({ pollInterval = 60000, enabled = true }: UseKanbanOpt
   const handleSelectBoard = useCallback((board: typeof selectedBoard) => {
     setSelectedBoard(board);
     if (board) {
-      fetchTasks(board.board_id);
+      fetchTasks(board.id);
     }
   }, [setSelectedBoard, fetchTasks]);
 
   // Handle task move (drag and drop)
-  const handleMoveTask = useCallback(async (taskId: number, newStatus: KanbanStatus) => {
-    return moveTask(taskId, newStatus);
+  const handleMoveTask = useCallback(async (taskId: number, newLane: KanbanLane) => {
+    return moveTask(taskId, newLane);
   }, [moveTask]);
 
   // Handle create task
@@ -72,15 +74,15 @@ export function useKanban({ pollInterval = 60000, enabled = true }: UseKanbanOpt
     title: string,
     description: string,
     priority: KanbanPriority,
-    assignedAgentId?: string
+    assignedAgentId?: number
   ) => {
     if (!selectedBoard) return false;
 
     return createTask({
-      board_id: selectedBoard.board_id,
+      board_id: selectedBoard.id,
       title,
       description,
-      status: 'TODO',
+      lane: 'backlog',
       priority,
       assigned_agent_id: assignedAgentId
     });
@@ -90,14 +92,16 @@ export function useKanban({ pollInterval = 60000, enabled = true }: UseKanbanOpt
   const refresh = useCallback(() => {
     fetchBoards();
     if (selectedBoard) {
-      fetchTasks(selectedBoard.board_id);
+      fetchTasks(selectedBoard.id);
     }
   }, [fetchBoards, fetchTasks, selectedBoard]);
 
   // Task counts
   const taskCounts = {
-    todo: todoTasks.length,
+    backlog: backlogTasks.length,
+    ready: readyTasks.length,
     inProgress: inProgressTasks.length,
+    review: reviewTasks.length,
     done: doneTasks.length,
     total: tasks.length
   };
@@ -112,9 +116,11 @@ export function useKanban({ pollInterval = 60000, enabled = true }: UseKanbanOpt
     loading,
     error,
 
-    // Grouped tasks
-    todoTasks,
+    // Grouped tasks (5 lanes)
+    backlogTasks,
+    readyTasks,
     inProgressTasks,
+    reviewTasks,
     doneTasks,
     taskCounts,
 

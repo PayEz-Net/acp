@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { KanbanTask, KanbanStatus, KanbanPriority } from '@shared/types';
+import { KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
 import { X, Trash2, User, Calendar, Loader2 } from 'lucide-react';
 
 interface TaskDetailProps {
@@ -16,29 +16,26 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
   const [editedTitle, setEditedTitle] = useState(task.title);
   const [editedDescription, setEditedDescription] = useState(task.description || '');
   const [editedPriority, setEditedPriority] = useState(task.priority);
-  const [editedStatus, setEditedStatus] = useState(task.status);
-  const [editedAssignee, setEditedAssignee] = useState(task.assigned_agent_id || '');
+  const [editedLane, setEditedLane] = useState(task.lane);
+  const [editedAssignee, setEditedAssignee] = useState(task.assigned_agent_id?.toString() || '');
 
   const hasChanges =
     editedTitle !== task.title ||
     editedDescription !== (task.description || '') ||
     editedPriority !== task.priority ||
-    editedStatus !== task.status ||
-    editedAssignee !== (task.assigned_agent_id || '');
+    editedLane !== task.lane ||
+    editedAssignee !== (task.assigned_agent_id?.toString() || '');
 
   const handleSave = async () => {
     if (!editedTitle.trim()) return;
 
     setIsUpdating(true);
-    await onUpdate(task.task_id, {
+    await onUpdate(task.id, {
       title: editedTitle.trim(),
       description: editedDescription.trim() || undefined,
       priority: editedPriority,
-      status: editedStatus,
-      assigned_agent_id: editedAssignee || undefined,
-      assigned_agent_name: editedAssignee
-        ? agents.find((a) => a.id === editedAssignee)?.name
-        : undefined
+      lane: editedLane,
+      assigned_agent_id: editedAssignee ? parseInt(editedAssignee, 10) : undefined
     });
     setIsUpdating(false);
     onClose();
@@ -48,7 +45,7 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
     if (!confirm('Delete this task?')) return;
 
     setIsDeleting(true);
-    await onDelete(task.task_id);
+    await onDelete(task.id);
     setIsDeleting(false);
   };
 
@@ -89,17 +86,19 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
           />
         </div>
 
-        {/* Status */}
+        {/* Lane (Status) */}
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">Status</label>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Lane</label>
           <select
-            value={editedStatus}
-            onChange={(e) => setEditedStatus(e.target.value as KanbanStatus)}
+            value={editedLane}
+            onChange={(e) => setEditedLane(e.target.value as KanbanLane)}
             className="w-full px-3 py-2 bg-[#0d2137] border border-[#2d4a6b] rounded-lg text-white focus:outline-none focus:border-blue-500"
           >
-            <option value="TODO">To Do</option>
-            <option value="IN_PROGRESS">In Progress</option>
-            <option value="DONE">Done</option>
+            <option value="backlog">Backlog</option>
+            <option value="ready">Ready</option>
+            <option value="in_progress">In Progress</option>
+            <option value="review">Review</option>
+            <option value="done">Done</option>
           </select>
         </div>
 
@@ -112,7 +111,7 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
             className="w-full px-3 py-2 bg-[#0d2137] border border-[#2d4a6b] rounded-lg text-white focus:outline-none focus:border-blue-500"
           >
             <option value="low">Low</option>
-            <option value="medium">Medium</option>
+            <option value="normal">Normal</option>
             <option value="high">High</option>
             <option value="urgent">Urgent</option>
           </select>

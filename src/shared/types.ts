@@ -59,30 +59,33 @@ export interface MailSendRequest {
   body: string;
 }
 
-// Kanban task status
-export type KanbanStatus = 'TODO' | 'IN_PROGRESS' | 'DONE';
+// Kanban lane (status) - matches Vibe SQL schema
+export type KanbanLane = 'backlog' | 'ready' | 'in_progress' | 'review' | 'done';
 
-// Kanban task priority
-export type KanbanPriority = 'low' | 'medium' | 'high' | 'urgent';
+// Kanban task priority - matches Vibe SQL schema
+export type KanbanPriority = 'low' | 'normal' | 'high' | 'urgent';
 
-// Kanban board from Vibe SQL
+// Kanban board from Vibe SQL (agent_kanban_boards)
 export interface KanbanBoard {
-  board_id: number;
+  id: number;
   team_id?: number;
   name: string;
+  lanes_json?: string[];
   created_at: string;
 }
 
-// Kanban task from Vibe SQL
+// Kanban task from Vibe SQL (agent_kanban_tasks)
 export interface KanbanTask {
-  task_id: number;
+  id: number;
   board_id: number;
   title: string;
   description?: string;
-  status: KanbanStatus;
-  assigned_agent_id?: string;
-  assigned_agent_name?: string;
+  lane: KanbanLane;
+  assigned_agent_id?: number;
+  created_by_agent_id?: number;
   priority: KanbanPriority;
+  labels?: string[];
+  due_date?: string;
   created_at: string;
   updated_at?: string;
 }

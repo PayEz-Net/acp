@@ -1,5 +1,5 @@
 import { useKanban } from '../../hooks/useKanban';
-import { KanbanStatus } from '@shared/types';
+import { KanbanLane } from '@shared/types';
 import KanbanColumn from './KanbanColumn';
 import CreateTaskModal from './CreateTaskModal';
 import TaskDetail from './TaskDetail';
@@ -18,8 +18,10 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
     selectedTask,
     isCreatingTask,
     loading,
-    todoTasks,
+    backlogTasks,
+    readyTasks,
     inProgressTasks,
+    reviewTasks,
     doneTasks,
     taskCounts,
     selectBoard,
@@ -34,8 +36,8 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
 
   if (!isOpen) return null;
 
-  const handleDrop = async (taskId: number, newStatus: KanbanStatus) => {
-    await moveTask(taskId, newStatus);
+  const handleDrop = async (taskId: number, newLane: KanbanLane) => {
+    await moveTask(taskId, newLane);
   };
 
   return (
@@ -74,15 +76,15 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
       {boards.length > 1 && (
         <div className="p-2 border-b border-[#2d4a6b]">
           <select
-            value={selectedBoard?.board_id || ''}
+            value={selectedBoard?.id || ''}
             onChange={(e) => {
-              const board = boards.find((b) => b.board_id === parseInt(e.target.value, 10));
+              const board = boards.find((b) => b.id === parseInt(e.target.value, 10));
               if (board) selectBoard(board);
             }}
             className="w-full px-2 py-1.5 bg-[#0d2137] border border-[#2d4a6b] rounded text-sm text-white focus:outline-none focus:border-blue-500"
           >
             {boards.map((board) => (
-              <option key={board.board_id} value={board.board_id}>
+              <option key={board.id} value={board.id}>
                 {board.name}
               </option>
             ))}
@@ -103,21 +105,35 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
         ) : (
           <>
             <KanbanColumn
-              status="TODO"
-              tasks={todoTasks}
-              count={taskCounts.todo}
+              lane="backlog"
+              tasks={backlogTasks}
+              count={taskCounts.backlog}
               onTaskClick={selectTask}
               onDrop={handleDrop}
             />
             <KanbanColumn
-              status="IN_PROGRESS"
+              lane="ready"
+              tasks={readyTasks}
+              count={taskCounts.ready}
+              onTaskClick={selectTask}
+              onDrop={handleDrop}
+            />
+            <KanbanColumn
+              lane="in_progress"
               tasks={inProgressTasks}
               count={taskCounts.inProgress}
               onTaskClick={selectTask}
               onDrop={handleDrop}
             />
             <KanbanColumn
-              status="DONE"
+              lane="review"
+              tasks={reviewTasks}
+              count={taskCounts.review}
+              onTaskClick={selectTask}
+              onDrop={handleDrop}
+            />
+            <KanbanColumn
+              lane="done"
               tasks={doneTasks}
               count={taskCounts.done}
               onTaskClick={selectTask}

@@ -1,31 +1,35 @@
 import { useState } from 'react';
-import { KanbanTask, KanbanStatus } from '@shared/types';
+import { KanbanTask, KanbanLane } from '@shared/types';
 import KanbanCard from './KanbanCard';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 interface KanbanColumnProps {
-  status: KanbanStatus;
+  lane: KanbanLane;
   tasks: KanbanTask[];
   count: number;
   onTaskClick: (task: KanbanTask) => void;
-  onDrop: (taskId: number, newStatus: KanbanStatus) => void;
+  onDrop: (taskId: number, newLane: KanbanLane) => void;
   collapsed?: boolean;
 }
 
-const statusColors: Record<KanbanStatus, string> = {
-  TODO: 'text-blue-400',
-  IN_PROGRESS: 'text-yellow-400',
-  DONE: 'text-green-400'
+const laneColors: Record<KanbanLane, string> = {
+  backlog: 'text-gray-400',
+  ready: 'text-blue-400',
+  in_progress: 'text-yellow-400',
+  review: 'text-purple-400',
+  done: 'text-green-400'
 };
 
-const statusLabels: Record<KanbanStatus, string> = {
-  TODO: 'To Do',
-  IN_PROGRESS: 'Doing',
-  DONE: 'Done'
+const laneLabels: Record<KanbanLane, string> = {
+  backlog: 'Backlog',
+  ready: 'Ready',
+  in_progress: 'In Progress',
+  review: 'Review',
+  done: 'Done'
 };
 
 export default function KanbanColumn({
-  status,
+  lane,
   tasks,
   count,
   onTaskClick,
@@ -50,7 +54,7 @@ export default function KanbanColumn({
     setIsDragOver(false);
     const taskId = parseInt(e.dataTransfer.getData('taskId'), 10);
     if (taskId) {
-      onDrop(taskId, status);
+      onDrop(taskId, lane);
     }
   };
 
@@ -83,8 +87,8 @@ export default function KanbanColumn({
         ) : (
           <ChevronDown className="h-4 w-4 text-gray-400" />
         )}
-        <span className={`text-sm font-medium ${statusColors[status]}`}>
-          {statusLabels[status]}
+        <span className={`text-sm font-medium ${laneColors[lane]}`}>
+          {laneLabels[lane]}
         </span>
         <span className="text-xs text-gray-500">({count})</span>
       </button>
@@ -94,11 +98,11 @@ export default function KanbanColumn({
         <div className="space-y-2 pl-6 pr-1 pb-2" onDragEnd={handleDragEnd}>
           {tasks.map((task) => (
             <KanbanCard
-              key={task.task_id}
+              key={task.id}
               task={task}
               onClick={() => onTaskClick(task)}
-              onDragStart={(e) => handleDragStart(e, task.task_id)}
-              isDragging={draggingTaskId === task.task_id}
+              onDragStart={(e) => handleDragStart(e, task.id)}
+              isDragging={draggingTaskId === task.id}
             />
           ))}
           {tasks.length === 0 && (
