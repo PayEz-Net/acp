@@ -14,7 +14,7 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, sidebarTab, setSidebarTab, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, showMail, showKanban, toggleMail, toggleKanban, activeAgentId, setAgents, setSettings } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
 
   // Find active agent name for mail composition
@@ -60,31 +60,31 @@ export default function App() {
         </main>
 
         {/* Sidebars */}
-        {showSidebar && (
+        {showSidebar && (showMail || showKanban) && (
           <div className="flex h-full">
-            {/* Tab Switcher */}
+            {/* Toggle Buttons */}
             <div className="w-10 bg-[#0a1929] border-l border-[#2d4a6b] flex flex-col items-center py-2 gap-1">
               <button
-                onClick={() => setSidebarTab('mail')}
+                onClick={toggleMail}
                 className={`p-2 rounded transition-colors ${
-                  sidebarTab === 'mail'
-                    ? 'bg-blue-600 text-white'
+                  showMail
+                    ? 'bg-violet-600 text-white'
                     : 'text-gray-400 hover:bg-[#2d4a6b]'
                 }`}
-                title="Mail"
+                title={showMail ? 'Hide Mail' : 'Show Mail'}
               >
                 <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
               </button>
               <button
-                onClick={() => setSidebarTab('kanban')}
+                onClick={toggleKanban}
                 className={`p-2 rounded transition-colors ${
-                  sidebarTab === 'kanban'
+                  showKanban
                     ? 'bg-blue-600 text-white'
                     : 'text-gray-400 hover:bg-[#2d4a6b]'
                 }`}
-                title="Kanban"
+                title={showKanban ? 'Hide Kanban' : 'Show Kanban'}
               >
                 <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -92,18 +92,21 @@ export default function App() {
               </button>
             </div>
 
-            {/* Active Sidebar */}
-            {sidebarTab === 'mail' ? (
+            {/* Mail Sidebar */}
+            {showMail && (
               <MailSidebar
                 agents={agents}
                 isOpen={true}
-                onClose={toggleSidebar}
+                onClose={toggleMail}
                 activeAgent={activeAgent?.name}
               />
-            ) : (
+            )}
+
+            {/* Kanban Sidebar */}
+            {showKanban && (
               <KanbanSidebar
                 isOpen={true}
-                onClose={toggleSidebar}
+                onClose={toggleKanban}
                 agents={agents.map((a) => ({ id: a.id, name: a.name }))}
               />
             )}

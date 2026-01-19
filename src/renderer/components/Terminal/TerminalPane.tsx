@@ -64,6 +64,54 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
+    // Write welcome message based on agent
+    const agentFlavor: Record<string, string[]> = {
+      BAPert: [
+        '\x1b[35m╔══════════════════════════════════════╗\x1b[0m',
+        '\x1b[35m║\x1b[0m  \x1b[1;35mBAPert\x1b[0m - Business Analyst          \x1b[35m║\x1b[0m',
+        '\x1b[35m║\x1b[0m  Coordinator & Task Manager          \x1b[35m║\x1b[0m',
+        '\x1b[35m╚══════════════════════════════════════╝\x1b[0m',
+        '',
+        '\x1b[90m  "Keeping the team aligned and on track."\x1b[0m',
+        '',
+      ],
+      NextPert: [
+        '\x1b[32m╔══════════════════════════════════════╗\x1b[0m',
+        '\x1b[32m║\x1b[0m  \x1b[1;32mNextPert\x1b[0m - Frontend Developer      \x1b[32m║\x1b[0m',
+        '\x1b[32m║\x1b[0m  React, Next.js, TypeScript          \x1b[32m║\x1b[0m',
+        '\x1b[32m╚══════════════════════════════════════╝\x1b[0m',
+        '',
+        '\x1b[90m  "Building beautiful UIs, one component at a time."\x1b[0m',
+        '',
+      ],
+      DotNetPert: [
+        '\x1b[36m╔══════════════════════════════════════╗\x1b[0m',
+        '\x1b[36m║\x1b[0m  \x1b[1;36mDotNetPert\x1b[0m - Backend Developer    \x1b[36m║\x1b[0m',
+        '\x1b[36m║\x1b[0m  C#, .NET, APIs, Databases           \x1b[36m║\x1b[0m',
+        '\x1b[36m╚══════════════════════════════════════╝\x1b[0m',
+        '',
+        '\x1b[90m  "Solid backends. Reliable APIs. Always."\x1b[0m',
+        '',
+      ],
+      QAPert: [
+        '\x1b[33m╔══════════════════════════════════════╗\x1b[0m',
+        '\x1b[33m║\x1b[0m  \x1b[1;33mQAPert\x1b[0m - Quality Assurance         \x1b[33m║\x1b[0m',
+        '\x1b[33m║\x1b[0m  Code Review & Testing               \x1b[33m║\x1b[0m',
+        '\x1b[33m╚══════════════════════════════════════╝\x1b[0m',
+        '',
+        '\x1b[90m  "If it ships, it works. Period."\x1b[0m',
+        '',
+      ],
+    };
+
+    const flavor = agentFlavor[agent.name] || [
+      `\x1b[1m${agent.name}\x1b[0m`,
+      '',
+    ];
+    flavor.forEach(line => terminal.writeln(line));
+    terminal.writeln('\x1b[90m  Press ▷ to start agent...\x1b[0m');
+    terminal.writeln('');
+
     // Handle resize
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();

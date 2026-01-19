@@ -6,7 +6,8 @@ interface AppStore {
   layout: LayoutMode;
   focusAgent: string;
   showSidebar: boolean;
-  sidebarTab: 'mail' | 'kanban';
+  showMail: boolean;
+  showKanban: boolean;
 
   // Agents
   agents: AgentState[];
@@ -16,7 +17,8 @@ interface AppStore {
   setLayout: (layout: LayoutMode) => void;
   setFocusAgent: (name: string) => void;
   toggleSidebar: () => void;
-  setSidebarTab: (tab: 'mail' | 'kanban') => void;
+  toggleMail: () => void;
+  toggleKanban: () => void;
   setActiveAgent: (id: string | null) => void;
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
@@ -29,7 +31,8 @@ export const useAppStore = create<AppStore>((set) => ({
   layout: 'grid',
   focusAgent: 'BAPert',
   showSidebar: false,
-  sidebarTab: 'mail',
+  showMail: true,
+  showKanban: false,
   agents: [],
   activeAgentId: null,
 
@@ -37,7 +40,8 @@ export const useAppStore = create<AppStore>((set) => ({
   setLayout: (layout) => set({ layout }),
   setFocusAgent: (focusAgent) => set({ focusAgent }),
   toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar })),
-  setSidebarTab: (sidebarTab) => set({ sidebarTab }),
+  toggleMail: () => set((s) => ({ showMail: !s.showMail })),
+  toggleKanban: () => set((s) => ({ showKanban: !s.showKanban })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
   setAgents: (configs) => set({

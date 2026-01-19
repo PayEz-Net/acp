@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { KanbanBoard, KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
 
 const VIBE_API = 'https://api.idealvibe.online/api/vibe';
-const USE_MOCK_DATA = false; // Backend is live
+const USE_MOCK_DATA = true; // TODO: Set false when API CORS is configured
 
 // Mock data for demo/fallback
 const MOCK_BOARDS: KanbanBoard[] = [
