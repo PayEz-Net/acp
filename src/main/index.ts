@@ -32,7 +32,7 @@ function createWindow() {
   // Load the app
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
+    // DevTools: Ctrl+Shift+I or F12 to open manually
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
