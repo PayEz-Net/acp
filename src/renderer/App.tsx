@@ -5,6 +5,14 @@ import { MailSidebar } from './components/Mail';
 import { KanbanSidebar } from './components/Kanban';
 import { useAppStore } from './stores/appStore';
 
+// Default agents for demo/browser mode
+const DEFAULT_AGENTS = [
+  { id: '1', name: 'BAPert', color: '#8b5cf6', position: 1 },
+  { id: '2', name: 'DotNetPert', color: '#06b6d4', position: 2 },
+  { id: '3', name: 'NextPert', color: '#22c55e', position: 0 },
+  { id: '4', name: 'QAPert', color: '#f59e0b', position: 3 },
+];
+
 export default function App() {
   const { agents, showSidebar, toggleSidebar, sidebarTab, setSidebarTab, activeAgentId, setAgents, setSettings } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
@@ -20,7 +28,10 @@ export default function App() {
         setSettings(settings);
         setAgents(settings.agents);
       } catch (err) {
-        console.error('Failed to load settings:', err);
+        console.error('Failed to load settings, using defaults:', err);
+        // Use default agents in browser mode
+        setAgents(DEFAULT_AGENTS);
+        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { width: 1200, height: 800 }, agents: DEFAULT_AGENTS });
       } finally {
         setIsLoading(false);
       }
