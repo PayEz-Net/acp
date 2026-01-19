@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { Mail, PenSquare, RefreshCw, X } from 'lucide-react';
 import { AgentState } from '@shared/types';
 import { useMail } from '../../hooks/useMail';
@@ -17,7 +16,6 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
   const agentNames = agents.map((a) => a.name);
 
   const {
-    mailboxes,
     selectedMessage,
     isComposing,
     replyTo,
@@ -34,11 +32,6 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
     pollInterval: 30000,
     enabled: isOpen,
   });
-
-  // Find color for agent
-  const getAgentColor = (name: string) => {
-    return agents.find((a) => a.name === name)?.color || '#7c3aed';
-  };
 
   const handleReply = () => {
     if (selectedMessage) {

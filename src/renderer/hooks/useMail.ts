@@ -43,10 +43,10 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   }, [agents.join(','), pollInterval, enabled, fetchAllInboxes]);
 
   // Handle message selection and mark as read
-  const handleSelectMessage = useCallback(async (message: MailMessage) => {
+  const handleSelectMessage = useCallback(async (message: MailMessage | null) => {
     selectMessage(message);
 
-    if (!message.is_read) {
+    if (message && !message.is_read) {
       const success = await markMessageRead(message.message_id);
       if (success) {
         markAsRead(message.message_id);

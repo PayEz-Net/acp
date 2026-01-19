@@ -29,19 +29,20 @@ export const useMailStore = create<MailStore>((set, get) => ({
   isComposing: false,
   replyTo: null,
 
-  setMailbox: (agent, update) => set((state) => ({
-    mailboxes: {
-      ...state.mailboxes,
-      [agent]: {
-        agent,
-        messages: [],
-        unreadCount: 0,
-        loading: false,
-        ...state.mailboxes[agent],
-        ...update,
+  setMailbox: (agent, update) => set((state) => {
+    const existing = state.mailboxes[agent] || {
+      agent,
+      messages: [],
+      unreadCount: 0,
+      loading: false,
+    };
+    return {
+      mailboxes: {
+        ...state.mailboxes,
+        [agent]: { ...existing, ...update },
       },
-    },
-  })),
+    };
+  }),
 
   selectMessage: (message) => set({ selectedMessage: message, isComposing: false }),
 

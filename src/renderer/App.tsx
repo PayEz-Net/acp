@@ -3,7 +3,6 @@ import { TitleBar } from './components/Layout/TitleBar';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { MailSidebar } from './components/Mail';
 import { useAppStore } from './stores/appStore';
-import { AgentConfig } from '@shared/types';
 
 export default function App() {
   const { agents, showSidebar, toggleSidebar, activeAgentId, setAgents, setSettings } = useAppStore();
