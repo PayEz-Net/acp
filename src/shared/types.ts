@@ -25,7 +25,7 @@ export interface TerminalData {
 // App layout modes
 export type LayoutMode = 'grid' | 'focus-left' | 'focus-right' | 'tabs';
 
-// Mail message from Agent Mail MCP
+// Mail message from Vibe SQL
 export interface MailMessage {
   message_id: number;
   from_agent: string;
@@ -34,7 +34,7 @@ export interface MailMessage {
   body: string;
   is_read: boolean;
   created_at: string;
-  project?: string;
+  read_at?: string;
 }
 
 // Mail inbox for an agent
@@ -57,7 +57,44 @@ export interface MailSendRequest {
   to: string;
   subject: string;
   body: string;
-  project?: string;
+}
+
+// Kanban task status
+export type KanbanStatus = 'TODO' | 'IN_PROGRESS' | 'DONE';
+
+// Kanban task priority
+export type KanbanPriority = 'low' | 'medium' | 'high' | 'urgent';
+
+// Kanban board from Vibe SQL
+export interface KanbanBoard {
+  board_id: number;
+  team_id?: number;
+  name: string;
+  created_at: string;
+}
+
+// Kanban task from Vibe SQL
+export interface KanbanTask {
+  task_id: number;
+  board_id: number;
+  title: string;
+  description?: string;
+  status: KanbanStatus;
+  assigned_agent_id?: string;
+  assigned_agent_name?: string;
+  priority: KanbanPriority;
+  created_at: string;
+  updated_at?: string;
+}
+
+// Kanban store state
+export interface KanbanState {
+  boards: KanbanBoard[];
+  tasks: KanbanTask[];
+  selectedBoard: KanbanBoard | null;
+  selectedTask: KanbanTask | null;
+  loading: boolean;
+  error?: string;
 }
 
 // App settings persisted to disk

@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react';
 import { TitleBar } from './components/Layout/TitleBar';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { MailSidebar } from './components/Mail';
+import { KanbanSidebar } from './components/Kanban';
 import { useAppStore } from './stores/appStore';
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, sidebarTab, setSidebarTab, activeAgentId, setAgents, setSettings } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
 
   // Find active agent name for mail composition
@@ -47,13 +48,56 @@ export default function App() {
           <TerminalGrid agents={agents} />
         </main>
 
-        {/* Mail Sidebar */}
-        <MailSidebar
-          agents={agents}
-          isOpen={showSidebar}
-          onClose={toggleSidebar}
-          activeAgent={activeAgent?.name}
-        />
+        {/* Sidebars */}
+        {showSidebar && (
+          <div className="flex h-full">
+            {/* Tab Switcher */}
+            <div className="w-10 bg-[#0a1929] border-l border-[#2d4a6b] flex flex-col items-center py-2 gap-1">
+              <button
+                onClick={() => setSidebarTab('mail')}
+                className={`p-2 rounded transition-colors ${
+                  sidebarTab === 'mail'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-400 hover:bg-[#2d4a6b]'
+                }`}
+                title="Mail"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setSidebarTab('kanban')}
+                className={`p-2 rounded transition-colors ${
+                  sidebarTab === 'kanban'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-400 hover:bg-[#2d4a6b]'
+                }`}
+                title="Kanban"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Active Sidebar */}
+            {sidebarTab === 'mail' ? (
+              <MailSidebar
+                agents={agents}
+                isOpen={true}
+                onClose={toggleSidebar}
+                activeAgent={activeAgent?.name}
+              />
+            ) : (
+              <KanbanSidebar
+                isOpen={true}
+                onClose={toggleSidebar}
+                agents={agents.map((a) => ({ id: a.id, name: a.name }))}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

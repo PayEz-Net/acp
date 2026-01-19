@@ -1,8 +1,7 @@
 import { create } from 'zustand';
 import { MailMessage, AgentMailbox } from '@shared/types';
 
-const MAIL_API_URL = 'http://10.0.0.220:5050';
-const PROJECT = 'e-repos-nexus-cryptaply';
+const VIBE_API = 'https://api.idealvibe.online/api/vibe';
 
 interface MailStore {
   // State per agent
@@ -73,16 +72,23 @@ export const useMailStore = create<MailStore>((set, get) => ({
     setMailbox(agent, { loading: true, error: undefined });
 
     try {
-      const res = await fetch(
-        `${MAIL_API_URL}/messages?agent=${encodeURIComponent(agent)}&project=${encodeURIComponent(PROJECT)}&limit=20`
-      );
+      const res = await fetch(`${VIBE_API}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          collection: 'agent_messages',
+          filter: { to_agent: agent },
+          sort: { created_at: 'desc' },
+          limit: 50
+        })
+      });
 
       if (!res.ok) {
         throw new Error(`Failed to fetch: ${res.status}`);
       }
 
       const data = await res.json();
-      const messages: MailMessage[] = data.messages || data || [];
+      const messages: MailMessage[] = data.items || [];
 
       setMailbox(agent, {
         messages,
@@ -105,15 +111,19 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
   sendMessage: async (from, to, subject, body) => {
     try {
-      const res = await fetch(`${MAIL_API_URL}/messages`, {
+      const res = await fetch(`${VIBE_API}/insert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          from_agent: from,
-          to_agent: to,
-          subject,
-          body,
-          project: PROJECT,
+          collection: 'agent_messages',
+          data: {
+            from_agent: from,
+            to_agent: to,
+            subject,
+            body,
+            is_read: false,
+            created_at: new Date().toISOString()
+          }
         }),
       });
 
@@ -121,7 +131,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
         throw new Error(`Failed to send: ${res.status}`);
       }
 
-      // Refresh sender's outbox and recipient's inbox
+      // Refresh recipient's inbox
       const { fetchInbox } = get();
       await fetchInbox(to);
 
@@ -136,8 +146,14 @@ export const useMailStore = create<MailStore>((set, get) => ({
 // Mark message as read on server
 export async function markMessageRead(messageId: number): Promise<boolean> {
   try {
-    const res = await fetch(`${MAIL_API_URL}/messages/${messageId}/read`, {
-      method: 'PATCH',
+    const res = await fetch(`${VIBE_API}/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        collection: 'agent_messages',
+        filter: { message_id: messageId },
+        data: { is_read: true, read_at: new Date().toISOString() }
+      })
     });
     return res.ok;
   } catch (err) {
