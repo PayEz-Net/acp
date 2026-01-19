@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
 import { TitleBar } from './components/Layout/TitleBar';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
+import { MailSidebar } from './components/Mail';
 import { useAppStore } from './stores/appStore';
 import { AgentConfig } from '@shared/types';
 
 export default function App() {
-  const { agents, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, activeAgentId, setAgents, setSettings } = useAppStore();
   const [isLoading, setIsLoading] = useState(true);
+
+  // Find active agent name for mail composition
+  const activeAgent = agents.find((a) => a.id === activeAgentId);
 
   useEffect(() => {
     // Load settings on startup
@@ -38,9 +42,20 @@ export default function App() {
   return (
     <div className="h-full flex flex-col bg-slate-900">
       <TitleBar />
-      <main className="flex-1 min-h-0 p-2">
-        <TerminalGrid agents={agents} />
-      </main>
+      <div className="flex-1 min-h-0 flex">
+        {/* Terminal Grid */}
+        <main className="flex-1 min-w-0 p-2">
+          <TerminalGrid agents={agents} />
+        </main>
+
+        {/* Mail Sidebar */}
+        <MailSidebar
+          agents={agents}
+          isOpen={showSidebar}
+          onClose={toggleSidebar}
+          activeAgent={activeAgent?.name}
+        />
+      </div>
     </div>
   );
 }

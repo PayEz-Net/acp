@@ -25,6 +25,41 @@ export interface TerminalData {
 // App layout modes
 export type LayoutMode = 'grid' | 'focus-left' | 'focus-right' | 'tabs';
 
+// Mail message from Agent Mail MCP
+export interface MailMessage {
+  message_id: number;
+  from_agent: string;
+  to_agent: string;
+  subject: string;
+  body: string;
+  is_read: boolean;
+  created_at: string;
+  project?: string;
+}
+
+// Mail inbox for an agent
+export interface AgentMailbox {
+  agent: string;
+  messages: MailMessage[];
+  unreadCount: number;
+  loading: boolean;
+  error?: string;
+}
+
+// Mail API response types
+export interface MailListResponse {
+  messages: MailMessage[];
+  total: number;
+}
+
+export interface MailSendRequest {
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  project?: string;
+}
+
 // App settings persisted to disk
 export interface AppSettings {
   layout: LayoutMode;
