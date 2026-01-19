@@ -1,0 +1,27 @@
+{
+  "appId": "com.idealvibe.agents-harness",
+  "productName": "Vibe Agents Harness",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "resources/**/*"
+  ],
+  "win": {
+    "target": ["nsis", "portable"],
+    "icon": "resources/icon.ico"
+  },
+  "mac": {
+    "target": ["dmg", "zip"],
+    "icon": "resources/icon.icns"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "icon": "resources/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "vibe-agents-harness",
+  "version": "0.1.0",
+  "description": "Desktop application for orchestrating multiple Vibe AI agents",
+  "main": "dist/main/index.js",
+  "author": "PayEz <dev@payez.net>",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "tsc && vite build",
+    "build:electron": "npm run build && tsc -p tsconfig.main.json",
+    "electron": "electron .",
+    "start": "npm run build:electron && electron .",
+    "dist": "npm run build:electron && electron-builder",
+    "dist:win": "npm run dist -- --win",
+    "dist:mac": "npm run dist -- --mac",
+    "dist:linux": "npm run dist -- --linux"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "node-pty": "^1.0.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-web-links": "^0.9.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.2.0"
+  }
+}
