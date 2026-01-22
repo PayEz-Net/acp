@@ -93,7 +93,7 @@ export default function App() {
       <div className="h-full flex items-center justify-center bg-slate-900">
         <div className="text-center">
           <div className="w-12 h-12 border-4 border-vibe-500/30 border-t-vibe-500 rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-400">Loading Vibe Agents Harness...</p>
+          <p className="text-slate-400">Loading Agent Collaboration Platform...</p>
         </div>
       </div>
     );

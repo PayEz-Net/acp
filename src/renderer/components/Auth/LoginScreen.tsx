@@ -48,7 +48,7 @@ export function LoginScreen() {
             alt="IdealVibe"
             className="h-12 mx-auto mb-4"
           />
-          <h1 className="text-2xl font-bold text-white">Vibe Agents Harness</h1>
+          <h1 className="text-2xl font-bold text-white">Agent Collaboration Platform</h1>
           <p className="text-slate-400 mt-2">Sign in to access your agent team</p>
         </div>
 

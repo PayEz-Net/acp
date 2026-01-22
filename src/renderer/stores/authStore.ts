@@ -188,8 +188,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!window.electronAPI?.authGetStatus) {
-        // Not in Electron - stay unauthenticated
-        set({ isLoading: false });
+        // Not in Electron - use dev/browser mode with mock auth
+        console.log('[AuthStore] Browser mode - auto-authenticating for development');
+        set({
+          isLoading: false,
+          authFlowState: AuthFlowState.AUTHENTICATED,
+          user: {
+            id: 'dev-user',
+            email: 'dev@localhost',
+            name: 'Developer',
+            roles: ['admin'],
+          },
+        });
         return;
       }
 

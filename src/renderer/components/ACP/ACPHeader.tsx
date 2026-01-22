@@ -17,7 +17,7 @@ export function ACPHeader({ onToggleMail, onToggleKanban, showMail, showKanban }
       <div className="flex items-center gap-6">
         {/* Title */}
         <h1 className="text-lg font-bold text-white tracking-tight">
-          ACP <span className="text-slate-500 font-medium">COLLABORATION</span>
+          Agent Collaboration Platform
         </h1>
 
         {/* Controls */}

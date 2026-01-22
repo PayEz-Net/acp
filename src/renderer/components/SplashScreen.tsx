@@ -82,10 +82,9 @@ export function SplashScreen({ onComplete, minimumDisplayTime = 2500 }: SplashSc
 
         {/* App Name */}
         <h1 className="splash-title">
-          <span className="text-white">Ideal</span>
-          <span className="text-gradient">Vibe</span>
+          <span className="text-gradient">ACP</span>
         </h1>
-        <p className="splash-subtitle">Agents Harness</p>
+        <p className="splash-subtitle">Agent Collaboration Platform</p>
       </div>
 
       <style>{`
