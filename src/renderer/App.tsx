@@ -1,6 +1,4 @@
 import { useEffect, useState } from 'react';
-import { TitleBar } from './components/Layout/TitleBar';
-import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { MailSidebar } from './components/Mail';
 import { KanbanSidebar } from './components/Kanban';
 import { StandupSidebar } from './components/Standup';
@@ -8,9 +6,11 @@ import { DocumentSidebar, DocumentModal } from './components/Documents';
 import { AutonomyPanel, EmergencyStopButton } from './components/Autonomy';
 import { LoginScreen, TwoFactorScreen } from './components/Auth';
 import { SplashScreen } from './components/SplashScreen';
+import { ACPCanvas, ACPHeader, AgentDetailPanel, EventLog } from './components/ACP';
 import { useAppStore } from './stores/appStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useDocumentStore } from './stores/documentStore';
+import { useACPStore } from './stores/acpStore';
 
 // Default agents for demo/browser mode
 const DEFAULT_AGENTS = [
@@ -21,15 +21,19 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, showMail, showKanban, showStandup, toggleMail, toggleKanban, toggleStandup, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showMail, showKanban, showStandup, toggleMail, toggleKanban, toggleStandup, activeAgentId, setAgents, setSettings } = useAppStore();
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
+  const { agents: acpAgents, selectedAgentId, selectAgent, projectProgress } = useACPStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
 
   // Find active agent name for mail composition
   const activeAgent = agents.find((a) => a.id === activeAgentId);
+
+  // Find selected ACP agent for detail panel
+  const selectedAcpAgent = acpAgents.find((a) => a.id === selectedAgentId);
 
   // Load auth status on mount
   useEffect(() => {
@@ -96,15 +100,59 @@ export default function App() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-900">
-      <TitleBar />
-      <div className="flex-1 min-h-0 flex">
-        {/* Terminal Grid */}
-        <main className="flex-1 min-w-0 p-2">
-          <TerminalGrid agents={agents} />
-        </main>
+    <div className="h-full flex flex-col bg-[#0B1221] text-slate-300">
+      {/* ACP Header */}
+      <ACPHeader
+        onToggleMail={toggleMail}
+        onToggleKanban={toggleKanban}
+        showMail={showMail}
+        showKanban={showKanban}
+      />
 
-        {/* Standup Sidebar (separate from mail/kanban) */}
+      {/* Progress Bar */}
+      <div className="h-1.5 w-full bg-slate-900/50 relative z-40 border-b border-slate-800/50">
+        <div
+          className="h-full bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.5)] transition-all duration-1000"
+          style={{ width: `${projectProgress}%` }}
+        />
+        <div className="absolute right-6 -bottom-5 text-[9px] font-black font-mono text-cyan-500 uppercase tracking-widest z-50 bg-[#0B1221] px-2 rounded-full border border-slate-800">
+          {projectProgress}% Complete
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {/* ACP Canvas (Party Room) */}
+        <ACPCanvas />
+
+        {/* Agent Detail Panel (when agent selected) */}
+        {selectedAcpAgent && (
+          <AgentDetailPanel
+            agent={selectedAcpAgent}
+            onClose={() => selectAgent(null)}
+          />
+        )}
+
+        {/* Mail Sidebar */}
+        {showMail && (
+          <MailSidebar
+            agents={agents}
+            isOpen={true}
+            onClose={toggleMail}
+            activeAgent={activeAgent?.name}
+          />
+        )}
+
+        {/* Kanban Sidebar */}
+        {showKanban && (
+          <KanbanSidebar
+            isOpen={true}
+            onClose={toggleKanban}
+            agents={agents.map((a) => ({ id: a.id, name: a.name }))}
+          />
+        )}
+
+        {/* Standup Sidebar */}
         {showStandup && (
           <StandupSidebar isOpen={true} onClose={toggleStandup} />
         )}
@@ -113,61 +161,10 @@ export default function App() {
         {showDocuments && (
           <DocumentSidebar isOpen={true} onClose={toggleDocuments} />
         )}
-
-        {/* Mail/Kanban Sidebars */}
-        {showSidebar && (showMail || showKanban) && (
-          <div className="flex h-full">
-            {/* Toggle Buttons */}
-            <div className="w-10 bg-[#0a1929] border-l border-[#2d4a6b] flex flex-col items-center py-2 gap-1">
-              <button
-                onClick={toggleMail}
-                className={`p-2 rounded transition-colors ${
-                  showMail
-                    ? 'bg-violet-600 text-white'
-                    : 'text-gray-400 hover:bg-[#2d4a6b]'
-                }`}
-                title={showMail ? 'Hide Mail' : 'Show Mail'}
-              >
-                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                </svg>
-              </button>
-              <button
-                onClick={toggleKanban}
-                className={`p-2 rounded transition-colors ${
-                  showKanban
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:bg-[#2d4a6b]'
-                }`}
-                title={showKanban ? 'Hide Kanban' : 'Show Kanban'}
-              >
-                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-              </button>
-            </div>
-
-            {/* Mail Sidebar */}
-            {showMail && (
-              <MailSidebar
-                agents={agents}
-                isOpen={true}
-                onClose={toggleMail}
-                activeAgent={activeAgent?.name}
-              />
-            )}
-
-            {/* Kanban Sidebar */}
-            {showKanban && (
-              <KanbanSidebar
-                isOpen={true}
-                onClose={toggleKanban}
-                agents={agents.map((a) => ({ id: a.id, name: a.name }))}
-              />
-            )}
-          </div>
-        )}
       </div>
+
+      {/* Event Log Footer */}
+      <EventLog />
 
       {/* Document Viewer Modal */}
       <DocumentModal />

@@ -293,3 +293,173 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mailPushEnabled: true,
   mailPushUrl: 'https://api.idealvibe.online',
 };
+
+// ============================================
+// ACP (Agent Collaboration Platform) Types
+// ============================================
+
+// Character names for the 5 agents
+export type ACPCharacter = 'sage' | 'forge' | 'pixel' | 'nova' | 'raven';
+
+// Agent states in the party room
+export type ACPAgentStatus = 'idle' | 'working' | 'moving' | 'mingling' | 'blocked' | 'celebrating' | 'paused';
+
+// Zones in the party room
+export type ACPZone = 'entrance' | 'bar' | 'table-db' | 'table-ui' | 'table-api' | 'table-qa' | 'lounge';
+
+// Position in the party room (percentage-based for responsive layout)
+export interface ACPPosition {
+  x: number; // 0-100 percentage
+  y: number; // 0-100 percentage
+}
+
+// Character visual configuration
+export interface ACPCharacterConfig {
+  character: ACPCharacter;
+  agentName: string; // Maps to BAPert, DotNetPert, etc.
+  displayName: string; // Sage, Forge, etc.
+  title: string; // "the Architect", "the Builder", etc.
+  color: string; // Primary color
+  colorSecondary: string; // Secondary color
+  traits: string[]; // e.g., ["Methodical", "Strategic"]
+  quote: string; // Character quote
+  stats: {
+    speed: number; // 0-100
+    creativity: number;
+    precision: number;
+    intel: number;
+  };
+}
+
+// ACP Agent runtime state
+export interface ACPAgent {
+  id: string;
+  character: ACPCharacter;
+  agentName: string;
+  position: ACPPosition;
+  targetPosition?: ACPPosition; // For movement animation
+  zone: ACPZone;
+  status: ACPAgentStatus;
+  currentTask?: string;
+  taskProgress?: number; // 0-100
+  minglingWith?: string; // Agent ID if mingling
+  selected: boolean;
+  lastActivity?: string;
+}
+
+// Event types for the event log
+export type ACPEventType =
+  | 'agent_entered'
+  | 'agent_moved'
+  | 'agent_working'
+  | 'agent_blocked'
+  | 'agent_completed'
+  | 'mingle_started'
+  | 'mingle_ended'
+  | 'human_message'
+  | 'system';
+
+// Event log entry
+export interface ACPEvent {
+  id: string;
+  type: ACPEventType;
+  timestamp: Date;
+  agentId?: string;
+  agentName?: string;
+  targetAgentId?: string;
+  targetAgentName?: string;
+  message: string;
+  details?: string;
+}
+
+// Chat message in agent panel
+export interface ACPChatMessage {
+  id: string;
+  agentId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+  streaming?: boolean;
+}
+
+// Zone configuration for positioning
+export interface ACPZoneConfig {
+  id: ACPZone;
+  label: string;
+  bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+}
+
+// Default character configurations
+export const ACP_CHARACTERS: Record<ACPCharacter, ACPCharacterConfig> = {
+  sage: {
+    character: 'sage',
+    agentName: 'BAPert',
+    displayName: 'Sage',
+    title: 'the Architect',
+    color: '#D4A017', // Gold
+    colorSecondary: '#F5E6C3',
+    traits: ['Strategic', 'Methodical'],
+    quote: 'The architecture is the soul of the product. Every decision echoes forward.',
+    stats: { speed: 65, creativity: 85, precision: 90, intel: 95 },
+  },
+  forge: {
+    character: 'forge',
+    agentName: 'DotNetPert',
+    displayName: 'Forge',
+    title: 'the Builder',
+    color: '#58A6FF', // Steel Blue
+    colorSecondary: '#A5D6FF',
+    traits: ['Reliable', 'Precise'],
+    quote: 'Solid foundations make everything possible. Build it right the first time.',
+    stats: { speed: 70, creativity: 60, precision: 95, intel: 85 },
+  },
+  pixel: {
+    character: 'pixel',
+    agentName: 'NextPert',
+    displayName: 'Pixel',
+    title: 'the Creative',
+    color: '#3FB950', // Emerald
+    colorSecondary: '#A7F3D0',
+    traits: ['Creative', 'Detail-oriented'],
+    quote: 'The user experience is the heart of the product. Every pixel counts toward trust.',
+    stats: { speed: 78, creativity: 94, precision: 62, intel: 88 },
+  },
+  nova: {
+    character: 'nova',
+    agentName: 'NextPertTwo',
+    displayName: 'Nova',
+    title: 'the Swift',
+    color: '#56D364', // Light Green
+    colorSecondary: '#ECFDF5',
+    traits: ['Fast', 'Energetic'],
+    quote: 'Ship it. Learn. Iterate. Speed is a feature.',
+    stats: { speed: 95, creativity: 75, precision: 70, intel: 80 },
+  },
+  raven: {
+    character: 'raven',
+    agentName: 'QAPert',
+    displayName: 'Raven',
+    title: 'the Watcher',
+    color: '#A371F7', // Purple
+    colorSecondary: '#DDD6FE',
+    traits: ['Thorough', 'Skeptical'],
+    quote: 'Trust, but verify. The details are where quality lives.',
+    stats: { speed: 60, creativity: 70, precision: 98, intel: 92 },
+  },
+};
+
+// Default zone configurations
+export const ACP_ZONES: ACPZoneConfig[] = [
+  { id: 'table-db', label: 'DB Architecture', bounds: { x: 5, y: 8, width: 20, height: 15 } },
+  { id: 'table-ui', label: 'UI Components', bounds: { x: 28, y: 8, width: 20, height: 15 } },
+  { id: 'table-api', label: 'API Routes', bounds: { x: 51, y: 8, width: 20, height: 15 } },
+  { id: 'table-qa', label: 'QA Testing', bounds: { x: 74, y: 8, width: 20, height: 15 } },
+  { id: 'bar', label: 'Bar Zone', bounds: { x: 2, y: 35, width: 12, height: 35 } },
+  { id: 'lounge', label: 'Lounge', bounds: { x: 60, y: 60, width: 35, height: 30 } },
+  { id: 'entrance', label: 'Entrance', bounds: { x: 35, y: 88, width: 30, height: 10 } },
+];
