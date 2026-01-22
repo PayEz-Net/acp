@@ -5,6 +5,7 @@ import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 import { AgentState } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
+import { useMailPush } from '../../hooks/useMailPush';
 import { Play, Square, RotateCcw } from 'lucide-react';
 
 interface TerminalPaneProps {
@@ -18,7 +19,10 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const { updateAgentStatus, setAgentTerminalId } = useAppStore();
+  const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, mailPushEnabled } = useAppStore();
+
+  // Subscribe to mail push SSE when agent is active
+  useMailPush(agent.name, mailPushEnabled && agent.status !== 'offline');
 
   // Initialize terminal
   useEffect(() => {
@@ -63,6 +67,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
+
+    // Register terminal for mail push message injection
+    registerTerminal(agent.name, terminal);
 
     // Write welcome message based on agent
     const agentFlavor: Record<string, string[]> = {
@@ -120,10 +127,11 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
     return () => {
       resizeObserver.disconnect();
+      unregisterTerminal(agent.name);
       terminal.dispose();
       xtermRef.current = null;
     };
-  }, [compact]);
+  }, [compact, agent.name, registerTerminal, unregisterTerminal]);
 
   // Handle terminal input
   useEffect(() => {

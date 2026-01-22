@@ -1,5 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC_CHANNELS, AppSettings, TerminalData } from '../shared/types';
+import {
+  IPC_CHANNELS,
+  AppSettings,
+  TerminalData,
+  AuthStatus,
+  LoginRequest,
+  LoginResult,
+  TwoFactorRequest,
+  TwoFactorResult,
+} from '../shared/types';
 
 // Expose protected methods to renderer via contextBridge
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -53,6 +62,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: (): void => {
     ipcRenderer.send(IPC_CHANNELS.WINDOW_CLOSE);
   },
+
+  // Auth (main process handles IDP calls + token storage)
+  authLogin: (request: LoginRequest): Promise<LoginResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOGIN, request);
+  },
+
+  authLogout: (): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOGOUT);
+  },
+
+  authGetStatus: (): Promise<AuthStatus> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_GET_STATUS);
+  },
+
+  authRefresh: (): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_REFRESH);
+  },
+
+  authSend2FA: (method: 'email' | 'sms'): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_SEND_2FA, { method });
+  },
+
+  authVerify2FA: (request: TwoFactorRequest): Promise<TwoFactorResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_VERIFY_2FA, request);
+  },
+
+  // OAuth
+  openOAuthUrl: (url: string): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.OAUTH_OPEN_URL, url);
+  },
+
+  onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.OAUTH_CALLBACK, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.OAUTH_CALLBACK, handler);
+  },
 });
 
 // Type declaration for renderer
@@ -70,6 +115,16 @@ declare global {
       minimizeWindow: () => void;
       maximizeWindow: () => void;
       closeWindow: () => void;
+      // Auth (main process handles IDP + tokens)
+      authLogin: (request: LoginRequest) => Promise<LoginResult>;
+      authLogout: () => Promise<{ success: boolean }>;
+      authGetStatus: () => Promise<AuthStatus>;
+      authRefresh: () => Promise<{ success: boolean; error?: string }>;
+      authSend2FA: (method: 'email' | 'sms') => Promise<{ success: boolean; error?: string }>;
+      authVerify2FA: (request: TwoFactorRequest) => Promise<TwoFactorResult>;
+      // OAuth
+      openOAuthUrl: (url: string) => Promise<void>;
+      onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
     };
   }
 }

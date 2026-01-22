@@ -3,7 +3,14 @@ import { TitleBar } from './components/Layout/TitleBar';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { MailSidebar } from './components/Mail';
 import { KanbanSidebar } from './components/Kanban';
+import { StandupSidebar } from './components/Standup';
+import { DocumentSidebar, DocumentModal } from './components/Documents';
+import { AutonomyPanel, EmergencyStopButton } from './components/Autonomy';
+import { LoginScreen, TwoFactorScreen } from './components/Auth';
+import { SplashScreen } from './components/SplashScreen';
 import { useAppStore } from './stores/appStore';
+import { useAuthStore, AuthFlowState } from './stores/authStore';
+import { useDocumentStore } from './stores/documentStore';
 
 // Default agents for demo/browser mode
 const DEFAULT_AGENTS = [
@@ -14,14 +21,25 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, showMail, showKanban, toggleMail, toggleKanban, activeAgentId, setAgents, setSettings } = useAppStore();
-  const [isLoading, setIsLoading] = useState(true);
+  const { agents, showSidebar, showMail, showKanban, showStandup, toggleMail, toggleKanban, toggleStandup, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
+  const { showDocuments, toggleDocuments } = useDocumentStore();
+  const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
 
   // Find active agent name for mail composition
   const activeAgent = agents.find((a) => a.id === activeAgentId);
 
+  // Load auth status on mount
   useEffect(() => {
-    // Load settings on startup
+    loadStatus();
+  }, [loadStatus]);
+
+  // Load settings after auth
+  useEffect(() => {
+    if (!isAuthenticated || settingsLoaded) return;
+
     async function loadSettings() {
       try {
         const settings = await window.electronAPI.getSettings();
@@ -29,17 +47,44 @@ export default function App() {
         setAgents(settings.agents);
       } catch (err) {
         console.error('Failed to load settings, using defaults:', err);
-        // Use default agents in browser mode
         setAgents(DEFAULT_AGENTS);
-        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320 });
+        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320, mailPushEnabled: true, mailPushUrl: 'https://api.idealvibe.online' });
       } finally {
-        setIsLoading(false);
+        setSettingsLoaded(true);
       }
     }
     loadSettings();
-  }, [setSettings, setAgents]);
+  }, [isAuthenticated, settingsLoaded, setSettings, setAgents]);
 
-  if (isLoading) {
+  // Show splash screen on initial load
+  if (showSplash) {
+    return <SplashScreen onComplete={() => setShowSplash(false)} />;
+  }
+
+  // Show loading while auth is initializing
+  if (authLoading) {
+    return (
+      <div className="h-full flex items-center justify-center bg-slate-900">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-vibe-500/30 border-t-vibe-500 rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-slate-400">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show login screen if not authenticated
+  if (authFlowState === AuthFlowState.UNAUTHENTICATED || authFlowState === AuthFlowState.ERROR) {
+    return <LoginScreen />;
+  }
+
+  // Show 2FA screen if required
+  if (authFlowState === AuthFlowState.REQUIRES_2FA || authFlowState === AuthFlowState.VERIFYING_2FA) {
+    return <TwoFactorScreen />;
+  }
+
+  // Show loading while settings load after auth
+  if (!settingsLoaded) {
     return (
       <div className="h-full flex items-center justify-center bg-slate-900">
         <div className="text-center">
@@ -59,7 +104,17 @@ export default function App() {
           <TerminalGrid agents={agents} />
         </main>
 
-        {/* Sidebars */}
+        {/* Standup Sidebar (separate from mail/kanban) */}
+        {showStandup && (
+          <StandupSidebar isOpen={true} onClose={toggleStandup} />
+        )}
+
+        {/* Documents Sidebar */}
+        {showDocuments && (
+          <DocumentSidebar isOpen={true} onClose={toggleDocuments} />
+        )}
+
+        {/* Mail/Kanban Sidebars */}
         {showSidebar && (showMail || showKanban) && (
           <div className="flex h-full">
             {/* Toggle Buttons */}
@@ -113,6 +168,15 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Document Viewer Modal */}
+      <DocumentModal />
+
+      {/* Autonomy Panel (modal) */}
+      <AutonomyPanel />
+
+      {/* Emergency Stop Button (floating) */}
+      <EmergencyStopButton />
     </div>
   );
 }

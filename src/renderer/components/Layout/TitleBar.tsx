@@ -1,11 +1,17 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useMailStore } from '../../stores/mailStore';
+import { useStandupStore } from '../../stores/standupStore';
+import { useDocumentStore } from '../../stores/documentStore';
+import { ModeIndicator } from '../Autonomy';
+import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, mailPushEnabled, toggleMailPush } = useAppStore();
   const { mailboxes } = useMailStore();
+  const { unreadCount: standupUnread } = useStandupStore();
+  const { showDocuments, toggleDocuments, documents } = useDocumentStore();
 
   // Calculate total unread
   const totalUnread = Object.values(mailboxes).reduce(
@@ -45,9 +51,66 @@ export function TitleBar() {
         ))}
       </div>
 
-      {/* Mail toggle + Window controls */}
-      <div className="flex items-center gap-1">
-        {/* Mail toggle */}
+      {/* Mode indicator + Sidebar toggles + Window controls */}
+      <div className="flex items-center gap-2">
+        {/* Autonomy Mode Indicator */}
+        <ModeIndicator />
+
+        <div className="w-px h-4 bg-slate-700" />
+
+        {/* Notification Center */}
+        <NotificationCenter />
+
+        {/* Mail push toggle */}
+        <button
+          onClick={toggleMailPush}
+          className={`relative p-2 rounded transition-colors ${
+            mailPushEnabled
+              ? 'bg-emerald-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title={mailPushEnabled ? 'Mail Push: ON (click to disable)' : 'Mail Push: OFF (click to enable)'}
+        >
+          <Radio className={`w-4 h-4 ${mailPushEnabled ? 'animate-pulse' : ''}`} />
+        </button>
+
+        {/* Documents sidebar toggle */}
+        <button
+          onClick={toggleDocuments}
+          className={`relative p-2 rounded transition-colors ${
+            showDocuments
+              ? 'bg-blue-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title="Toggle Documents"
+        >
+          <FileText className="w-4 h-4" />
+          {documents.length > 0 && !showDocuments && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 flex items-center justify-center text-[10px] font-bold bg-blue-500 text-white rounded-full">
+              {documents.length > 9 ? '9+' : documents.length}
+            </span>
+          )}
+        </button>
+
+        {/* Standup sidebar toggle */}
+        <button
+          onClick={toggleStandup}
+          className={`relative p-2 rounded transition-colors ${
+            showStandup
+              ? 'bg-amber-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title="Toggle Standup"
+        >
+          <ClipboardList className="w-4 h-4" />
+          {standupUnread > 0 && !showStandup && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 flex items-center justify-center text-[10px] font-bold bg-amber-500 text-white rounded-full">
+              {standupUnread > 9 ? '9+' : standupUnread}
+            </span>
+          )}
+        </button>
+
+        {/* Mail sidebar toggle */}
         <button
           onClick={toggleSidebar}
           className={`relative p-2 rounded transition-colors ${
@@ -65,7 +128,7 @@ export function TitleBar() {
           )}
         </button>
 
-        <div className="w-px h-4 bg-slate-700 mx-1" />
+        <div className="w-px h-4 bg-slate-700" />
 
         <button
           onClick={() => window.electronAPI.minimizeWindow()}

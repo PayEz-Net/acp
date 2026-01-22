@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { setupPtyHandlers, killAllPty } from './pty';
-import { store, getSettings, setSettings } from './store';
+import { getSettings, setSettings } from './store';
+import { setupAuthHandlers } from './auth';
+import { startOAuthServer, stopOAuthServer } from './oauth-server';
 import { IPC_CHANNELS } from '../shared/types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -31,7 +33,7 @@ function createWindow() {
 
   // Load the app
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://localhost:40010');
     // DevTools: Ctrl+Shift+I or F12 to open manually
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -85,6 +87,20 @@ function setupIpcHandlers() {
     mainWindow?.close();
   });
 
+  // Auth handlers (main process handles IDP calls + token storage)
+  setupAuthHandlers(mainWindow);
+
+  // OAuth handler - open URL in system browser
+  ipcMain.handle(IPC_CHANNELS.OAUTH_OPEN_URL, (_, url: string) => {
+    console.log('[OAuth] Opening URL in browser');
+    shell.openExternal(url);
+  });
+
+  // Start OAuth callback server
+  if (mainWindow) {
+    startOAuthServer(mainWindow);
+  }
+
   // PTY handlers
   setupPtyHandlers(mainWindow);
 }
@@ -110,4 +126,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   killAllPty();
+  stopOAuthServer();
 });

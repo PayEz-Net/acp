@@ -1,8 +1,23 @@
 import { create } from 'zustand';
 import { KanbanBoard, KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
+import { getAuthToken } from '../services/api';
 
-const VIBE_API = 'https://api.idealvibe.online/api/vibe';
-const USE_MOCK_DATA = true; // TODO: Set false when API CORS is configured
+const VIBE_API = 'http://localhost:37933/api/vibe';
+const USE_MOCK_DATA = false;
+
+// Helper to make authenticated requests
+async function vibeRequest(endpoint: string, body: unknown) {
+  const token = getAuthToken();
+  const res = await fetch(`${VIBE_API}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  return res;
+}
 
 // Mock data for demo/fallback
 const MOCK_BOARDS: KanbanBoard[] = [
@@ -68,14 +83,10 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     }
 
     try {
-      const res = await fetch(`${VIBE_API}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_kanban_boards',
-          sort: { created_at: 'desc' },
-          limit: 50
-        })
+      const res = await vibeRequest('/query', {
+        collection: 'agent_kanban_boards',
+        sort: { created_at: 'desc' },
+        limit: 50
       });
 
       if (!res.ok) {
@@ -114,15 +125,11 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     }
 
     try {
-      const res = await fetch(`${VIBE_API}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_kanban_tasks',
-          filter: { board_id: boardId },
-          sort: { created_at: 'desc' },
-          limit: 100
-        })
+      const res = await vibeRequest('/query', {
+        collection: 'agent_kanban_tasks',
+        filter: { board_id: boardId },
+        sort: { created_at: 'desc' },
+        limit: 100
       });
 
       if (!res.ok) {
@@ -144,16 +151,12 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
 
   createTask: async (task) => {
     try {
-      const res = await fetch(`${VIBE_API}/insert`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_kanban_tasks',
-          data: {
-            ...task,
-            created_at: new Date().toISOString()
-          }
-        })
+      const res = await vibeRequest('/insert', {
+        collection: 'agent_kanban_tasks',
+        data: {
+          ...task,
+          created_at: new Date().toISOString()
+        }
       });
 
       if (!res.ok) {
@@ -185,17 +188,13 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
     }
 
     try {
-      const res = await fetch(`${VIBE_API}/update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_kanban_tasks',
-          filter: { id: taskId },
-          data: {
-            ...updates,
-            updated_at: new Date().toISOString()
-          }
-        })
+      const res = await vibeRequest('/update', {
+        collection: 'agent_kanban_tasks',
+        filter: { id: taskId },
+        data: {
+          ...updates,
+          updated_at: new Date().toISOString()
+        }
       });
 
       if (!res.ok) {
@@ -239,13 +238,9 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
 
   deleteTask: async (taskId) => {
     try {
-      const res = await fetch(`${VIBE_API}/delete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_kanban_tasks',
-          filter: { id: taskId }
-        })
+      const res = await vibeRequest('/delete', {
+        collection: 'agent_kanban_tasks',
+        filter: { id: taskId }
       });
 
       if (!res.ok) {

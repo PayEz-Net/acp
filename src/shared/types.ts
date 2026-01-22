@@ -100,6 +100,92 @@ export interface KanbanState {
   error?: string;
 }
 
+// Autonomy stop conditions
+export type StopCondition = 'milestone' | 'blocker' | 'time';
+
+// Autonomy status from backend
+export interface AutonomyStatus {
+  enabled: boolean;
+  specId?: number;
+  specTitle?: string;
+  milestone?: string;
+  stopCondition: StopCondition;
+  maxRuntimeHours: number;
+  notifyPhone?: string;
+  skipPermissions?: boolean;
+  startedAt?: string;
+  elapsedMinutes?: number;
+}
+
+// Standup entry event types
+export type StandupEventType =
+  | 'completed'
+  | 'blocked'
+  | 'started'
+  | 'review_requested'
+  | 'review_passed'
+  | 'review_failed'
+  | 'milestone_done';
+
+// Standup entry from backend
+export interface StandupEntry {
+  id: number;
+  agent: string;
+  event_type: StandupEventType;
+  summary: string;
+  task_id?: number;
+  created_at: string;
+}
+
+// Standup filter options
+export interface StandupFilters {
+  agents: string[];
+  eventTypes: StandupEventType[];
+  since: 'today' | '24h' | '7d' | 'custom';
+  customSince?: string;
+}
+
+// Document types
+export type DocumentType = 'spec' | 'report' | 'review' | 'plan' | 'other';
+
+// Agent document from Vibe SQL
+export interface AgentDocument {
+  id: number;
+  title: string;
+  content_md: string;
+  type: DocumentType;
+  author_agent?: string;
+  version: number;
+  parent_document_id?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+// Document version history
+export interface DocumentVersion {
+  id: number;
+  document_id: number;
+  version: number;
+  content_md: string;
+  author_agent?: string;
+  created_at: string;
+  change_summary?: string;
+}
+
+// Notification types
+export type NotificationType = 'mail' | 'task' | 'review' | 'mention' | 'system';
+
+export interface Notification {
+  id: number;
+  type: NotificationType;
+  title: string;
+  message: string;
+  agent?: string;
+  link?: string;
+  read: boolean;
+  created_at: string;
+}
+
 // App settings persisted to disk
 export interface AppSettings {
   layout: LayoutMode;
@@ -115,6 +201,8 @@ export interface AppSettings {
   };
   sidebarWidth: number;
   showSidebar: boolean;
+  mailPushEnabled: boolean;
+  mailPushUrl: string;
 }
 
 // IPC channel names
@@ -131,11 +219,61 @@ export const IPC_CHANNELS = {
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
 
+  // Auth (main process handles IDP calls + token storage)
+  AUTH_LOGIN: 'auth:login',
+  AUTH_LOGOUT: 'auth:logout',
+  AUTH_REFRESH: 'auth:refresh',
+  AUTH_GET_STATUS: 'auth:getStatus',
+  AUTH_SEND_2FA: 'auth:send2fa',
+  AUTH_VERIFY_2FA: 'auth:verify2fa',
+
+  // OAuth
+  OAUTH_OPEN_URL: 'oauth:openUrl',
+  OAUTH_CALLBACK: 'oauth:callback',
+
   // Window
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',
 } as const;
+
+// Auth types for IPC
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  roles: string[];
+}
+
+export interface AuthStatus {
+  isAuthenticated: boolean;
+  user: AuthUser | null;
+  requires2FA: boolean;
+  twoFactorComplete: boolean;
+  expiresAt: string | null;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface LoginResult {
+  success: boolean;
+  error?: string;
+  requires2FA?: boolean;
+  available2FAMethods?: string[];
+}
+
+export interface TwoFactorRequest {
+  code: string;
+  method: 'email' | 'sms';
+}
+
+export interface TwoFactorResult {
+  success: boolean;
+  error?: string;
+}
 
 // Default settings
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -152,4 +290,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   windowBounds: { x: 100, y: 100, width: 1600, height: 900 },
   sidebarWidth: 280,
   showSidebar: true,
+  mailPushEnabled: true,
+  mailPushUrl: 'https://api.idealvibe.online',
 };

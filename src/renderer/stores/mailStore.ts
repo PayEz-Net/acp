@@ -1,8 +1,22 @@
 import { create } from 'zustand';
 import { MailMessage, AgentMailbox } from '@shared/types';
+import { getAuthToken } from '../services/api';
 
-const VIBE_API = 'https://api.idealvibe.online/api/vibe';
-const USE_MOCK_DATA = true; // TODO: Set false when API CORS is configured
+const VIBE_API = 'http://localhost:37933/api/vibe';
+const USE_MOCK_DATA = false;
+
+// Helper to make authenticated requests
+async function vibeRequest(endpoint: string, body: unknown) {
+  const token = getAuthToken();
+  return fetch(`${VIBE_API}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+}
 
 // Mock data for demo
 const MOCK_MESSAGES: Record<string, MailMessage[]> = {
@@ -103,15 +117,11 @@ export const useMailStore = create<MailStore>((set, get) => ({
     }
 
     try {
-      const res = await fetch(`${VIBE_API}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_messages',
-          filter: { to_agent: agent },
-          sort: { created_at: 'desc' },
-          limit: 50
-        })
+      const res = await vibeRequest('/query', {
+        collection: 'agent_messages',
+        filter: { to_agent: agent },
+        sort: { created_at: 'desc' },
+        limit: 50
       });
 
       if (!res.ok) {
@@ -142,20 +152,16 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
   sendMessage: async (from, to, subject, body) => {
     try {
-      const res = await fetch(`${VIBE_API}/insert`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          collection: 'agent_messages',
-          data: {
-            from_agent: from,
-            to_agent: to,
-            subject,
-            body,
-            is_read: false,
-            created_at: new Date().toISOString()
-          }
-        }),
+      const res = await vibeRequest('/insert', {
+        collection: 'agent_messages',
+        data: {
+          from_agent: from,
+          to_agent: to,
+          subject,
+          body,
+          is_read: false,
+          created_at: new Date().toISOString()
+        }
       });
 
       if (!res.ok) {
@@ -177,14 +183,10 @@ export const useMailStore = create<MailStore>((set, get) => ({
 // Mark message as read on server
 export async function markMessageRead(messageId: number): Promise<boolean> {
   try {
-    const res = await fetch(`${VIBE_API}/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        collection: 'agent_messages',
-        filter: { message_id: messageId },
-        data: { is_read: true, read_at: new Date().toISOString() }
-      })
+    const res = await vibeRequest('/update', {
+      collection: 'agent_messages',
+      filter: { message_id: messageId },
+      data: { is_read: true, read_at: new Date().toISOString() }
     });
     return res.ok;
   } catch (err) {
