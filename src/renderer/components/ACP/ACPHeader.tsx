@@ -26,6 +26,7 @@ export function ACPHeader({ onToggleMail, onToggleKanban, showMail, showKanban }
             onClick={togglePause}
             className="p-2 hover:bg-slate-800 rounded-lg transition-colors group"
             title={isPaused ? 'Resume Simulation' : 'Pause Simulation'}
+            aria-label={isPaused ? 'Resume Simulation' : 'Pause Simulation'}
           >
             {isPaused ? (
               <svg className="w-5 h-5 text-slate-400 group-hover:text-white" fill="currentColor" viewBox="0 0 24 24">
@@ -40,6 +41,7 @@ export function ACPHeader({ onToggleMail, onToggleKanban, showMail, showKanban }
           <button
             className="p-2 hover:bg-slate-800 rounded-lg transition-colors group"
             title="Restart Simulation"
+            aria-label="Restart Simulation"
           >
             <svg className="w-5 h-5 text-slate-400 group-hover:text-white" fill="currentColor" viewBox="0 0 24 24">
               <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z" />
@@ -70,6 +72,7 @@ export function ACPHeader({ onToggleMail, onToggleKanban, showMail, showKanban }
                 : 'text-slate-400 hover:bg-slate-800 hover:text-white'
             }`}
             title={showMail ? 'Hide Mail' : 'Show Mail'}
+            aria-label={showMail ? 'Hide Mail' : 'Show Mail'}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
@@ -87,6 +90,7 @@ export function ACPHeader({ onToggleMail, onToggleKanban, showMail, showKanban }
                 : 'text-slate-400 hover:bg-slate-800 hover:text-white'
             }`}
             title={showKanban ? 'Hide Kanban' : 'Show Kanban'}
+            aria-label={showKanban ? 'Hide Kanban' : 'Show Kanban'}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />

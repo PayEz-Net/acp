@@ -145,6 +145,7 @@ export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
           <button
             onClick={onClose}
             className="p-1 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors"
+            aria-label="Close panel"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -180,6 +181,7 @@ export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
                 : 'bg-yellow-600 hover:bg-yellow-500 text-white'
             }`}
             title={agent.status === 'paused' ? 'Resume' : 'Pause'}
+            aria-label={agent.status === 'paused' ? 'Resume agent' : 'Pause agent'}
           >
             {agent.status === 'paused' ? (
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
@@ -274,6 +276,7 @@ export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
               onClick={handleSend}
               disabled={!inputValue.trim()}
               className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg transition-colors"
+              aria-label="Send message"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
