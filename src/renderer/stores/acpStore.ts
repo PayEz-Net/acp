@@ -52,7 +52,7 @@ const createInitialAgents = (): ACPAgent[] => {
     position.y += (Math.random() - 0.5) * 8;
 
     return {
-      id: config.agentName.toLowerCase(),
+      id: char, // Use character name (sage, forge, pixel, nova, raven)
       character: char,
       agentName: config.agentName,
       position,
