@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { useACPStore } from '../../stores/acpStore';
 import { AgentSprite } from './AgentSprite';
+import { PARTY_THRESHOLDS } from '@shared/types';
 
 // Table component for work zones
 function WorkTable({
@@ -142,7 +144,24 @@ function Entrance() {
 }
 
 export function ACPCanvas() {
-  const { agents, selectAgent, selectedAgentId } = useACPStore();
+  const {
+    agents,
+    selectAgent,
+    selectedAgentId,
+    startSimulation,
+    simulationRunning,
+    getRelevanceBetween,
+  } = useACPStore();
+
+  // Start simulation on mount
+  useEffect(() => {
+    if (!simulationRunning) {
+      startSimulation();
+    }
+    return () => {
+      // Don't stop on unmount to preserve state
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAgentClick = (agentId: string) => {
     selectAgent(selectedAgentId === agentId ? null : agentId);
@@ -154,6 +173,37 @@ export function ACPCanvas() {
       selectAgent(null);
     }
   };
+
+  // Get relevance pairs for drawing lines
+  const getRelevancePairs = () => {
+    const pairs: Array<{
+      from: typeof agents[0];
+      to: typeof agents[0];
+      score: number;
+      isMingling: boolean;
+    }> = [];
+
+    for (let i = 0; i < agents.length; i++) {
+      for (let j = i + 1; j < agents.length; j++) {
+        const agentA = agents[i];
+        const agentB = agents[j];
+        const relevance = getRelevanceBetween(agentA.id, agentB.id);
+
+        if (relevance && relevance.score >= PARTY_THRESHOLDS.APPROACH) {
+          pairs.push({
+            from: agentA,
+            to: agentB,
+            score: relevance.score,
+            isMingling: agentA.minglingWith === agentB.id,
+          });
+        }
+      }
+    }
+
+    return pairs;
+  };
+
+  const relevancePairs = getRelevancePairs();
 
   return (
     <div
@@ -177,6 +227,52 @@ export function ACPCanvas() {
       {/* Entrance */}
       <Entrance />
 
+      {/* Relevance connection lines */}
+      <svg className="absolute inset-0 pointer-events-none" style={{ zIndex: 30 }}>
+        <defs>
+          <linearGradient id="relevanceGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.6" />
+            <stop offset="50%" stopColor="#8b5cf6" stopOpacity="0.8" />
+            <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.6" />
+          </linearGradient>
+        </defs>
+        {relevancePairs.map(({ from, to, score, isMingling }) => {
+          // Calculate line opacity based on score
+          const opacity = Math.min(0.8, (score - PARTY_THRESHOLDS.APPROACH) / 60 + 0.3);
+          const strokeWidth = isMingling ? 3 : 1.5;
+
+          return (
+            <g key={`${from.id}-${to.id}`}>
+              <line
+                x1={`${from.position.x}%`}
+                y1={`${from.position.y}%`}
+                x2={`${to.position.x}%`}
+                y2={`${to.position.y}%`}
+                stroke={isMingling ? 'url(#relevanceGradient)' : `rgba(6, 182, 212, ${opacity})`}
+                strokeWidth={strokeWidth}
+                strokeDasharray={isMingling ? '8 4' : '2 4'}
+                className={isMingling ? 'animate-dash' : ''}
+              />
+              {/* Score label at midpoint for high relevance */}
+              {score >= PARTY_THRESHOLDS.MINGLE && (
+                <text
+                  x={`${(from.position.x + to.position.x) / 2}%`}
+                  y={`${(from.position.y + to.position.y) / 2}%`}
+                  fill="rgba(6, 182, 212, 0.8)"
+                  fontSize="10"
+                  fontWeight="bold"
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  className="font-mono"
+                >
+                  {score}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
       {/* Agent Sprites */}
       {agents.map((agent) => (
         <AgentSprite
@@ -185,30 +281,6 @@ export function ACPCanvas() {
           onClick={() => handleAgentClick(agent.id)}
         />
       ))}
-
-      {/* Mingle connection lines */}
-      <svg className="absolute inset-0 pointer-events-none" style={{ zIndex: 30 }}>
-        {agents
-          .filter((a) => a.minglingWith)
-          .map((agent) => {
-            const target = agents.find((a) => a.id === agent.minglingWith);
-            if (!target || agent.id > target.id) return null; // Avoid duplicate lines
-
-            return (
-              <line
-                key={`${agent.id}-${target.id}`}
-                x1={`${agent.position.x}%`}
-                y1={`${agent.position.y}%`}
-                x2={`${target.position.x}%`}
-                y2={`${target.position.y}%`}
-                stroke="rgba(6, 182, 212, 0.5)"
-                strokeWidth="2"
-                strokeDasharray="4 4"
-                className="animate-pulse"
-              />
-            );
-          })}
-      </svg>
     </div>
   );
 }

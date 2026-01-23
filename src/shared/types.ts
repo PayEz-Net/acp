@@ -453,6 +453,88 @@ export const ACP_CHARACTERS: Record<ACPCharacter, ACPCharacterConfig> = {
   },
 };
 
+// ============================================
+// Cocktail Party Algorithm Types
+// ============================================
+
+// Agent broadcast signal (what they're working on, needs, offers)
+export interface AgentSignal {
+  agentId: string;
+  agentName: string;
+  partyName: string; // Display name (Sage, Forge, etc.)
+  location: ACPZone;
+  workingOn: string;
+  keywords: string[];
+  needs: string[];
+  offers: string[];
+  timestamp: Date;
+}
+
+// Pairwise relevance score between two agents
+export interface RelevanceScore {
+  agentA: string;
+  agentB: string;
+  score: number;
+  breakdown: {
+    needsOffersMatch: number; // A needs what B offers
+    offersNeedsMatch: number; // B needs what A offers
+    keywordOverlap: number;   // Shared keywords
+  };
+}
+
+// Interaction types at the party
+export type InteractionType = 'gossip' | 'chit_chat' | 'deep_talk';
+
+// Mingle session between two agents
+export interface MingleSession {
+  id: string;
+  agents: [string, string];
+  type: InteractionType;
+  startTime: Date;
+  endTime?: Date;
+  outcome?: 'useful' | 'not_useful' | 'pending';
+  topic?: string;
+}
+
+// Agent's memory of another agent (for relevance scoring)
+export interface AgentRelevanceMemory {
+  observerAgent: string;
+  subjectAgent: string;
+  domainTags: string[];
+  typicalOffers: string[];
+  typicalNeeds: string[];
+  recentKeywords: string[];
+  lastBroadcastTs: Date;
+  totalMingles: number;
+  successfulMingles: number;
+  lastMingleTs?: Date;
+  lastMingleOutcome?: 'useful' | 'not_useful' | 'pending';
+  baseRelevance: number;
+  recentRelevance: number;
+  interactionScore: number;
+  combinedScore: number;
+}
+
+// Party state for the simulation
+export interface PartyState {
+  signals: Map<string, AgentSignal>;
+  relevanceMatrix: Map<string, RelevanceScore>;
+  activeMingles: MingleSession[];
+  isPaused: boolean;
+  lastUpdate: Date;
+}
+
+// Thresholds for the algorithm
+export const PARTY_THRESHOLDS = {
+  MINGLE: 60,           // Score needed to trigger mingle
+  APPROACH: 40,         // Score needed to start drifting toward
+  CHIT_CHAT: 40,        // Min score for quick exchange
+  DEEP_TALK: 70,        // Min score for lounge conversation
+  NEEDS_OFFERS: 50,     // Points for A needs what B offers
+  OFFERS_NEEDS: 40,     // Points for B needs what A offers
+  KEYWORD_MATCH: 10,    // Points per keyword overlap
+};
+
 // Default zone configurations
 export const ACP_ZONES: ACPZoneConfig[] = [
   { id: 'table-db', label: 'DB Architecture', bounds: { x: 5, y: 8, width: 20, height: 15 } },

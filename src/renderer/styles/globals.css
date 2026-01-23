@@ -169,6 +169,7 @@ html, body, #root {
   }
 }
 
-.mingle-line {
+.mingle-line,
+.animate-dash {
   animation: dash 0.5s linear infinite;
 }
