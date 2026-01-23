@@ -17,6 +17,8 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
 
   const {
     selectedMessage,
+    selectedMessageActions,
+    selectedMessageSuggested,
     isComposing,
     replyTo,
     totalUnread,
@@ -26,6 +28,7 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
     selectMessage,
     setComposing,
     sendMessage,
+    executeAction,
     refresh,
   } = useMail({
     agents: agentNames,
@@ -109,8 +112,11 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
         {selectedMessage ? (
           <MailDetail
             message={selectedMessage}
+            actions={selectedMessageActions}
+            suggested={selectedMessageSuggested}
             onClose={() => selectMessage(null)}
             onReply={handleReply}
+            onAction={executeAction}
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">

@@ -1,20 +1,22 @@
 import { create } from 'zustand';
-import { MailMessage, AgentMailbox } from '@shared/types';
+import { MailMessage, AgentMailbox, PanelAction } from '@shared/types';
 import { getAuthToken } from '../services/api';
 
-const VIBE_API = 'http://localhost:37933/api/vibe';
+const AGENT_MAIL_API = 'http://localhost:37933/v1/agentmail';
 const USE_MOCK_DATA = false;
 
-// Helper to make authenticated requests
-async function vibeRequest(endpoint: string, body: unknown) {
+// Helper to make authenticated requests to Agent Mail API
+async function mailRequest(endpoint: string, options: { method?: string; body?: unknown } = {}) {
   const token = getAuthToken();
-  return fetch(`${VIBE_API}${endpoint}`, {
-    method: 'POST',
+  const { method = 'GET', body } = options;
+
+  return fetch(`${AGENT_MAIL_API}${endpoint}`, {
+    method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify(body),
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
 }
 
@@ -36,15 +38,23 @@ const MOCK_MESSAGES: Record<string, MailMessage[]> = {
   ],
 };
 
+// Extended mailbox state with ActionPanel fields
+interface ExtendedMailbox extends AgentMailbox {
+  actions?: PanelAction[];
+  suggested?: string;
+}
+
 interface MailStore {
   // State per agent
-  mailboxes: Record<string, AgentMailbox>;
+  mailboxes: Record<string, ExtendedMailbox>;
   selectedMessage: MailMessage | null;
+  selectedMessageActions?: PanelAction[];
+  selectedMessageSuggested?: string;
   isComposing: boolean;
   replyTo: MailMessage | null;
 
   // Actions
-  setMailbox: (agent: string, mailbox: Partial<AgentMailbox>) => void;
+  setMailbox: (agent: string, mailbox: Partial<ExtendedMailbox>) => void;
   selectMessage: (message: MailMessage | null) => void;
   setComposing: (isComposing: boolean, replyTo?: MailMessage | null) => void;
   markAsRead: (messageId: number) => void;
@@ -52,12 +62,16 @@ interface MailStore {
   // API actions
   fetchInbox: (agent: string) => Promise<void>;
   fetchAllInboxes: (agents: string[]) => Promise<void>;
+  fetchMessage: (messageId: number) => Promise<void>;
   sendMessage: (from: string, to: string, subject: string, body: string) => Promise<boolean>;
+  executeAction: (action: PanelAction) => Promise<void>;
 }
 
 export const useMailStore = create<MailStore>((set, get) => ({
   mailboxes: {},
   selectedMessage: null,
+  selectedMessageActions: undefined,
+  selectedMessageSuggested: undefined,
   isComposing: false,
   replyTo: null,
 
@@ -76,7 +90,12 @@ export const useMailStore = create<MailStore>((set, get) => ({
     };
   }),
 
-  selectMessage: (message) => set({ selectedMessage: message, isComposing: false }),
+  selectMessage: (message) => set({
+    selectedMessage: message,
+    selectedMessageActions: undefined,
+    selectedMessageSuggested: undefined,
+    isComposing: false,
+  }),
 
   setComposing: (isComposing, replyTo = null) => set({
     isComposing,
@@ -117,24 +136,29 @@ export const useMailStore = create<MailStore>((set, get) => ({
     }
 
     try {
-      const res = await vibeRequest('/query', {
-        collection: 'agent_messages',
-        filter: { to_agent: agent },
-        sort: { created_at: 'desc' },
-        limit: 50
-      });
+      // Call the new ActionPanel-formatted endpoint
+      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}`);
 
       if (!res.ok) {
         throw new Error(`Failed to fetch: ${res.status}`);
       }
 
-      const data = await res.json();
-      const messages: MailMessage[] = data.items || [];
+      const response = await res.json();
+
+      // Parse ActionPanel response format
+      // { success, data: { agent, messages }, pagination, actions, suggested }
+      if (!response.success) {
+        throw new Error(response.error || 'Request failed');
+      }
+
+      const messages: MailMessage[] = response.data?.messages || [];
 
       setMailbox(agent, {
         messages,
         unreadCount: messages.filter((m) => !m.is_read).length,
         loading: false,
+        actions: response.actions,
+        suggested: response.suggested,
       });
     } catch (err) {
       console.error(`[Mail] Failed to fetch inbox for ${agent}:`, err);
@@ -150,22 +174,54 @@ export const useMailStore = create<MailStore>((set, get) => ({
     await Promise.all(agents.map((agent) => fetchInbox(agent)));
   },
 
+  fetchMessage: async (messageId) => {
+    try {
+      const res = await mailRequest(`/messages/${messageId}`);
+
+      if (!res.ok) {
+        throw new Error(`Failed to fetch message: ${res.status}`);
+      }
+
+      const response = await res.json();
+
+      if (!response.success) {
+        throw new Error(response.error || 'Request failed');
+      }
+
+      // ActionPanel response: { success, data: { ...message }, actions, suggested, context }
+      const message: MailMessage = response.data;
+
+      set({
+        selectedMessage: message,
+        selectedMessageActions: response.actions,
+        selectedMessageSuggested: response.suggested,
+        isComposing: false,
+      });
+    } catch (err) {
+      console.error(`[Mail] Failed to fetch message ${messageId}:`, err);
+    }
+  },
+
   sendMessage: async (from, to, subject, body) => {
     try {
-      const res = await vibeRequest('/insert', {
-        collection: 'agent_messages',
-        data: {
+      const res = await mailRequest('/send', {
+        method: 'POST',
+        body: {
           from_agent: from,
           to_agent: to,
           subject,
           body,
-          is_read: false,
-          created_at: new Date().toISOString()
-        }
+        },
       });
 
       if (!res.ok) {
         throw new Error(`Failed to send: ${res.status}`);
+      }
+
+      const response = await res.json();
+
+      if (!response.success) {
+        throw new Error(response.error || 'Send failed');
       }
 
       // Refresh recipient's inbox
@@ -178,17 +234,62 @@ export const useMailStore = create<MailStore>((set, get) => ({
       return false;
     }
   },
+
+  executeAction: async (action) => {
+    const { fetchInbox, fetchMessage, setComposing, selectedMessage } = get();
+
+    console.log('[Mail] Executing action:', action.action, action.params);
+
+    switch (action.action) {
+      case 'read':
+        if (action.params?.id) {
+          await fetchMessage(action.params.id as number);
+        }
+        break;
+
+      case 'reply':
+        if (selectedMessage) {
+          setComposing(true, selectedMessage);
+        }
+        break;
+
+      case 'compose':
+        setComposing(true, null);
+        break;
+
+      case 'archive':
+      case 'mark_read':
+        if (action.params?.id) {
+          await markMessageRead(action.params.id as number);
+          // Refresh the inbox for the message recipient
+          if (selectedMessage) {
+            await fetchInbox(selectedMessage.to_agent);
+          }
+        }
+        break;
+
+      case 'check_inbox':
+        // Refresh all mailboxes
+        const agents = Object.keys(get().mailboxes);
+        await Promise.all(agents.map(agent => fetchInbox(agent)));
+        break;
+
+      default:
+        console.warn(`[Mail] Unknown action: ${action.action}`);
+    }
+  },
 }));
 
 // Mark message as read on server
 export async function markMessageRead(messageId: number): Promise<boolean> {
   try {
-    const res = await vibeRequest('/update', {
-      collection: 'agent_messages',
-      filter: { message_id: messageId },
-      data: { is_read: true, read_at: new Date().toISOString() }
-    });
-    return res.ok;
+    const res = await mailRequest(`/inbox/${messageId}/read`, { method: 'POST' });
+    if (!res.ok) {
+      throw new Error(`Failed to mark as read: ${res.status}`);
+    }
+
+    const response = await res.json();
+    return response.success;
   } catch (err) {
     console.error('[Mail] Failed to mark as read:', err);
     return false;

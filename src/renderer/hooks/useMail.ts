@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useMailStore, markMessageRead } from '../stores/mailStore';
-import { MailMessage } from '@shared/types';
+import { MailMessage, PanelAction } from '@shared/types';
 
 interface UseMailOptions {
   agents: string[];
@@ -12,13 +12,17 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   const {
     mailboxes,
     selectedMessage,
+    selectedMessageActions,
+    selectedMessageSuggested,
     isComposing,
     replyTo,
     fetchAllInboxes,
+    fetchMessage,
     selectMessage,
     setComposing,
     markAsRead,
     sendMessage,
+    executeAction,
   } = useMailStore();
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -42,17 +46,28 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     };
   }, [agents.join(','), pollInterval, enabled, fetchAllInboxes]);
 
-  // Handle message selection and mark as read
+  // Handle message selection - fetch full message with actions
   const handleSelectMessage = useCallback(async (message: MailMessage | null) => {
-    selectMessage(message);
+    if (message) {
+      // Fetch full message with ActionPanel response
+      await fetchMessage(message.message_id);
 
-    if (message && !message.is_read) {
-      const success = await markMessageRead(message.message_id);
-      if (success) {
-        markAsRead(message.message_id);
+      // Mark as read if unread
+      if (!message.is_read) {
+        const success = await markMessageRead(message.message_id);
+        if (success) {
+          markAsRead(message.message_id);
+        }
       }
+    } else {
+      selectMessage(null);
     }
-  }, [selectMessage, markAsRead]);
+  }, [fetchMessage, selectMessage, markAsRead]);
+
+  // Handle executing an action from the ActionPanel
+  const handleExecuteAction = useCallback(async (action: PanelAction) => {
+    await executeAction(action);
+  }, [executeAction]);
 
   // Refresh manually
   const refresh = useCallback(() => {
@@ -84,6 +99,8 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     // State
     mailboxes,
     selectedMessage,
+    selectedMessageActions,
+    selectedMessageSuggested,
     isComposing,
     replyTo,
     totalUnread,
@@ -97,6 +114,7 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     selectMessage: handleSelectMessage,
     setComposing,
     sendMessage,
+    executeAction: handleExecuteAction,
     refresh,
   };
 }

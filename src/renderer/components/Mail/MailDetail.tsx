@@ -1,13 +1,29 @@
-import { MailMessage } from '@shared/types';
-import { X, Reply, Clock, User } from 'lucide-react';
+import { MailMessage, PanelAction } from '@shared/types';
+import { X, Clock, User, AlertTriangle, Flag } from 'lucide-react';
+import { ActionButton } from '../ACP/ActionPanel';
 
 interface MailDetailProps {
   message: MailMessage;
+  actions?: PanelAction[];
+  suggested?: string;
   onClose: () => void;
   onReply: () => void;
+  onAction?: (action: PanelAction) => void;
 }
 
-export function MailDetail({ message, onClose, onReply }: MailDetailProps) {
+type Priority = 'high' | 'flagged' | 'normal';
+
+function getMessagePriority(message: MailMessage): Priority {
+  if (message.from_agent === 'BAPert' || message.subject.startsWith('TASK:')) {
+    return 'high';
+  }
+  if (message.subject.startsWith('CHANGES:')) {
+    return 'flagged';
+  }
+  return 'normal';
+}
+
+export function MailDetail({ message, actions, suggested, onClose, onReply, onAction }: MailDetailProps) {
   const date = new Date(message.created_at);
   const formattedDate = date.toLocaleString('en-US', {
     month: 'short',
@@ -15,30 +31,44 @@ export function MailDetail({ message, onClose, onReply }: MailDetailProps) {
     hour: 'numeric',
     minute: '2-digit',
   });
+  const priority = getMessagePriority(message);
+
+  const handleAction = (action: PanelAction) => {
+    if (action.action === 'reply') {
+      onReply();
+    } else if (onAction) {
+      onAction(action);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full bg-slate-900">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-        <h3 className="text-sm font-semibold text-slate-200 truncate flex-1">
-          {message.subject}
-        </h3>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={onReply}
-            className="p-1.5 text-slate-400 hover:text-violet-400 hover:bg-slate-800 rounded transition-colors"
-            title="Reply"
-          >
-            <Reply className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
-            title="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          {priority === 'high' && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-bold bg-red-500/20 text-red-400 rounded shrink-0">
+              <AlertTriangle className="w-3 h-3" />
+              HIGH
+            </span>
+          )}
+          {priority === 'flagged' && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-bold bg-orange-500/20 text-orange-400 rounded shrink-0">
+              <Flag className="w-3 h-3" />
+              CHANGES
+            </span>
+          )}
+          <h3 className="text-sm font-semibold text-slate-200 truncate">
+            {message.subject}
+          </h3>
         </div>
+        <button
+          onClick={onClose}
+          className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors shrink-0"
+          title="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
       </div>
 
       {/* Meta */}
@@ -65,6 +95,43 @@ export function MailDetail({ message, onClose, onReply }: MailDetailProps) {
           {message.body}
         </pre>
       </div>
+
+      {/* Actions bar */}
+      {actions && actions.length > 0 && (
+        <div className="border-t border-slate-700 px-4 py-3 space-y-3">
+          {/* Suggested action hint */}
+          {suggested && (
+            <div className="text-xs text-cyan-400 font-mono">
+              Suggested: {suggested}
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap gap-2">
+            {actions.map((action, idx) => (
+              <ActionButton
+                key={`${action.action}-${idx}`}
+                action={action}
+                onExecute={() => handleAction(action)}
+                isSuggested={suggested?.toLowerCase().includes(action.action.toLowerCase())}
+                size="sm"
+              />
+            ))}
+          </div>
+
+          {/* Keyboard hints */}
+          {actions.some(a => a.key) && (
+            <div className="flex flex-wrap gap-2 text-[10px] text-slate-500">
+              {actions.filter(a => a.key).map((action, idx) => (
+                <span key={idx}>
+                  <kbd className="px-1 py-0.5 bg-slate-800 rounded text-slate-400 font-mono">{action.key}</kbd>
+                  {' '}{action.action}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

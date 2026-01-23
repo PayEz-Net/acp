@@ -1,5 +1,5 @@
 import { MailMessage } from '@shared/types';
-import { Mail, MailOpen } from 'lucide-react';
+import { Mail, MailOpen, AlertTriangle, Flag } from 'lucide-react';
 
 interface MailItemProps {
   message: MailMessage;
@@ -7,12 +7,25 @@ interface MailItemProps {
   onClick: () => void;
 }
 
+type Priority = 'high' | 'flagged' | 'normal';
+
+function getMessagePriority(message: MailMessage): Priority {
+  // From BAPert or TASK: prefix = high priority
+  if (message.from_agent === 'BAPert' || message.subject.startsWith('TASK:')) {
+    return 'high';
+  }
+  // CHANGES: prefix = flagged (needs attention)
+  if (message.subject.startsWith('CHANGES:')) {
+    return 'flagged';
+  }
+  return 'normal';
+}
+
 export function MailItem({ message, isSelected, onClick }: MailItemProps) {
   const isUnread = !message.is_read;
   const timeAgo = formatTimeAgo(message.created_at);
-
-  // Check if from BAPert (priority)
-  const isPriority = message.from_agent === 'BAPert';
+  const priority = getMessagePriority(message);
+  const isPriority = priority === 'high';
 
   return (
     <button
@@ -53,14 +66,28 @@ export function MailItem({ message, isSelected, onClick }: MailItemProps) {
             <span className="text-xs text-slate-500 whitespace-nowrap">{timeAgo}</span>
           </div>
 
-          {/* Subject */}
-          <p
-            className={`text-sm truncate mt-0.5 ${
-              isUnread ? 'text-slate-200' : 'text-slate-400'
-            }`}
-          >
-            {message.subject}
-          </p>
+          {/* Subject with priority badge */}
+          <div className="flex items-center gap-1.5 mt-0.5">
+            {priority === 'high' && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-bold bg-red-500/20 text-red-400 rounded">
+                <AlertTriangle className="w-3 h-3" />
+                HIGH
+              </span>
+            )}
+            {priority === 'flagged' && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-bold bg-orange-500/20 text-orange-400 rounded">
+                <Flag className="w-3 h-3" />
+                CHANGES
+              </span>
+            )}
+            <p
+              className={`text-sm truncate flex-1 ${
+                isUnread ? 'text-slate-200' : 'text-slate-400'
+              }`}
+            >
+              {message.subject}
+            </p>
+          </div>
         </div>
       </div>
     </button>
