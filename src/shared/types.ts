@@ -545,3 +545,116 @@ export const ACP_ZONES: ACPZoneConfig[] = [
   { id: 'lounge', label: 'Lounge', bounds: { x: 60, y: 60, width: 35, height: 30 } },
   { id: 'entrance', label: 'Entrance', bounds: { x: 35, y: 88, width: 30, height: 10 } },
 ];
+
+// ============================================
+// Action Panel Protocol Types
+// ============================================
+
+/**
+ * A single action that can be taken from an ActionPanel.
+ * Actions are pre-filled with params so agents don't need to remember syntax.
+ */
+export interface PanelAction {
+  /** The action verb/command to execute */
+  action: string;
+
+  /** Pre-filled parameters for this action */
+  params?: Record<string, unknown>;
+
+  /** Human-readable hint explaining why you'd do this */
+  hint: string;
+
+  /** Optional keyboard shortcut (e.g., "1", "c", "Enter") */
+  key?: string;
+
+  /** If true, requires confirmation before executing */
+  destructive?: boolean;
+
+  /** If true, action is currently unavailable */
+  disabled?: boolean;
+
+  /** Explanation for why action is disabled */
+  disabledReason?: string;
+
+  /** Optional icon name (lucide-react icon) */
+  icon?: string;
+}
+
+/**
+ * An ActionPanel wraps MCP tool responses with available actions.
+ * Every MCP response should be an ActionPanel so agents know what to do next.
+ */
+export interface ActionPanel<T = unknown> {
+  /** The data that was requested */
+  data: T;
+
+  /** Available actions on this data */
+  actions: PanelAction[];
+
+  /** Suggested next action (best action for common case) */
+  suggested?: string;
+
+  /** Additional context for decision-making */
+  context?: Record<string, unknown>;
+
+  /** Optional title for the panel */
+  title?: string;
+
+  /** Optional status message */
+  status?: 'success' | 'error' | 'warning' | 'info';
+
+  /** Optional status message text */
+  statusMessage?: string;
+}
+
+// Common ActionPanel data types for type safety
+
+/** Mail inbox data from check_mail */
+export interface MailInboxData {
+  unread: number;
+  total: number;
+  messages: Array<{
+    id: number;
+    from: string;
+    subject: string;
+    priority?: 'high' | 'normal' | 'low';
+    preview?: string;
+    timestamp?: string;
+  }>;
+}
+
+/** Single message data from read_mail */
+export interface MailMessageData {
+  id: number;
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  timestamp: string;
+  attachments?: Array<{
+    name: string;
+    path: string;
+  }>;
+}
+
+/** Kanban task data from get_task */
+export interface KanbanTaskData {
+  id: number;
+  title: string;
+  description?: string;
+  status: KanbanLane;
+  assignedTo?: string;
+  priority: KanbanPriority;
+  labels?: string[];
+  dueDate?: string;
+}
+
+/** File data from read_file */
+export interface FileData {
+  path: string;
+  content: string;
+  lines: number;
+  language?: string;
+  recentlyModified?: boolean;
+  uncommittedChanges?: boolean;
+}
