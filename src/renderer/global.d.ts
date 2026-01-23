@@ -1,4 +1,4 @@
-import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult } from '@shared/types';
+import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, VibeCredentials } from '@shared/types';
 
 export {};
 
@@ -33,6 +33,9 @@ declare global {
       // OAuth
       openOAuthUrl: (url: string) => Promise<void>;
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
+
+      // Vibe credentials (HMAC auth for Agent Mail)
+      getVibeCredentials: () => Promise<VibeCredentials>;
     };
   }
 }

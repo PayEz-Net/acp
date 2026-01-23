@@ -1,21 +1,96 @@
 import { create } from 'zustand';
 import { MailMessage, AgentMailbox, PanelAction } from '@shared/types';
-import { getAuthToken } from '../services/api';
 
 const AGENT_MAIL_API = 'http://localhost:37933/v1/agentmail';
 const USE_MOCK_DATA = false;
 
+// -----------------------------------------------------------------------------
+// HMAC Authentication (Client ID + Signature - free tier pattern)
+// -----------------------------------------------------------------------------
+
+// Cache credentials to avoid repeated IPC calls
+let credentialsCache: { clientId: string; hmacKey: string } | null = null;
+
+// Get credentials from electron store or environment
+async function getVibeCredentials(): Promise<{ clientId: string; hmacKey: string }> {
+  // Return cached credentials if available
+  if (credentialsCache) {
+    return credentialsCache;
+  }
+
+  // In Electron, get credentials from main process via preload
+  if (window.electronAPI?.getVibeCredentials) {
+    try {
+      const creds = await window.electronAPI.getVibeCredentials();
+      credentialsCache = creds;
+      return creds;
+    } catch (err) {
+      console.error('[Mail] Failed to get Vibe credentials:', err);
+    }
+  }
+
+  // Fallback: check if injected globally (for testing)
+  const global = window as unknown as { VIBE_CLIENT_ID?: string; VIBE_HMAC_KEY?: string };
+  return {
+    clientId: global.VIBE_CLIENT_ID || '',
+    hmacKey: global.VIBE_HMAC_KEY || '',
+  };
+}
+
+/**
+ * Generate HMAC-SHA256 signature using Web Crypto API
+ * Payload format: {timestamp}|{METHOD}|{path}
+ */
+async function generateHmacSignature(secret: string, payload: string): Promise<string> {
+  const encoder = new TextEncoder();
+
+  // DotNetPert said key is base64 encoded, so decode it first
+  const keyData = Uint8Array.from(atob(secret), c => c.charCodeAt(0));
+  const messageData = encoder.encode(payload);
+
+  // Import the secret as an HMAC key
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  // Sign the payload
+  const signature = await crypto.subtle.sign('HMAC', key, messageData);
+
+  // Convert to base64
+  const bytes = new Uint8Array(signature);
+  let binary = '';
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary);
+}
+
 // Helper to make authenticated requests to Agent Mail API
 async function mailRequest(endpoint: string, options: { method?: string; body?: unknown } = {}) {
-  const token = getAuthToken();
   const { method = 'GET', body } = options;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  // Add HMAC auth headers
+  const { clientId, hmacKey } = await getVibeCredentials();
+  if (clientId && hmacKey) {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signaturePayload = `${timestamp}|${method}|${endpoint}`;
+
+    try {
+      const signature = await generateHmacSignature(hmacKey, signaturePayload);
+      headers['X-Vibe-Client-Id'] = clientId;
+      headers['X-Vibe-Timestamp'] = timestamp.toString();
+      headers['X-Vibe-Signature'] = signature;
+    } catch (err) {
+      console.error('[Mail] HMAC signature generation failed:', err);
+    }
+  }
 
   return fetch(`${AGENT_MAIL_API}${endpoint}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-    },
+    headers,
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
 }

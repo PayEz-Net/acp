@@ -203,6 +203,9 @@ export interface AppSettings {
   showSidebar: boolean;
   mailPushEnabled: boolean;
   mailPushUrl: string;
+  // Vibe API credentials (HMAC auth for free tier)
+  vibeClientId?: string;
+  vibeHmacKey?: string;
 }
 
 // IPC channel names
@@ -235,7 +238,16 @@ export const IPC_CHANNELS = {
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',
+
+  // Vibe credentials (Client ID + HMAC key for free tier auth)
+  VIBE_GET_CREDENTIALS: 'vibe:getCredentials',
 } as const;
+
+// Vibe credentials type
+export interface VibeCredentials {
+  clientId: string;
+  hmacKey: string;
+}
 
 // Auth types for IPC
 export interface AuthUser {

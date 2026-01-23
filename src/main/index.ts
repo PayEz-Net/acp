@@ -103,6 +103,16 @@ function setupIpcHandlers() {
 
   // PTY handlers
   setupPtyHandlers(mainWindow);
+
+  // Vibe credentials handler (HMAC auth for Agent Mail)
+  ipcMain.handle(IPC_CHANNELS.VIBE_GET_CREDENTIALS, () => {
+    // Get credentials from environment variables or settings
+    const settings = getSettings();
+    return {
+      clientId: process.env.VIBE_CLIENT_ID || settings.vibeClientId || '',
+      hmacKey: process.env.VIBE_HMAC_KEY || settings.vibeHmacKey || '',
+    };
+  });
 }
 
 // App lifecycle

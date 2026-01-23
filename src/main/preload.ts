@@ -8,6 +8,7 @@ import {
   LoginResult,
   TwoFactorRequest,
   TwoFactorResult,
+  VibeCredentials,
 } from '../shared/types';
 
 // Expose protected methods to renderer via contextBridge
@@ -98,6 +99,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on(IPC_CHANNELS.OAUTH_CALLBACK, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.OAUTH_CALLBACK, handler);
   },
+
+  // Vibe credentials (HMAC auth for Agent Mail)
+  getVibeCredentials: (): Promise<VibeCredentials> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.VIBE_GET_CREDENTIALS);
+  },
 });
 
 // Type declaration for renderer
@@ -125,6 +131,8 @@ declare global {
       // OAuth
       openOAuthUrl: (url: string) => Promise<void>;
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
+      // Vibe credentials
+      getVibeCredentials: () => Promise<VibeCredentials>;
     };
   }
 }
