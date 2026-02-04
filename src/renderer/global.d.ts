@@ -29,6 +29,7 @@ declare global {
       authRefresh: () => Promise<{ success: boolean; error?: string }>;
       authSend2FA: (method: 'email' | 'sms') => Promise<{ success: boolean; error?: string }>;
       authVerify2FA: (request: TwoFactorRequest) => Promise<TwoFactorResult>;
+      authGetAccessToken: () => Promise<string | null>;
 
       // OAuth
       openOAuthUrl: (url: string) => Promise<void>;

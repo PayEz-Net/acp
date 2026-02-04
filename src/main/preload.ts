@@ -89,6 +89,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.AUTH_VERIFY_2FA, request);
   },
 
+  authGetAccessToken: (): Promise<string | null> => {
+    return ipcRenderer.invoke('auth:getAccessToken');
+  },
+
   // OAuth
   openOAuthUrl: (url: string): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.OAUTH_OPEN_URL, url);
@@ -128,6 +132,7 @@ declare global {
       authRefresh: () => Promise<{ success: boolean; error?: string }>;
       authSend2FA: (method: 'email' | 'sms') => Promise<{ success: boolean; error?: string }>;
       authVerify2FA: (request: TwoFactorRequest) => Promise<TwoFactorResult>;
+      authGetAccessToken: () => Promise<string | null>;
       // OAuth
       openOAuthUrl: (url: string) => Promise<void>;
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;

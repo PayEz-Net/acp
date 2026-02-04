@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'path';
 import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
-import { setupAuthHandlers } from './auth';
+import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer } from './auth';
 import { startOAuthServer, stopOAuthServer } from './oauth-server';
 import { IPC_CHANNELS } from '../shared/types';
 
@@ -120,6 +120,9 @@ app.whenReady().then(() => {
   setupIpcHandlers();
   createWindow();
 
+  // Start background token refresh (will only refresh if user is logged in)
+  startTokenRefreshTimer();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -137,4 +140,5 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   killAllPty();
   stopOAuthServer();
+  stopTokenRefreshTimer();
 });

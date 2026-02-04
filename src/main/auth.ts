@@ -276,6 +276,12 @@ export function setupAuthHandlers(mainWindow: BrowserWindow | null): void {
     return handleVerify2FA(code, method);
   });
 
+  // Get access token (for SignalR and other authenticated calls)
+  ipcMain.handle('auth:getAccessToken', async () => {
+    const token = await ensureValidToken();
+    return token;
+  });
+
   console.log('[Auth] IPC handlers registered');
 }
 
@@ -306,4 +312,52 @@ export async function ensureValidToken(): Promise<string | null> {
   }
 
   return session.accessToken;
+}
+
+// Background token refresh timer
+let tokenRefreshTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Start background token refresh
+ * Refreshes token every 50 minutes (assuming 1-hour token lifetime)
+ */
+export function startTokenRefreshTimer(): void {
+  if (tokenRefreshTimer) {
+    clearInterval(tokenRefreshTimer);
+  }
+
+  // Refresh every 50 minutes (tokens typically last 1 hour)
+  // This ensures we refresh BEFORE expiry
+  const REFRESH_INTERVAL_MS = 50 * 60 * 1000; // 50 minutes
+
+  tokenRefreshTimer = setInterval(async () => {
+    const session = getStoredSession();
+    if (!session?.refreshToken) {
+      console.log('[Auth] No session to refresh');
+      return;
+    }
+
+    console.log('[Auth] Background token refresh triggered');
+    const result = await handleRefresh();
+
+    if (!result.success) {
+      console.error('[Auth] Background refresh failed:', result.error);
+      // Don't clear session here - let the next API call fail and handle it
+    } else {
+      console.log('[Auth] Background token refresh successful');
+    }
+  }, REFRESH_INTERVAL_MS);
+
+  console.log('[Auth] Token refresh timer started (50 min interval)');
+}
+
+/**
+ * Stop background token refresh
+ */
+export function stopTokenRefreshTimer(): void {
+  if (tokenRefreshTimer) {
+    clearInterval(tokenRefreshTimer);
+    tokenRefreshTimer = null;
+    console.log('[Auth] Token refresh timer stopped');
+  }
 }

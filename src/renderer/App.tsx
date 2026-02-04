@@ -11,6 +11,7 @@ import { useAppStore } from './stores/appStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useACPStore } from './stores/acpStore';
+import { initMailPush, resetMailPushService } from './services/mailPushService';
 
 // Default agents for demo/browser mode
 const DEFAULT_AGENTS = [
@@ -59,6 +60,45 @@ export default function App() {
     }
     loadSettings();
   }, [isAuthenticated, settingsLoaded, setSettings, setAgents]);
+
+  // Initialize mail push notifications after settings load
+  useEffect(() => {
+    if (!isAuthenticated || !settingsLoaded) return;
+
+    async function initPush() {
+      try {
+        const settings = await window.electronAPI.getSettings();
+        
+        if (!settings.mailPushEnabled) {
+          console.log('[App] Mail push disabled in settings');
+          return;
+        }
+
+        // Get agent names from settings
+        const agentNames = settings.agents.map(a => a.name);
+        
+        // Initialize push service with auth getter
+        await initMailPush(
+          async () => {
+            // Get fresh access token from main process
+            return await window.electronAPI.authGetAccessToken();
+          },
+          agentNames
+        );
+        
+        console.log('[App] Mail push notifications initialized');
+      } catch (err) {
+        console.error('[App] Failed to initialize mail push:', err);
+      }
+    }
+    
+    initPush();
+
+    // Cleanup on unmount/logout
+    return () => {
+      resetMailPushService().catch(console.error);
+    };
+  }, [isAuthenticated, settingsLoaded]);
 
   // Show splash screen on initial load
   if (showSplash) {

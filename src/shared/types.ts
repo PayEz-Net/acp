@@ -670,3 +670,55 @@ export interface FileData {
   recentlyModified?: boolean;
   uncommittedChanges?: boolean;
 }
+
+// ============================================
+// Agent Mail Push Notification Types (SignalR)
+// ============================================
+
+/** Push notification event types from Agent Mail hub */
+export type MailPushEventType = 'new_message' | 'agent_response' | 'mention' | 'high_importance';
+
+/** Payload for mail push notifications via SignalR */
+export interface MailPushNotification {
+  event_type: MailPushEventType;
+  timestamp: string;
+  notification_id: string;
+  data: {
+    message_id: number;
+    thread_id?: string;
+    inbox_id: number;
+    from_agent: string;
+    from_agent_display: string;
+    to_agent: string;
+    subject?: string;
+    preview?: string;
+    importance: 'low' | 'normal' | 'high' | 'urgent';
+    created_at: string;
+  };
+  metadata: {
+    client_id: number;
+    user_id?: number;
+  };
+}
+
+/** SignalR hub subscription status */
+export interface MailPushConnectionStatus {
+  connection_id?: string;
+  user_id?: number;
+  connected_at?: string;
+  subscribed_agents: string[];
+  state: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+}
+
+/** IPC channels for push notifications (main ↔ renderer) */
+export const PUSH_CHANNELS = {
+  // Main → Renderer
+  PUSH_NOTIFICATION: 'push:notification',
+  PUSH_CONNECTION_STATUS: 'push:connectionStatus',
+  
+  // Renderer → Main  
+  PUSH_CONNECT: 'push:connect',
+  PUSH_DISCONNECT: 'push:disconnect',
+  PUSH_SUBSCRIBE: 'push:subscribe',
+  PUSH_UNSUBSCRIBE: 'push:unsubscribe',
+} as const;
