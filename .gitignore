@@ -1,0 +1,10 @@
+node_modules/
+.acp/
+dist/
+build/
+*.log
+.env
+.env.*
+coverage/
+.acp-test-*/ 
+package-lock.json

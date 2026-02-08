@@ -1,0 +1,152 @@
+import { Router } from 'express';
+import { success, error } from '../response.js';
+import { createBroadcast, listBroadcasts } from '../../collaboration/broadcast.js';
+import { sendChat, createCluster, getCluster, getClusterMessages } from '../../collaboration/chat.js';
+import { sendMail, getInbox, markRead, markAllRead, archiveMail } from '../../collaboration/mail.js';
+
+export default function messagingRoutes(storage) {
+  const router = Router();
+
+  router.post('/broadcast', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_broadcast';
+      const id = await createBroadcast(storage, req.body);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ id }, 'msg_broadcast', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/chat', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_chat';
+      const id = await sendChat(storage, req.body);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ id }, 'msg_chat', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/mail', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_mail';
+      const id = await sendMail(storage, req.body);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ id }, 'msg_mail', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/inbox/:agent', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_inbox';
+      const unreadOnly = req.query.unread === 'true';
+      const messages = await getInbox(storage, req.params.agent, { unreadOnly });
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(messages, 'msg_inbox', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/broadcasts', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_broadcasts';
+      const channel = req.query.channel || null;
+      const broadcasts = await listBroadcasts(storage, channel);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(broadcasts, 'msg_broadcasts', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/clusters/:id', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_cluster_get';
+      const cluster = await getCluster(storage, req.params.id);
+      if (!cluster) {
+        return res.status(404).json(error('CLUSTER_NOT_FOUND', `Cluster "${req.params.id}" not found`, 'msg_cluster_get', req.requestId));
+      }
+      const messages = await getClusterMessages(storage, req.params.id);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ cluster, messages }, 'msg_cluster_get', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/clusters', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_cluster_create';
+      const cluster = await createCluster(storage, req.body);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(cluster, 'msg_cluster_create', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/inbox/:agent/read', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_mark_all_read';
+      await markAllRead(storage, req.params.agent);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ agent: req.params.agent }, 'msg_mark_all_read', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/:id/archive', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_archive';
+      await archiveMail(storage, req.params.id);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ id: req.params.id, archived: true }, 'msg_archive', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/:id', async (req, res, next) => {
+    try {
+      req.operationCode = 'msg_read';
+      const messages = await storage.getMessages({});
+      const msg = messages.find((m) => String(m.id) === req.params.id);
+      if (!msg) {
+        return res.status(404).json(error('NOT_FOUND', `Message ${req.params.id} not found`, 'msg_read', req.requestId));
+      }
+      await markRead(storage, msg.id);
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({ ...msg, isRead: true }, 'msg_read', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return router;
+}
