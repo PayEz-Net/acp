@@ -1,6 +1,7 @@
 import { getSignalRClient, AgentMailSignalRClient } from './signalrClient';
 import { useMailStore } from '../stores/mailStore';
 import { useNotificationStore } from '../stores/notificationStore';
+import { useAppStore } from '../stores/appStore';
 import { MailPushNotification, NotificationType } from '@shared/types';
 
 /**
@@ -142,6 +143,18 @@ export class MailPushService {
 
     // 4. Browser/Electron notification (if supported)
     this.showNativeNotification(notification);
+
+    // 5. Inject into agent's terminal PTY
+    if (data.to_agent) {
+      const { injectMessage } = useAppStore.getState();
+      const message = this.formatTerminalNotification({
+        messageId: data.message_id,
+        from: data.from_agent,
+        subject: data.subject || data.preview || 'New message',
+        timestamp: data.created_at || new Date().toISOString(),
+      });
+      injectMessage(data.to_agent, message);
+    }
   }
 
   /**
@@ -213,6 +226,25 @@ export class MailPushService {
       default:
         return `Message from ${fromAgent}`;
     }
+  }
+
+  /**
+   * Format ANSI-colored notification box for terminal display
+   */
+  private formatTerminalNotification(mail: { messageId: number; from: string; subject: string; timestamp: string }): string {
+    const lines = [
+      '',
+      '\x1b[35m╔════════════════════════════════════════════════════════╗\x1b[0m',
+      `\x1b[35m║\x1b[0m  \x1b[1;35m[NEW MAIL]\x1b[0m ID: ${mail.messageId}`,
+      `\x1b[35m║\x1b[0m  From: \x1b[1;36m${mail.from}\x1b[0m`,
+      `\x1b[35m║\x1b[0m  Subject: ${mail.subject}`,
+      '\x1b[35m╠════════════════════════════════════════════════════════╣\x1b[0m',
+      `\x1b[35m║\x1b[0m  \x1b[36mReply: /send-mail ${mail.from} "RE: ${mail.subject}"\x1b[0m`,
+      `\x1b[35m║\x1b[0m  \x1b[36mRead:  /read-mail ${mail.messageId}\x1b[0m`,
+      '\x1b[35m╚════════════════════════════════════════════════════════╝\x1b[0m',
+      '',
+    ];
+    return lines.map(line => line + '\r\n').join('');
   }
 
   /**
