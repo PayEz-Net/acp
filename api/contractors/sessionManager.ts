@@ -29,6 +29,8 @@ export class SessionManager {
   private contractorCmd: string;
   private queueTimeoutMin: number;
 
+  private queueCheckInterval: ReturnType<typeof setInterval> | null = null;
+
   constructor(storage: any, eventBus: LocalEventBus, cfg: any) {
     this.storage = storage;
     this.eventBus = eventBus;
@@ -37,6 +39,11 @@ export class SessionManager {
     this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'claude';
     this.queueTimeoutMin = parseInt(process.env.ACP_QUEUE_TIMEOUT_MINUTES || String(DEFAULT_QUEUE_TIMEOUT_MIN), 10);
     this.processMonitor = new ProcessMonitor(storage, eventBus, cfg, () => this.drainQueue());
+
+    // F-2 fix: periodic queue drain + timeout check (every 60s)
+    this.queueCheckInterval = setInterval(() => {
+      this.drainQueue().catch(() => {});
+    }, 60_000);
   }
 
   /** Expose process monitor for output/kill/status queries. */

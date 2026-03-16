@@ -1,5 +1,8 @@
 import { type ChildProcess } from 'node:child_process';
 import { execSync } from 'node:child_process';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 
 const RING_BUFFER_SIZE = 100;
@@ -13,6 +16,7 @@ interface TrackedProcess {
   child: ChildProcess;
   outputLines: string[];
   lastSseEmit: number;
+  startedAt: number; // F-6 fix: capture spawn time, not Node internals
 }
 
 /**
@@ -20,6 +24,7 @@ interface TrackedProcess {
  */
 export class ProcessMonitor {
   private processes = new Map<number, TrackedProcess>();
+  private completedOutputs = new Map<number, { lines: string[]; truncated: boolean }>(); // F-3 fix
   private storage: any;
   private eventBus: LocalEventBus;
   private onSlotFreed: () => void;
@@ -51,6 +56,7 @@ export class ProcessMonitor {
       child,
       outputLines: [],
       lastSseEmit: 0,
+      startedAt: Date.now(),
     };
 
     this.processes.set(contractId, tracked);
@@ -110,9 +116,7 @@ export class ProcessMonitor {
 
   private async handleExit(tracked: TrackedProcess, code: number): Promise<void> {
     const now = new Date().toISOString();
-    const durationMs = tracked.child.exitCode !== null
-      ? Date.now() - (tracked.child as any)._startTime
-      : 0;
+    const durationMs = Date.now() - tracked.startedAt; // F-6 fix
 
     // Update DB
     try {
@@ -153,8 +157,20 @@ export class ProcessMonitor {
       },
     });
 
-    // Cleanup
+    // F-3 fix: preserve output buffer after exit (persists until ACP restart)
+    this.completedOutputs.set(tracked.contractId, {
+      lines: [...tracked.outputLines],
+      truncated: tracked.outputLines.length >= RING_BUFFER_SIZE,
+    });
+
+    // Cleanup running process entry
     this.processes.delete(tracked.contractId);
+
+    // F-4 fix: clean up temp workspace
+    try {
+      const workDir = join(tmpdir(), `acp-contractor-${tracked.contractId}`);
+      await rm(workDir, { recursive: true, force: true });
+    } catch { /* non-fatal */ }
 
     // Notify session manager to drain queue
     this.onSlotFreed();
@@ -189,14 +205,18 @@ export class ProcessMonitor {
 
   /**
    * Get output ring buffer for a contract.
+   * F-3 fix: checks completed outputs if process is no longer running.
    */
   getOutput(contractId: number): { lines: string[]; truncated: boolean } {
     const tracked = this.processes.get(contractId);
-    if (!tracked) return { lines: [], truncated: false };
-    return {
-      lines: [...tracked.outputLines],
-      truncated: tracked.outputLines.length >= RING_BUFFER_SIZE,
-    };
+    if (tracked) {
+      return {
+        lines: [...tracked.outputLines],
+        truncated: tracked.outputLines.length >= RING_BUFFER_SIZE,
+      };
+    }
+    // Check completed outputs (persisted until ACP restart)
+    return this.completedOutputs.get(contractId) || { lines: [], truncated: false };
   }
 
   /**

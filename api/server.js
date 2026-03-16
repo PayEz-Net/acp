@@ -183,7 +183,7 @@ export async function createApp(cfg) {
   app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus));
-  app.use('/v1/contractors', contractorRoutes(contractorService, appConfig));
+  app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, sessionManager));
   app.use('/v1/contracts', contractRoutes(contractorService, sessionManager));
 
   // Autonomy supervisor — created at server level for hook integration

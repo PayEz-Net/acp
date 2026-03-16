@@ -367,8 +367,12 @@ export class ContractorService {
   /**
    * List contracts with agent data. Runs on-read expiry check when fetching active or all.
    * @param status - 'active' (default), 'completed', or 'all'
+   * @param onExpire - optional callback to kill running sessions for expired contracts (F-1 fix)
    */
-  async listContracts(status: 'active' | 'completed' | 'all' = 'active'): Promise<any[]> {
+  async listContracts(
+    status: 'active' | 'completed' | 'all' = 'active',
+    onExpire?: (contractId: number) => void,
+  ): Promise<any[]> {
     // On-read expiry check — expire timed-out contracts (only relevant when viewing active)
     if (status === 'active' || status === 'all') {
       const expired = await this.storage.expireContracts();
@@ -377,6 +381,10 @@ export class ContractorService {
           event: 'contractor-expired',
           data: { contract_id: c.id, contractor_agent_id: c.contractorAgentId },
         });
+        // F-1 fix: kill running session if contract had one
+        if (onExpire && c.sessionPid) {
+          try { onExpire(c.id); } catch { /* non-fatal */ }
+        }
       }
     }
 

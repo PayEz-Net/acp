@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { ContractorService } from '../contractors/service.js';
+import type { SessionManager } from '../contractors/sessionManager.js';
 import type { Config } from '../../config.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
@@ -30,7 +31,7 @@ async function fetchCloudInbox(cfg: Config, agentName: string): Promise<any[]> {
   }
 }
 
-export default function contractorRoutes(contractorService: ContractorService, cfg?: Config): Router {
+export default function contractorRoutes(contractorService: ContractorService, cfg?: Config, sessionManager?: SessionManager): Router {
   const router = Router();
 
   // GET /v1/contractors/pool — list available profiles from pool directories
@@ -52,7 +53,8 @@ export default function contractorRoutes(contractorService: ContractorService, c
         res.status(400).json(error('VALIDATION_ERROR', 'status must be active, completed, or all', 'contractors_active', (req as any).requestId));
         return;
       }
-      const contracts = await contractorService.listContracts(status as 'active' | 'completed' | 'all');
+      const killSession = sessionManager ? (id: number) => sessionManager.monitor.killSession(id) : undefined;
+      const contracts = await contractorService.listContracts(status as 'active' | 'completed' | 'all', killSession);
       res.json(success(contracts, 'contractors_active', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'contractors_active', (req as any).requestId));
