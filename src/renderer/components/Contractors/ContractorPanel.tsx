@@ -218,12 +218,18 @@ function ProfileCard({
   const { agent, contract } = contractor;
   const profile = contract.profile_snapshot;
   const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState('');
 
   const handleComplete = async () => {
     setCompleting(true);
+    setCompleteError('');
     const success = await onComplete(contract.id);
     setCompleting(false);
-    if (success) onBack();
+    if (success) {
+      onBack();
+    } else {
+      setCompleteError('Failed to complete contract. Try again.');
+    }
   };
 
   return (
@@ -307,6 +313,11 @@ function ProfileCard({
             <CheckCircle className="w-4 h-4" />
             {completing ? 'Completing...' : 'Mark Complete'}
           </button>
+        )}
+        {completeError && (
+          <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/50 rounded px-2 py-1">
+            {completeError}
+          </div>
         )}
 
         {contract.completed_at && (
@@ -397,10 +408,14 @@ function PoolProfileItem({
     setHiring(true);
     setError('');
     try {
-      // D-1: Use active agent identity, not hardcoded fallback
       const { agents, activeAgentId } = useAppStore.getState();
       const activeAgent = agents.find(a => a.id === activeAgentId);
-      const fromAgent = activeAgent?.name || agents[0]?.name || 'BAPert';
+      const fromAgent = activeAgent?.name || agents[0]?.name;
+      if (!fromAgent) {
+        setError('No agent identity available. Open a terminal pane first.');
+        setHiring(false);
+        return;
+      }
 
       const secret = await window.electronAPI.getLocalSecret();
       const res = await fetch('http://127.0.0.1:3001/v1/mail/send', {
@@ -421,11 +436,13 @@ function PoolProfileItem({
         useContractorStore.getState().fetchActive();
         onClose();
       } else {
-        // D-4: Show error inline (e.g. 409 max contracts)
-        const errBody = await res.json().catch(() => ({ error: { message: `Error ${res.status}` } }));
-        const msg = errBody?.error?.message || errBody?.message || `Request failed (${res.status})`;
+        const errBody = await res.json().catch(() => null);
+        const serverMsg = errBody?.error?.message || errBody?.message;
+        const msg = res.status === 409
+          ? serverMsg || 'Max 3 active contracts. Complete or cancel an existing contract first.'
+          : serverMsg || `Request failed (${res.status})`;
         setError(msg);
-        console.error('[Contractors] Hire failed:', msg);
+        console.error('[Contractors] Hire failed:', res.status, msg);
       }
     } catch (err) {
       setError('Network error — backend may be unavailable');
