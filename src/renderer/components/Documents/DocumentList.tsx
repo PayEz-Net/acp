@@ -1,10 +1,7 @@
 import { useState, useMemo } from 'react';
 import {
-  FileText,
   Search,
   Download,
-  Eye,
-  Edit,
   ChevronDown,
   Check,
 } from 'lucide-react';
@@ -37,7 +34,6 @@ const allTypes: DocumentType[] = ['spec', 'report', 'review', 'plan', 'other'];
 export function DocumentList({
   documents,
   onSelect,
-  onEdit,
   onDownload,
   selectedIds = [],
   onSelectionChange,
@@ -110,11 +106,6 @@ export function DocumentList({
     } else {
       onSelectionChange([...selectedIds, id]);
     }
-  };
-
-  const selectAll = () => {
-    if (!onSelectionChange) return;
-    onSelectionChange(filteredDocuments.map((d) => d.id));
   };
 
   const clearSelection = () => {

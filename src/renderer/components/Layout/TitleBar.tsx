@@ -1,4 +1,4 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, MessageSquare, User, FolderOpen, Briefcase } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, User, FolderOpen, Briefcase } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useMailStore } from '../../stores/mailStore';

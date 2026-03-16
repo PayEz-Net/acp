@@ -311,35 +311,6 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     await startAgent();
   }, [stopAgent, startAgent]);
 
-  // Legacy restart via acp-api (unused — keeping restartAgent simple above)
-  const _restartViaLifecycle = useCallback(async () => {
-    if (backendAvailable) {
-      updateAgentStatus(agent.id, 'starting');
-      try {
-        const secret = await window.electronAPI.getLocalSecret();
-        const res = await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/restart`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
-          },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || data.error?.message || `Restart failed: ${res.status}`);
-        const extractId = (d: any) => d?.terminal_id || d?.terminalId;
-        const terminalId = extractId(data.data) || extractId(data);
-        if (terminalId) setAgentTerminalId(agent.id, terminalId);
-        updateAgentStatus(agent.id, 'ready');
-      } catch (err) {
-        console.error('Failed to restart agent:', err);
-        updateAgentStatus(agent.id, 'error');
-      }
-    } else {
-      await stopAgent();
-      setTimeout(startAgent, 500);
-    }
-  }, [agent.id, agent.name, backendAvailable, updateAgentStatus, setAgentTerminalId, stopAgent, startAgent]);
-
   // Auto-start if configured
   useEffect(() => {
     if (agent.autoStart && agent.status === 'offline' && !agent.terminalId) {
