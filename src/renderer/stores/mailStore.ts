@@ -170,6 +170,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
   fetchInbox: async (agent) => {
     const { setMailbox } = get();
+    console.log(`[Mail] fetchInbox(${agent}) — backendAvailable: ${isBackendAvailable()}`);
     setMailbox(agent, { loading: true, error: undefined });
 
     // Use mock data for demo

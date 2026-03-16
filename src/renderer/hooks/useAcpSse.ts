@@ -52,7 +52,9 @@ export function useAcpSse() {
   const lastPingRef = useRef<number>(0);
 
   useEffect(() => {
+    console.log(`[AcpSse] Effect fired — backendAvailable: ${backendAvailable}, agents: ${agents.length}`);
     if (!backendAvailable) {
+      console.log('[AcpSse] Skipping — backend not available');
       connectionStateRef.current = 'disconnected';
       return;
     }

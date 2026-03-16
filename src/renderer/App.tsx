@@ -52,6 +52,28 @@ export default function App() {
     loadSettings();
   }, [isAuthenticated, settingsLoaded, setSettings, setAgents]);
 
+  // Bootstrap backend status — query main process and listen for changes
+  useEffect(() => {
+    if (!window.electronAPI?.getBackendStatus) {
+      console.warn('[App] electronAPI.getBackendStatus not available');
+      return;
+    }
+
+    // Initial check
+    window.electronAPI.getBackendStatus().then(({ available }) => {
+      console.log(`[App] Backend status on boot: ${available}`);
+      useAppStore.getState().setBackendAvailable(available);
+    }).catch(err => console.error('[App] Failed to get backend status:', err));
+
+    // Listen for crash recovery / status changes from main process
+    const unsubscribe = window.electronAPI.onBackendStatusChanged(({ available, message }) => {
+      console.log(`[App] Backend status changed: ${available}${message ? ` (${message})` : ''}`);
+      useAppStore.getState().setBackendAvailable(available);
+    });
+
+    return unsubscribe;
+  }, []);
+
   // Phase 1b: Single centralized SSE connection through acp-api
   useAcpSse();
 

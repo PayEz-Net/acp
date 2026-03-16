@@ -29,9 +29,11 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
 
   // Initial fetch and polling
   useEffect(() => {
+    console.log(`[useMail] Effect — enabled: ${enabled}, agents: [${agents.join(', ')}]`);
     if (!enabled || agents.length === 0) return;
 
     // Initial fetch
+    console.log(`[useMail] Starting initial fetch + ${pollInterval}ms polling for ${agents.length} agents`);
     fetchAllInboxes(agents);
 
     // Set up polling
