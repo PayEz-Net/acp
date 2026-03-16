@@ -33,6 +33,10 @@ export interface AgentContract {
   profile_snapshot?: ContractorProfile;
   timeout_hours: number;
   cancel_reason?: string;
+  session_pid?: number;
+  session_started_at?: string;
+  session_ended_at?: string;
+  exit_code?: number;
   created_at: string;
   completed_at?: string;
 }
@@ -40,6 +44,11 @@ export interface AgentContract {
 export interface ActiveContractor {
   agent: ContractorAgent;
   contract: AgentContract;
+}
+
+export interface ContractOutput {
+  lines: string[];
+  truncated: boolean;
 }
 
 export interface ContractMailMessage {
@@ -101,12 +110,17 @@ interface ContractorStore {
   completeContract: (contractId: number) => Promise<boolean>;
   cancelContract: (contractId: number, reason?: string) => Promise<boolean>;
   fetchContractMail: (agentName: string, contractId: number) => Promise<ContractMailMessage[]>;
+  fetchContractOutput: (contractId: number) => Promise<ContractOutput>;
 
   // SSE handlers
   handleContractorHired: (data: Record<string, unknown>) => void;
   handleContractorCompleted: (data: Record<string, unknown>) => void;
   handleContractorExpired: (data: Record<string, unknown>) => void;
   handleContractorCancelled: (data: Record<string, unknown>) => void;
+  handleContractorQueued: (data: Record<string, unknown>) => void;
+  handleSessionStarted: (data: Record<string, unknown>) => void;
+  handleSessionOutput: (data: Record<string, unknown>) => void;
+  handleSessionExited: (data: Record<string, unknown>) => void;
 }
 
 export const useContractorStore = create<ContractorStore>((set, get) => ({
@@ -192,6 +206,19 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     }
   },
 
+  fetchContractOutput: async (contractId) => {
+    if (!useAppStore.getState().backendAvailable) return { lines: [], truncated: false };
+    try {
+      const res = await contractRequest(`/${contractId}/output`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const data = await res.json();
+      return (data.data || { lines: [], truncated: false }) as ContractOutput;
+    } catch (err) {
+      console.error('[Contractors] Failed to fetch contract output:', err);
+      return { lines: [], truncated: false };
+    }
+  },
+
   // SSE: new contractor hired — refresh list
   handleContractorHired: (_data) => {
     get().fetchActive();
@@ -209,6 +236,26 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
 
   // SSE: contract cancelled — refresh list
   handleContractorCancelled: (_data) => {
+    get().fetchActive();
+  },
+
+  // SSE: contract queued (at capacity) — refresh list
+  handleContractorQueued: (_data) => {
+    get().fetchActive();
+  },
+
+  // SSE: session spawned — refresh list
+  handleSessionStarted: (_data) => {
+    get().fetchActive();
+  },
+
+  // SSE: session output line — no refresh, handled by component
+  handleSessionOutput: (_data) => {
+    // Handled directly by SessionOutputLog component via event bus
+  },
+
+  // SSE: session exited — refresh list
+  handleSessionExited: (_data) => {
     get().fetchActive();
   },
 }));

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { X, RefreshCw, UserPlus, CheckCircle, Clock, AlertCircle, Briefcase, XCircle, Mail } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { X, RefreshCw, UserPlus, CheckCircle, Clock, AlertCircle, Briefcase, XCircle, Mail, Terminal } from 'lucide-react';
 import { useContractorStore, ActiveContractor, ContractorProfile, ContractMailMessage } from '../../stores/contractorStore';
 import { useAppStore } from '../../stores/appStore';
 
@@ -101,7 +101,8 @@ function ContractorList({
   onSelect: (c: ActiveContractor) => void;
 }) {
   const active = contractors.filter(c => c.contract.status === 'active');
-  const done = contractors.filter(c => c.contract.status !== 'active');
+  const queued = contractors.filter(c => c.contract.status === 'queued');
+  const done = contractors.filter(c => !['active', 'queued'].includes(c.contract.status));
 
   if (loading && contractors.length === 0) {
     return <div className="p-4 text-sm text-slate-500">Loading...</div>;
@@ -129,6 +130,16 @@ function ContractorList({
           ))}
         </div>
       )}
+      {queued.length > 0 && (
+        <div className="p-2">
+          <div className="text-xs font-medium text-slate-500 uppercase tracking-wider px-2 py-1">
+            Queued ({queued.length})
+          </div>
+          {queued.map((c, i) => (
+            <ContractorListItem key={c.contract.id} contractor={c} onSelect={onSelect} queuePosition={i + 1} />
+          ))}
+        </div>
+      )}
       {done.length > 0 && (
         <div className="p-2">
           <div className="text-xs font-medium text-slate-500 uppercase tracking-wider px-2 py-1">
@@ -148,13 +159,14 @@ function ContractorList({
 function ContractorListItem({
   contractor,
   onSelect,
+  queuePosition,
 }: {
   contractor: ActiveContractor;
   onSelect: (c: ActiveContractor) => void;
+  queuePosition?: number;
 }) {
   const { agent, contract } = contractor;
   const profile = contract.profile_snapshot;
-  const isActive = contract.status === 'active';
 
   return (
     <button
@@ -163,7 +175,8 @@ function ContractorListItem({
     >
       <div className="flex items-center gap-2">
         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-          isActive ? 'bg-emerald-400' :
+          contract.status === 'active' ? 'bg-emerald-400' :
+          contract.status === 'queued' ? 'bg-blue-400' :
           contract.status === 'completed' ? 'bg-slate-500' :
           contract.status === 'expired' ? 'bg-amber-500' :
           'bg-red-500'
@@ -172,6 +185,9 @@ function ContractorListItem({
           {agent.display_name || agent.name}
         </span>
         <StatusBadge status={contract.status} />
+        {queuePosition != null && (
+          <span className="text-[10px] text-blue-400 ml-auto flex-shrink-0">#{queuePosition}</span>
+        )}
       </div>
       {profile?.description && (
         <p className="text-xs text-slate-500 mt-0.5 ml-4 truncate">{profile.description}</p>
@@ -398,6 +414,11 @@ function ProfileCard({
           </div>
         )}
 
+        {/* Session output (active/queued contracts with a session) */}
+        {(contract.status === 'active' || contract.status === 'queued') && (
+          <SessionOutputLog contractId={contract.id} hasSession={!!contract.session_pid} />
+        )}
+
         {/* Mail thread */}
         <ContractMailThread messages={mailThread} loading={mailLoading} />
       </div>
@@ -460,6 +481,110 @@ function ContractMailThread({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// --- Session Output Log ---
+
+function SessionOutputLog({
+  contractId,
+  hasSession,
+}: {
+  contractId: number;
+  hasSession: boolean;
+}) {
+  const [lines, setLines] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const linesRef = useRef<string[]>([]);
+  const rafRef = useRef<number>(0);
+
+  // Fetch initial output
+  useEffect(() => {
+    if (!hasSession) return;
+    setLoading(true);
+    useContractorStore.getState().fetchContractOutput(contractId)
+      .then(output => {
+        linesRef.current = output.lines;
+        setLines(output.lines);
+      })
+      .finally(() => setLoading(false));
+  }, [contractId, hasSession]);
+
+  // Listen for session-output SSE events via store subscription
+  const appendLine = useCallback((line: string) => {
+    linesRef.current = [...linesRef.current.slice(-99), line];
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      setLines([...linesRef.current]);
+    });
+  }, []);
+
+  // Subscribe to session-output events
+  useEffect(() => {
+    if (!hasSession) return;
+    const originalHandler = useContractorStore.getState().handleSessionOutput;
+    useContractorStore.setState({
+      handleSessionOutput: (data: Record<string, unknown>) => {
+        if (data.contract_id === contractId && typeof data.line === 'string') {
+          appendLine(data.line);
+        }
+        originalHandler(data);
+      },
+    });
+    return () => {
+      useContractorStore.setState({ handleSessionOutput: originalHandler });
+    };
+  }, [contractId, hasSession, appendLine]);
+
+  // Auto-scroll
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [lines]);
+
+  if (!hasSession) {
+    return null;
+  }
+
+  return (
+    <div className="border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <Terminal className="w-3.5 h-3.5 text-slate-500" />
+          <span className="text-xs font-medium text-slate-400">Session Output</span>
+          {lines.length > 0 && (
+            <span className="text-[10px] text-slate-600">({lines.length} lines)</span>
+          )}
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+        >
+          {expanded ? 'Collapse' : 'Expand'}
+        </button>
+      </div>
+      {loading ? (
+        <div className="text-xs text-slate-500">Loading...</div>
+      ) : lines.length === 0 ? (
+        <div className="text-xs text-slate-500">Waiting for output...</div>
+      ) : (
+        <div
+          ref={scrollRef}
+          className={`bg-slate-950 rounded border border-slate-800 p-2 overflow-y-auto overflow-x-auto font-mono ${
+            expanded ? 'max-h-80' : 'max-h-32'
+          }`}
+        >
+          {lines.map((line, i) => (
+            <div key={i} className="text-[10px] text-slate-400 whitespace-pre leading-4">
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

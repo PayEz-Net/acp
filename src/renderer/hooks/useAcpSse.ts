@@ -223,6 +223,38 @@ export function useAcpSse() {
                 console.error('[AcpSse] Failed to parse contractor-cancelled event:', err);
               }
             }
+
+            if (eventType === 'contractor-queued' && data) {
+              try {
+                useContractorStore.getState().handleContractorQueued(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-queued event:', err);
+              }
+            }
+
+            if (eventType === 'session-started' && data) {
+              try {
+                useContractorStore.getState().handleSessionStarted(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse session-started event:', err);
+              }
+            }
+
+            if (eventType === 'session-output' && data) {
+              try {
+                useContractorStore.getState().handleSessionOutput(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse session-output event:', err);
+              }
+            }
+
+            if (eventType === 'session-exited' && data) {
+              try {
+                useContractorStore.getState().handleSessionExited(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse session-exited event:', err);
+              }
+            }
           }
         }
 
