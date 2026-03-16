@@ -10,6 +10,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { createConnection } from 'net';
 import { randomBytes } from 'crypto';
 import path from 'path';
+import { getCallbackPort } from './lifecycle-server';
 
 let apiProcess: ChildProcess | null = null;
 let localSecret: string | null = null;
@@ -107,6 +108,7 @@ export async function startApiServer(): Promise<boolean> {
       ...process.env,
       ACP_LOCAL_SECRET: localSecret,
       PORT: String(API_PORT),
+      ACP_CALLBACK_PORT: String(getCallbackPort() || ''),
     },
   });
 

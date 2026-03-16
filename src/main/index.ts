@@ -5,6 +5,7 @@ import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer } from './auth';
 import { startOAuthServer, stopOAuthServer } from './oauth-server';
 import { startApiServer, stopApiServer, getLocalSecret } from './api-server';
+import { startLifecycleServer, stopLifecycleServer } from './lifecycle-server';
 import { IPC_CHANNELS } from '../shared/types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -132,6 +133,10 @@ function setupIpcHandlers() {
 
 // App lifecycle
 app.whenReady().then(async () => {
+  // Start lifecycle callback server first (acp-api needs the port)
+  const cbPort = await startLifecycleServer();
+  console.log(`[ACP] Lifecycle callback server on port: ${cbPort || 'FAILED'}`);
+
   // Start ACP API server and wait for health check
   backendAvailable = await startApiServer();
   console.log(`[ACP] Backend available: ${backendAvailable}`);
@@ -175,6 +180,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   killAllPty();
   stopApiServer();
+  stopLifecycleServer();
   stopOAuthServer();
   stopTokenRefreshTimer();
 });

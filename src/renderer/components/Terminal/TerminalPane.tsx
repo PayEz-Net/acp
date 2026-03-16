@@ -5,7 +5,7 @@ import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 import { AgentState } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
-import { Play, Square, RotateCcw } from 'lucide-react';
+import { Play, Square, RotateCcw, AlertTriangle } from 'lucide-react';
 
 interface TerminalPaneProps {
   agent: AgentState;
@@ -18,9 +18,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal } = useAppStore();
-
-  // SSE push: handled by useAcpSse (Phase 1b) — single connection at App level, not per-pane
+  const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, backendAvailable } = useAppStore();
 
   // Initialize terminal
   useEffect(() => {
@@ -217,11 +215,31 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     );
   }, [agent.terminalId]);
 
-  // Start agent
+  // Start agent — route through acp-api when available, fallback to direct IPC
   const startAgent = useCallback(async () => {
     updateAgentStatus(agent.id, 'starting');
     try {
-      const terminalId = await window.electronAPI.spawnAgent(agent.name, agent.workDir);
+      let terminalId: string;
+
+      if (backendAvailable) {
+        // Phase 2: lifecycle via acp-api → callback server → node-pty
+        const secret = await window.electronAPI.getLocalSecret();
+        const res = await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/spawn`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
+          },
+          body: JSON.stringify({ workDir: agent.workDir }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Spawn failed: ${res.status}`);
+        terminalId = data.data?.terminalId || data.terminalId;
+      } else {
+        // Fallback: direct IPC to Electron main
+        terminalId = await window.electronAPI.spawnAgent(agent.name, agent.workDir);
+      }
+
       setAgentTerminalId(agent.id, terminalId);
       updateAgentStatus(agent.id, 'ready');
     } catch (err) {
@@ -231,15 +249,59 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       }
       updateAgentStatus(agent.id, 'error');
     }
-  }, [agent.id, agent.name, agent.workDir, updateAgentStatus, setAgentTerminalId]);
+  }, [agent.id, agent.name, agent.workDir, backendAvailable, updateAgentStatus, setAgentTerminalId]);
 
-  // Stop agent
-  const stopAgent = useCallback(() => {
-    if (agent.terminalId) {
-      window.electronAPI.killTerminal(agent.terminalId);
-      updateAgentStatus(agent.id, 'offline');
+  // Stop agent — route through acp-api when available
+  const stopAgent = useCallback(async () => {
+    if (!agent.terminalId) return;
+    try {
+      if (backendAvailable) {
+        const secret = await window.electronAPI.getLocalSecret();
+        await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/kill`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
+          },
+        });
+      } else {
+        window.electronAPI.killTerminal(agent.terminalId);
+      }
+    } catch (err) {
+      console.error('Failed to stop agent:', err);
+      // Fallback: direct kill
+      window.electronAPI.killTerminal(agent.terminalId!);
     }
-  }, [agent.id, agent.terminalId, updateAgentStatus]);
+    updateAgentStatus(agent.id, 'offline');
+  }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus]);
+
+  // Restart agent via acp-api (includes crash-loop backoff)
+  const restartAgent = useCallback(async () => {
+    if (backendAvailable) {
+      updateAgentStatus(agent.id, 'starting');
+      try {
+        const secret = await window.electronAPI.getLocalSecret();
+        const res = await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/restart`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
+          },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Restart failed: ${res.status}`);
+        const terminalId = data.data?.terminalId || data.terminalId;
+        if (terminalId) setAgentTerminalId(agent.id, terminalId);
+        updateAgentStatus(agent.id, 'ready');
+      } catch (err) {
+        console.error('Failed to restart agent:', err);
+        updateAgentStatus(agent.id, 'error');
+      }
+    } else {
+      await stopAgent();
+      setTimeout(startAgent, 500);
+    }
+  }, [agent.id, agent.name, backendAvailable, updateAgentStatus, setAgentTerminalId, stopAgent, startAgent]);
 
   // Auto-start if configured
   useEffect(() => {
@@ -248,13 +310,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     }
   }, [agent.autoStart, agent.status, agent.terminalId, startAgent]);
 
-  const statusColors: Record<AgentState['status'], string> = {
+  const statusColors: Record<string, string> = {
     offline: 'bg-slate-500',
     starting: 'bg-purple-500 animate-pulse',
     ready: 'bg-blue-500',
     busy: 'bg-amber-500 animate-pulse',
     idle: 'bg-green-500',
     error: 'bg-red-500',
+    failed: 'bg-red-600 animate-pulse',
   };
 
   return (
@@ -289,7 +352,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
               <Square className="w-4 h-4" />
             </button>
             <button
-              onClick={() => { stopAgent(); setTimeout(startAgent, 500); }}
+              onClick={restartAgent}
               className="p-1 text-slate-400 hover:text-amber-400 transition-colors"
               title="Restart Agent"
             >
