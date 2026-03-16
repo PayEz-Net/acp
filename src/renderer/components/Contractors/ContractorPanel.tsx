@@ -349,6 +349,13 @@ function ProfileCard({
               Cancelled: {contract.cancel_reason}
             </div>
           )}
+          {contract.session_started_at && (
+            <DurationDisplay
+              startedAt={contract.session_started_at}
+              endedAt={contract.session_ended_at}
+              status={contract.status}
+            />
+          )}
         </div>
 
         {/* Action buttons */}
@@ -481,6 +488,54 @@ function ContractMailThread({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// --- Duration Display ---
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function DurationDisplay({
+  startedAt,
+  endedAt,
+  status,
+}: {
+  startedAt: string;
+  endedAt?: string;
+  status: string;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  const isLive = !endedAt && (status === 'active' || status === 'queued');
+
+  useEffect(() => {
+    const start = new Date(startedAt).getTime();
+    const calcElapsed = () => {
+      const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+      return Math.max(0, Math.floor((end - start) / 1000));
+    };
+    setElapsed(calcElapsed());
+    if (!isLive) return;
+    const interval = setInterval(() => setElapsed(calcElapsed()), 1000);
+    return () => clearInterval(interval);
+  }, [startedAt, endedAt, isLive]);
+
+  const label = isLive ? 'Running for' : 'Completed in';
+  const color = isLive ? 'text-emerald-400' : 'text-slate-400';
+
+  return (
+    <div className="flex items-center gap-2">
+      <Clock className={`w-3.5 h-3.5 flex-shrink-0 ${color}`} />
+      <span className={`text-xs ${color}`}>
+        {label} {formatDuration(elapsed)}
+      </span>
     </div>
   );
 }
