@@ -32,6 +32,7 @@ import { ContractorService } from './contractors/service.js';
 import { SessionManager } from './contractors/sessionManager.js';
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
+import projectRoutes from './routes/projects.js';
 import { validateConfig } from './lifecycle/configValidator.js';
 
 const startTime = Date.now();
@@ -185,6 +186,7 @@ export async function createApp(cfg) {
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus));
   app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, sessionManager));
   app.use('/v1/contracts', contractRoutes(contractorService, sessionManager));
+  app.use('/v1/projects', projectRoutes(storage, localEventBus));
 
   // Autonomy supervisor — created at server level for hook integration
   const supervisor = new Supervisor(storage, appConfig);

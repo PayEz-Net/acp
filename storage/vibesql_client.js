@@ -256,6 +256,46 @@ const PHASE2A_MIGRATION = [
    END $$`,
 ];
 
+// Projects migration: new tables + FKs
+const PROJECTS_MIGRATION = [
+  // Projects table
+  `CREATE TABLE IF NOT EXISTS projects (
+     id SERIAL PRIMARY KEY,
+     name VARCHAR(200) NOT NULL UNIQUE,
+     description TEXT,
+     status VARCHAR(20) NOT NULL DEFAULT 'active'
+       CHECK (status IN ('active', 'archived', 'completed')),
+     created_at TIMESTAMPTZ DEFAULT NOW(),
+     updated_at TIMESTAMPTZ DEFAULT NOW()
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)`,
+  // App config table
+  `CREATE TABLE IF NOT EXISTS app_config (
+     key VARCHAR(100) PRIMARY KEY,
+     value TEXT NOT NULL,
+     updated_at TIMESTAMPTZ DEFAULT NOW()
+   )`,
+  // FKs on existing tables
+  `ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS project_id INTEGER`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS project_id INTEGER`,
+  `ALTER TABLE standup_entries ADD COLUMN IF NOT EXISTS project_id INTEGER`,
+  // Indexes (CREATE INDEX IF NOT EXISTS is safe)
+  `CREATE INDEX IF NOT EXISTS idx_kanban_project ON kanban_tasks(project_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_contracts_project ON agent_contracts(project_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_standups_project ON standup_entries(project_id)`,
+  // Seed Default project if none exists
+  `INSERT INTO projects (name, description) VALUES ('Default', 'Default project for existing data')
+   ON CONFLICT (name) DO NOTHING`,
+  // Seed active_project_id config if not set
+  `INSERT INTO app_config (key, value)
+   VALUES ('active_project_id', (SELECT id::TEXT FROM projects WHERE name = 'Default' LIMIT 1))
+   ON CONFLICT (key) DO NOTHING`,
+  // Backfill: assign existing rows to Default project
+  `UPDATE kanban_tasks SET project_id = (SELECT id FROM projects WHERE name = 'Default') WHERE project_id IS NULL`,
+  `UPDATE agent_contracts SET project_id = (SELECT id FROM projects WHERE name = 'Default') WHERE project_id IS NULL`,
+  `UPDATE standup_entries SET project_id = (SELECT id FROM projects WHERE name = 'Default') WHERE project_id IS NULL`,
+];
+
 export class VibeSqlClient {
   constructor(cfg) {
     this._config = cfg || defaultConfig;
@@ -297,6 +337,10 @@ export class VibeSqlClient {
     // Phase 2a migration
     for (const stmt of PHASE2A_MIGRATION) {
       try { await this._query(stmt); } catch { /* column/constraint may already exist */ }
+    }
+    // Projects migration
+    for (const stmt of PROJECTS_MIGRATION) {
+      try { await this._query(stmt); } catch { /* tables/columns may already exist */ }
     }
   }
 
@@ -558,8 +602,9 @@ export class VibeSqlClient {
 
   async createTask(task) {
     const now = new Date().toISOString();
+    const projectId = task.projectId || (await this.getActiveProjectId());
     const result = await this._query(`INSERT INTO kanban_tasks
-      (title, description, status, priority, assigned_to, created_by, spec_path, milestone, files_changed, blockers, created_at)
+      (title, description, status, priority, assigned_to, created_by, spec_path, milestone, files_changed, blockers, created_at, project_id)
       VALUES (
         ${escapeSql(task.title)},
         ${escapeSql(task.description || null)},
@@ -571,7 +616,8 @@ export class VibeSqlClient {
         ${escapeSql(task.milestone || null)},
         ${escapeJsonb(task.filesChanged || [])},
         ${escapeSql(task.blockers || null)},
-        ${escapeSql(task.createdAt || now)}
+        ${escapeSql(task.createdAt || now)},
+        ${escapeSql(projectId)}
       ) RETURNING id`);
     return result.rows[0]?.id;
   }
@@ -584,6 +630,9 @@ export class VibeSqlClient {
 
   async listTasks(filter = {}) {
     const conditions = ['1=1'];
+    // Project scoping: filter by active project
+    const projectId = filter.projectId || (await this.getActiveProjectId());
+    if (projectId) conditions.push(`project_id = ${escapeSql(projectId)}`);
     if (filter.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
       conditions.push(`status IN (${statuses.map(escapeSql).join(', ')})`);
@@ -647,19 +696,24 @@ export class VibeSqlClient {
 
   async createStandupEntry(entry) {
     const now = new Date().toISOString();
+    const projectId = entry.projectId || (await this.getActiveProjectId());
     await this._query(`INSERT INTO standup_entries
-      (agent_name, entry_type, summary, task_id, created_at)
+      (agent_name, entry_type, summary, task_id, created_at, project_id)
       VALUES (
         ${escapeSql(entry.agentName)},
         ${escapeSql(entry.entryType)},
         ${escapeSql(entry.summary)},
         ${escapeSql(entry.taskId || null)},
-        ${escapeSql(entry.createdAt || now)}
+        ${escapeSql(entry.createdAt || now)},
+        ${escapeSql(projectId)}
       )`);
   }
 
   async listStandupEntries(filter = {}) {
     const conditions = ['1=1'];
+    // Project scoping
+    const projectId = filter.projectId || (await this.getActiveProjectId());
+    if (projectId) conditions.push(`project_id = ${escapeSql(projectId)}`);
     if (filter.agentName) conditions.push(`agent_name = ${escapeSql(filter.agentName)}`);
     if (filter.entryType) conditions.push(`entry_type = ${escapeSql(filter.entryType)}`);
     const result = await this._query(
@@ -796,9 +850,10 @@ export class VibeSqlClient {
   // --- Agent Contracts ---
 
   async createContract(contract) {
+    const projectId = contract.projectId || (await this.getActiveProjectId());
     const result = await this._query(
       `INSERT INTO agent_contracts
-        (contractor_agent_id, hired_by_agent_id, contract_subject, contract_message_id, profile_source, profile_snapshot, timeout_hours)
+        (contractor_agent_id, hired_by_agent_id, contract_subject, contract_message_id, profile_source, profile_snapshot, timeout_hours, project_id)
        VALUES (
          ${escapeSql(contract.contractorAgentId)},
          ${escapeSql(contract.hiredByAgentId)},
@@ -806,7 +861,8 @@ export class VibeSqlClient {
          ${escapeSql(contract.contractMessageId || null)},
          ${escapeSql(contract.profileSource || null)},
          ${escapeJsonb(contract.profileSnapshot || null)},
-         ${escapeSql(contract.timeoutHours ?? 72)}
+         ${escapeSql(contract.timeoutHours ?? 72)},
+         ${escapeSql(projectId)}
        ) RETURNING *`
     );
     return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
@@ -820,10 +876,13 @@ export class VibeSqlClient {
     return rowToCamel(result.rows[0]);
   }
 
-  async listContracts(status = 'active') {
-    const statusFilter = status === 'all'
-      ? ''
-      : `WHERE c.status = ${escapeSql(status)}`;
+  async listContracts(status = 'active', projectId = null) {
+    const conditions = [];
+    if (status !== 'all') conditions.push(`c.status = ${escapeSql(status)}`);
+    // Project scoping
+    const pid = projectId || (await this.getActiveProjectId());
+    if (pid) conditions.push(`c.project_id = ${escapeSql(pid)}`);
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const result = await this._query(
       `SELECT c.*, a.name AS contractor_name, a.display_name AS contractor_display_name,
               a.role AS contractor_role, a.model AS contractor_model, a.expertise_json AS contractor_expertise,
@@ -831,7 +890,7 @@ export class VibeSqlClient {
        FROM agent_contracts c
        JOIN agents a ON a.id = c.contractor_agent_id
        JOIN agents h ON h.id = c.hired_by_agent_id
-       ${statusFilter}
+       ${whereClause}
        ORDER BY c.created_at DESC`
     );
     return result.rows.map(rowToCamel);
@@ -894,6 +953,59 @@ export class VibeSqlClient {
        ORDER BY created_at DESC LIMIT 1`
     );
     return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  // ── Projects + App Config ─────────────────────────────────
+
+  async listProjects() {
+    const result = await this._query(`SELECT * FROM projects ORDER BY created_at DESC`);
+    return result.rows.map(rowToCamel);
+  }
+
+  async getProject(id) {
+    const result = await this._query(`SELECT * FROM projects WHERE id = ${escapeSql(id)}`);
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async createProject(name, description) {
+    const result = await this._query(
+      `INSERT INTO projects (name, description) VALUES (${escapeSql(name)}, ${escapeSql(description || null)}) RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async updateProject(id, updates) {
+    const sets = [];
+    if (updates.name !== undefined) sets.push(`name = ${escapeSql(updates.name)}`);
+    if (updates.description !== undefined) sets.push(`description = ${escapeSql(updates.description)}`);
+    if (updates.status !== undefined) sets.push(`status = ${escapeSql(updates.status)}`);
+    if (sets.length === 0) return this.getProject(id);
+    sets.push(`updated_at = NOW()`);
+    const result = await this._query(
+      `UPDATE projects SET ${sets.join(', ')} WHERE id = ${escapeSql(id)} RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async getConfig(key) {
+    const result = await this._query(`SELECT value FROM app_config WHERE key = ${escapeSql(key)}`);
+    return result.rows.length > 0 ? result.rows[0].value : null;
+  }
+
+  async setConfig(key, value) {
+    await this._query(
+      `INSERT INTO app_config (key, value, updated_at) VALUES (${escapeSql(key)}, ${escapeSql(value)}, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = ${escapeSql(value)}, updated_at = NOW()`
+    );
+  }
+
+  async getActiveProjectId() {
+    const val = await this.getConfig('active_project_id');
+    return val ? parseInt(val, 10) : null;
+  }
+
+  async setActiveProjectId(id) {
+    await this.setConfig('active_project_id', String(id));
   }
 
   _sessionFromRow(row) {
