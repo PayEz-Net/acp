@@ -247,135 +247,45 @@ export function DocumentList({
         </div>
       )}
 
-      {/* Document list */}
-      <div className="flex-1 overflow-y-auto">
+      {/* Document list — card layout for sidebar */}
+      <div className="flex-1 overflow-y-auto divide-y divide-slate-700/50">
         {filteredDocuments.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-sm text-slate-500">
             No documents found
           </div>
         ) : (
-          <table className="w-full" aria-label="Documents list">
-            <thead className="sticky top-0 bg-slate-800 border-b border-slate-700">
-              <tr>
+          filteredDocuments.map((doc) => (
+            <div
+              key={doc.id}
+              className="group px-3 py-2.5 hover:bg-slate-800/50 cursor-pointer transition-colors"
+              onClick={() => onSelect?.(doc)}
+            >
+              <div className="flex items-start gap-2">
                 {onSelectionChange && (
-                  <th scope="col" className="w-10 px-3 py-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.length === filteredDocuments.length && filteredDocuments.length > 0}
-                      onChange={(e) => e.target.checked ? selectAll() : clearSelection()}
-                      className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
-                      aria-label="Select all documents"
-                    />
-                  </th>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(doc.id)}
+                    onChange={(e) => { e.stopPropagation(); toggleSelection(doc.id); }}
+                    className="mt-0.5 rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                    aria-label={`Select ${doc.title}`}
+                  />
                 )}
-                <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
-                  Title
-                </th>
-                <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">
-                  Type
-                </th>
-                <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-24">
-                  Author
-                </th>
-                <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-16">
-                  Ver
-                </th>
-                <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-28">
-                  Updated
-                </th>
-                <th scope="col" className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase tracking-wider w-24">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {filteredDocuments.map((doc) => (
-                <tr
-                  key={doc.id}
-                  className="hover:bg-slate-800/50 transition-colors"
-                >
-                  {onSelectionChange && (
-                    <td className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(doc.id)}
-                        onChange={() => toggleSelection(doc.id)}
-                        className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
-                        aria-label={`Select ${doc.title}`}
-                      />
-                    </td>
-                  )}
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <FileText size={16} className="text-slate-500 flex-shrink-0" />
-                      <span
-                        className="text-sm text-white truncate cursor-pointer hover:text-blue-400"
-                        onClick={() => onSelect?.(doc)}
-                      >
-                        {doc.title}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2">
-                    <span
-                      className={cn(
-                        'px-2 py-0.5 text-xs font-medium text-white rounded capitalize',
-                        typeConfig[doc.type]?.color || typeConfig.other.color
-                      )}
-                    >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-white truncate">{doc.title}</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className={cn('px-1.5 py-0.5 text-[10px] font-medium text-white rounded capitalize', typeConfig[doc.type]?.color || typeConfig.other.color)}>
                       {doc.type}
                     </span>
-                  </td>
-                  <td className="px-3 py-2 text-sm text-slate-400 truncate">
-                    {doc.author_agent || '-'}
-                  </td>
-                  <td className="px-3 py-2 text-sm text-slate-400">
-                    v{doc.version}
-                  </td>
-                  <td className="px-3 py-2 text-sm text-slate-500">
-                    {formatTimeAgo(doc.updated_at || doc.created_at)}
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      {onSelect && (
-                        <button
-                          type="button"
-                          onClick={() => onSelect(doc)}
-                          className="p-1 text-slate-400 hover:text-white transition-colors"
-                          title="View"
-                          aria-label={`View ${doc.title}`}
-                        >
-                          <Eye size={14} />
-                        </button>
-                      )}
-                      {onEdit && (
-                        <button
-                          type="button"
-                          onClick={() => onEdit(doc)}
-                          className="p-1 text-slate-400 hover:text-white transition-colors"
-                          title="Edit"
-                          aria-label={`Edit ${doc.title}`}
-                        >
-                          <Edit size={14} />
-                        </button>
-                      )}
-                      {onDownload && (
-                        <button
-                          type="button"
-                          onClick={() => onDownload([doc])}
-                          className="p-1 text-slate-400 hover:text-white transition-colors"
-                          title="Download"
-                          aria-label={`Download ${doc.title}`}
-                        >
-                          <Download size={14} />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    <span className="text-xs text-slate-500">{doc.author_agent || '-'}</span>
+                    <span className="text-xs text-slate-600">v{doc.version}</span>
+                    <span className="text-xs text-slate-600 ml-auto">{formatTimeAgo(doc.updated_at || doc.created_at)}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
         )}
       </div>
 

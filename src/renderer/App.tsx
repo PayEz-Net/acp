@@ -6,7 +6,10 @@ import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { TitleBar } from './components/Layout/TitleBar';
 import { KanbanBoard } from './components/Kanban/KanbanBoard';
 import { ChatPanel } from './components/Chat/ChatPanel';
+import { StandupView } from './components/Autonomy/StandupView';
+import { DocumentSidebar } from './components/Documents/DocumentSidebar';
 import { useAppStore } from './stores/appStore';
+import { useDocumentStore } from './stores/documentStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useAcpSse } from './hooks/useAcpSse';
 
@@ -20,7 +23,8 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { showDocuments, toggleDocuments } = useDocumentStore();
   const [showChat, setShowChat] = useState(false);
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
@@ -146,7 +150,13 @@ export default function App() {
 
         {/* Chat Panel */}
         <ChatPanel isOpen={showChat} onClose={() => setShowChat(false)} />
+
+        {/* Document Sidebar */}
+        <DocumentSidebar isOpen={showDocuments} onClose={toggleDocuments} />
       </div>
+
+      {/* Standup View — renders as overlay/bottom panel when toggled */}
+      {showStandup && <StandupView />}
     </div>
   );
 }
