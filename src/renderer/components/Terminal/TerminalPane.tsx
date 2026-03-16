@@ -140,12 +140,17 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     terminal.writeln('\x1b[90m  Press ▷ to start agent...\x1b[0m');
     terminal.writeln('');
 
-    // Handle resize — debounce fit + scrollToBottom to prevent scroll jump
+    // Handle resize — debounce fit + sync PTY dimensions + restore scroll
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const resizeObserver = new ResizeObserver(() => {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         fitAddon.fit();
+        // Sync PTY to new dimensions so shell reflows correctly
+        const tid = useAppStore.getState().agents.find(a => a.name === agent.name)?.terminalId;
+        if (tid) {
+          window.electronAPI.resizeTerminal(tid, terminal.cols, terminal.rows);
+        }
         terminal.scrollToBottom();
       }, 100);
     });

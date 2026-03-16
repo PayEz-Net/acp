@@ -1,5 +1,6 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, MessageSquare } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, MessageSquare, User, FolderOpen } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
+import { useAuthStore } from '../../stores/authStore';
 import { useMailStore } from '../../stores/mailStore';
 import { useStandupStore } from '../../stores/standupStore';
 import { useDocumentStore } from '../../stores/documentStore';
@@ -8,7 +9,8 @@ import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, backendAvailable } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, backendAvailable, agents } = useAppStore();
+  const { user } = useAuthStore();
   const { mailboxes } = useMailStore();
   const { unreadCount: standupUnread } = useStandupStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
@@ -27,10 +29,26 @@ export function TitleBar() {
 
   return (
     <div className="titlebar h-10 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-3">
-      {/* App title */}
-      <div className="flex items-center gap-2">
-        <Bot className="w-5 h-5 text-vibe-500" />
-        <span className="text-sm font-semibold text-slate-200">Agent Collaboration Platform</span>
+      {/* App title + context */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <Bot className="w-5 h-5 text-vibe-500" />
+          <span className="text-sm font-semibold text-slate-200">ACP</span>
+        </div>
+        <div className="w-px h-4 bg-slate-700" />
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          <FolderOpen className="w-3.5 h-3.5" />
+          <span>{agents[0]?.workDir || 'No project'}</span>
+        </div>
+        {user && (
+          <>
+            <div className="w-px h-4 bg-slate-700" />
+            <div className="flex items-center gap-1.5 text-xs text-slate-500">
+              <User className="w-3.5 h-3.5" />
+              <span>{user.name || user.email}</span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Layout switcher */}
