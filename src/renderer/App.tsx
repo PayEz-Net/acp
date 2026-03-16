@@ -8,6 +8,7 @@ import { KanbanBoard } from './components/Kanban/KanbanBoard';
 import { ChatPanel } from './components/Chat/ChatPanel';
 import { StandupView } from './components/Autonomy/StandupView';
 import { DocumentSidebar } from './components/Documents/DocumentSidebar';
+import { ContractorPanel } from './components/Contractors';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
@@ -23,7 +24,7 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, showContractors, toggleContractors, activeAgentId, setAgents, setSettings } = useAppStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
   const [showChat, setShowChat] = useState(false);
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
@@ -150,6 +151,9 @@ export default function App() {
 
         {/* Chat Panel */}
         <ChatPanel isOpen={showChat} onClose={() => setShowChat(false)} />
+
+        {/* Contractor Panel */}
+        <ContractorPanel isOpen={showContractors} onClose={toggleContractors} />
 
         {/* Document Sidebar */}
         <DocumentSidebar isOpen={showDocuments} onClose={toggleDocuments} />

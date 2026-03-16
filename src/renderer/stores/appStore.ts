@@ -10,6 +10,7 @@ interface AppStore {
   showMail: boolean;
   showKanban: boolean;
   showStandup: boolean;
+  showContractors: boolean;
 
   // Agents
   agents: AgentState[];
@@ -36,6 +37,7 @@ interface AppStore {
   toggleMail: () => void;
   toggleKanban: () => void;
   toggleStandup: () => void;
+  toggleContractors: () => void;
   setActiveAgent: (id: string | null) => void;
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
@@ -58,6 +60,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   showMail: true,
   showKanban: false,
   showStandup: false,
+  showContractors: false,
   agents: [],
   activeAgentId: null,
   terminalRefs: new Map(),
@@ -74,6 +77,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   toggleMail: () => set((s) => ({ showMail: !s.showMail })),
   toggleKanban: () => set((s) => ({ showKanban: !s.showKanban })),
   toggleStandup: () => set((s) => ({ showStandup: !s.showStandup })),
+  toggleContractors: () => set((s) => ({ showContractors: !s.showContractors })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
   setAgents: (configs) => set({

@@ -5,6 +5,7 @@ import { usePartyStore } from '../stores/partyStore';
 import { useAutonomyStore } from '../stores/autonomyStore';
 import { useKanbanStore } from '../stores/kanbanStore';
 import { useChatStore } from '../stores/chatStore';
+import { useContractorStore } from '../stores/contractorStore';
 
 /**
  * Centralized SSE hook — single connection to acp-api, multiplexed by agent.
@@ -187,6 +188,31 @@ export function useAcpSse() {
                 useChatStore.getState().updateFromSse(JSON.parse(data));
               } catch (err) {
                 console.error('[AcpSse] Failed to parse chat event:', err);
+              }
+            }
+
+            // Contractor events
+            if (eventType === 'contractor-hired' && data) {
+              try {
+                useContractorStore.getState().handleContractorHired(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-hired event:', err);
+              }
+            }
+
+            if (eventType === 'contractor-completed' && data) {
+              try {
+                useContractorStore.getState().handleContractorCompleted(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-completed event:', err);
+              }
+            }
+
+            if (eventType === 'contractor-expired' && data) {
+              try {
+                useContractorStore.getState().handleContractorExpired(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-expired event:', err);
               }
             }
           }

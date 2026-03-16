@@ -1,0 +1,487 @@
+import { useEffect, useState } from 'react';
+import { X, RefreshCw, UserPlus, CheckCircle, Clock, AlertCircle, Briefcase } from 'lucide-react';
+import { useContractorStore, ActiveContractor, ContractorProfile } from '../../stores/contractorStore';
+import { useAppStore } from '../../stores/appStore';
+
+interface ContractorPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export function ContractorPanel({ isOpen, onClose }: ContractorPanelProps) {
+  const {
+    activeContractors, pool, selectedContractor, showHirePicker,
+    loading, poolLoading,
+    fetchActive, fetchPool, completeContract,
+    setSelectedContractor, setShowHirePicker,
+  } = useContractorStore();
+  const { backendAvailable } = useAppStore();
+
+  useEffect(() => {
+    if (!isOpen || !backendAvailable) return;
+    fetchActive();
+    const interval = setInterval(fetchActive, 30000);
+    return () => clearInterval(interval);
+  }, [isOpen, backendAvailable, fetchActive]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="w-80 bg-slate-900 border-l border-slate-700 flex flex-col h-full overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+        <div className="flex items-center gap-2">
+          <Briefcase className="w-4 h-4 text-emerald-400" />
+          <span className="text-sm font-semibold text-slate-200">Contractors</span>
+          {activeContractors.length > 0 && (
+            <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-900/50 text-emerald-300">
+              {activeContractors.filter(c => c.contract.status === 'active').length}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => { fetchPool(); setShowHirePicker(true); }}
+            className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 rounded transition-colors"
+            title="Hire contractor"
+          >
+            <UserPlus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={fetchActive}
+            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            onClick={onClose}
+            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {!backendAvailable ? (
+        <div className="p-4 text-sm text-slate-500">Backend required for contractors</div>
+      ) : showHirePicker ? (
+        <HirePicker
+          pool={pool}
+          loading={poolLoading}
+          onClose={() => setShowHirePicker(false)}
+        />
+      ) : selectedContractor ? (
+        <ProfileCard
+          contractor={selectedContractor}
+          onBack={() => setSelectedContractor(null)}
+          onComplete={completeContract}
+        />
+      ) : (
+        <ContractorList
+          contractors={activeContractors}
+          loading={loading}
+          onSelect={setSelectedContractor}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- Contractor List ---
+
+function ContractorList({
+  contractors,
+  loading,
+  onSelect,
+}: {
+  contractors: ActiveContractor[];
+  loading: boolean;
+  onSelect: (c: ActiveContractor) => void;
+}) {
+  const active = contractors.filter(c => c.contract.status === 'active');
+  const done = contractors.filter(c => c.contract.status !== 'active');
+
+  if (loading && contractors.length === 0) {
+    return <div className="p-4 text-sm text-slate-500">Loading...</div>;
+  }
+
+  if (contractors.length === 0) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+        <Briefcase className="w-8 h-8 text-slate-600 mb-3" />
+        <p className="text-sm text-slate-400">No contractors hired</p>
+        <p className="text-xs text-slate-500 mt-1">Click + to hire from the pool</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      {active.length > 0 && (
+        <div className="p-2">
+          <div className="text-xs font-medium text-slate-500 uppercase tracking-wider px-2 py-1">
+            Active ({active.length})
+          </div>
+          {active.map(c => (
+            <ContractorListItem key={c.contract.id} contractor={c} onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+      {done.length > 0 && (
+        <div className="p-2">
+          <div className="text-xs font-medium text-slate-500 uppercase tracking-wider px-2 py-1">
+            Completed
+          </div>
+          {done.map(c => (
+            <ContractorListItem key={c.contract.id} contractor={c} onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- List Item ---
+
+function ContractorListItem({
+  contractor,
+  onSelect,
+}: {
+  contractor: ActiveContractor;
+  onSelect: (c: ActiveContractor) => void;
+}) {
+  const { agent, contract } = contractor;
+  const profile = contract.profile_snapshot;
+  const isActive = contract.status === 'active';
+
+  return (
+    <button
+      onClick={() => onSelect(contractor)}
+      className="w-full text-left p-2 rounded hover:bg-slate-800 transition-colors group"
+    >
+      <div className="flex items-center gap-2">
+        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+          isActive ? 'bg-emerald-400' :
+          contract.status === 'completed' ? 'bg-slate-500' :
+          contract.status === 'expired' ? 'bg-amber-500' :
+          'bg-red-500'
+        }`} />
+        <span className="text-sm font-medium text-slate-200 truncate">
+          {agent.display_name || agent.name}
+        </span>
+        <StatusBadge status={contract.status} />
+      </div>
+      {profile?.description && (
+        <p className="text-xs text-slate-500 mt-0.5 ml-4 truncate">{profile.description}</p>
+      )}
+      <div className="flex items-center gap-2 mt-1 ml-4">
+        <span className="text-[10px] text-slate-600 truncate">{contract.contract_subject}</span>
+      </div>
+      {contract.hired_by_name && (
+        <div className="text-[10px] text-slate-600 mt-0.5 ml-4">
+          Hired by {contract.hired_by_name}
+        </div>
+      )}
+    </button>
+  );
+}
+
+// --- Status Badge ---
+
+function StatusBadge({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    active: 'text-emerald-400 bg-emerald-900/30',
+    completed: 'text-slate-400 bg-slate-800',
+    expired: 'text-amber-400 bg-amber-900/30',
+    cancelled: 'text-red-400 bg-red-900/30',
+  };
+
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ml-auto flex-shrink-0 ${styles[status] || styles.active}`}>
+      {status}
+    </span>
+  );
+}
+
+// --- Profile Card ---
+
+function ProfileCard({
+  contractor,
+  onBack,
+  onComplete,
+}: {
+  contractor: ActiveContractor;
+  onBack: () => void;
+  onComplete: (contractId: number) => Promise<boolean>;
+}) {
+  const { agent, contract } = contractor;
+  const profile = contract.profile_snapshot;
+  const [completing, setCompleting] = useState(false);
+
+  const handleComplete = async () => {
+    setCompleting(true);
+    await onComplete(contract.id);
+    setCompleting(false);
+    onBack();
+  };
+
+  return (
+    <div className="flex-1 flex flex-col overflow-y-auto">
+      {/* Back button */}
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1 px-4 py-2 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+      >
+        &larr; Back to list
+      </button>
+
+      {/* Card */}
+      <div className="px-4 pb-4 space-y-3">
+        {/* Name + status */}
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-slate-100">
+            {agent.display_name || agent.name}
+          </h3>
+          <StatusBadge status={contract.status} />
+        </div>
+
+        {/* Description */}
+        {(profile?.description || agent.role) && (
+          <p className="text-sm text-slate-400">{profile?.description || agent.role}</p>
+        )}
+
+        {/* Model */}
+        {(profile?.model || agent.model) && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500">Model:</span>
+            <span className="text-xs text-slate-300">{profile?.model || agent.model}</span>
+          </div>
+        )}
+
+        {/* Tools */}
+        {(profile?.tools || agent.expertise_json?.tools) && (
+          <div>
+            <span className="text-xs text-slate-500">Tools:</span>
+            <div className="flex flex-wrap gap-1 mt-1">
+              {(profile?.tools || agent.expertise_json?.tools || []).map(tool => (
+                <span key={tool} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                  {tool}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Contract details */}
+        <div className="border-t border-slate-800 pt-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <Briefcase className="w-3.5 h-3.5 text-slate-500 mt-0.5 flex-shrink-0" />
+            <span className="text-xs text-slate-300">{contract.contract_subject}</span>
+          </div>
+          {contract.hired_by_name && (
+            <div className="flex items-center gap-2">
+              <UserPlus className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+              <span className="text-xs text-slate-300">Hired by {contract.hired_by_name}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+            <span className="text-xs text-slate-300">
+              {new Date(contract.created_at).toLocaleString()}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+            <span className="text-xs text-slate-300">Timeout: {contract.timeout_hours}h</span>
+          </div>
+        </div>
+
+        {/* Complete button */}
+        {contract.status === 'active' && (
+          <button
+            onClick={handleComplete}
+            disabled={completing}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+          >
+            <CheckCircle className="w-4 h-4" />
+            {completing ? 'Completing...' : 'Mark Complete'}
+          </button>
+        )}
+
+        {contract.completed_at && (
+          <div className="text-xs text-slate-500">
+            Completed: {new Date(contract.completed_at).toLocaleString()}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Hire Picker ---
+
+function HirePicker({
+  pool,
+  loading,
+  onClose,
+}: {
+  pool: ContractorProfile[];
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState('');
+
+  const filtered = pool.filter(p =>
+    p.name.toLowerCase().includes(search.toLowerCase()) ||
+    (p.description || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-2 border-b border-slate-800">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium text-slate-200">Hire Contractor</span>
+          <button
+            onClick={onClose}
+            className="text-xs text-slate-400 hover:text-slate-200"
+          >
+            Cancel
+          </button>
+        </div>
+        <input
+          type="text"
+          placeholder="Search pool..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full px-2.5 py-1.5 text-sm bg-slate-800 border border-slate-700 rounded text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+          autoFocus
+        />
+      </div>
+
+      {/* Pool list */}
+      <div className="flex-1 overflow-y-auto p-2">
+        {loading ? (
+          <div className="p-4 text-sm text-slate-500 text-center">Loading pool...</div>
+        ) : filtered.length === 0 ? (
+          <div className="p-4 text-sm text-slate-500 text-center">
+            {search ? 'No matches' : 'No profiles in pool'}
+          </div>
+        ) : (
+          filtered.map(profile => (
+            <PoolProfileItem key={profile.name} profile={profile} onClose={onClose} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Pool Profile Item ---
+
+function PoolProfileItem({
+  profile,
+  onClose,
+}: {
+  profile: ContractorProfile;
+  onClose: () => void;
+}) {
+  const [hiring, setHiring] = useState(false);
+  const [subject, setSubject] = useState('');
+  const [showSubject, setShowSubject] = useState(false);
+
+  const handleHire = async () => {
+    if (!subject.trim()) return;
+    setHiring(true);
+    try {
+      const secret = await window.electronAPI.getLocalSecret();
+      const res = await fetch('http://127.0.0.1:3001/v1/mail/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
+        },
+        body: JSON.stringify({
+          from_agent: useAppStore.getState().agents[0]?.name || 'BAPert',
+          to: [profile.name],
+          subject: subject.trim(),
+          body: `Hiring ${profile.name} for: ${subject.trim()}`,
+          importance: 'normal',
+        }),
+      });
+      if (res.ok) {
+        useContractorStore.getState().fetchActive();
+        onClose();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        console.error('[Contractors] Hire failed:', err);
+      }
+    } catch (err) {
+      console.error('[Contractors] Hire failed:', err);
+    } finally {
+      setHiring(false);
+    }
+  };
+
+  return (
+    <div className="p-2 rounded hover:bg-slate-800 transition-colors border border-transparent hover:border-slate-700">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-200">{profile.name}</span>
+        {!showSubject && (
+          <button
+            onClick={() => setShowSubject(true)}
+            className="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+          >
+            Hire
+          </button>
+        )}
+      </div>
+      {profile.description && (
+        <p className="text-xs text-slate-400 mt-0.5">{profile.description}</p>
+      )}
+      {profile.model && (
+        <span className="text-[10px] text-slate-500">Model: {profile.model}</span>
+      )}
+      {profile.tools && profile.tools.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1">
+          {profile.tools.map(t => (
+            <span key={t} className="text-[10px] px-1 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+              {t}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Inline hire form */}
+      {showSubject && (
+        <div className="mt-2 space-y-1.5">
+          <input
+            type="text"
+            placeholder="Contract subject (what's the task?)"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            className="w-full px-2 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+            autoFocus
+            onKeyDown={(e) => { if (e.key === 'Enter') handleHire(); if (e.key === 'Escape') setShowSubject(false); }}
+          />
+          <div className="flex gap-1">
+            <button
+              onClick={handleHire}
+              disabled={hiring || !subject.trim()}
+              className="flex-1 text-xs py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors"
+            >
+              {hiring ? 'Hiring...' : 'Send contract'}
+            </button>
+            <button
+              onClick={() => setShowSubject(false)}
+              className="text-xs py-1 px-2 rounded bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
