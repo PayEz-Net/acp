@@ -6,6 +6,7 @@ import type { LocalEventBus } from '../sse/localEventBus.js';
 import { ProcessMonitor } from './processMonitor.js';
 
 const DEFAULT_MAX_CONCURRENT = 2;
+const DEFAULT_QUEUE_TIMEOUT_MIN = 30;
 
 interface SpawnRequest {
   contractId: number;
@@ -25,12 +26,16 @@ export class SessionManager {
   private cfg: any;
   private processMonitor: ProcessMonitor;
   private maxConcurrent: number;
+  private contractorCmd: string;
+  private queueTimeoutMin: number;
 
   constructor(storage: any, eventBus: LocalEventBus, cfg: any) {
     this.storage = storage;
     this.eventBus = eventBus;
     this.cfg = cfg;
     this.maxConcurrent = parseInt(process.env.ACP_MAX_CONTRACTORS || String(DEFAULT_MAX_CONCURRENT), 10);
+    this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'claude';
+    this.queueTimeoutMin = parseInt(process.env.ACP_QUEUE_TIMEOUT_MINUTES || String(DEFAULT_QUEUE_TIMEOUT_MIN), 10);
     this.processMonitor = new ProcessMonitor(storage, eventBus, cfg, () => this.drainQueue());
   }
 
@@ -109,7 +114,8 @@ ${mailBody}
 
 Do the work requested. Write your findings and results to stdout. When done, output a clear summary of what you did and found.`;
 
-    // Spawn claude CLI (cross-platform, no shell — DotNetPert F-3)
+    // Spawn contractor CLI (cross-platform, no shell — DotNetPert F-3)
+    // ACP_CONTRACTOR_CMD env override for test stubs (QAPert requirement)
     const args = [
       '--print',
       '--dangerously-skip-permissions',
@@ -117,7 +123,7 @@ Do the work requested. Write your findings and results to stdout. When done, out
       '--prompt', taskPrompt,
     ];
 
-    const child = spawn('claude', args, {
+    const child = spawn(this.contractorCmd, args, {
       cwd: workDir,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -140,10 +146,20 @@ Do the work requested. Write your findings and results to stdout. When done, out
   }
 
   /**
-   * Drain the queue: spawn the oldest queued contract if capacity allows.
+   * Drain the queue: expire timed-out queued contracts, then spawn the oldest if capacity allows.
    * Called by ProcessMonitor when a slot frees up.
    */
   private async drainQueue(): Promise<void> {
+    // Expire queued contracts past queue timeout (ACP_QUEUE_TIMEOUT_MINUTES)
+    try {
+      await this.storage._query(
+        `UPDATE agent_contracts
+         SET status = 'expired', completed_at = NOW(), cancel_reason = 'queue-timeout'
+         WHERE status = 'queued'
+           AND created_at + (${this.queueTimeoutMin} || ' minutes')::INTERVAL < NOW()`
+      );
+    } catch { /* non-fatal */ }
+
     // Find oldest queued contract
     const result = await this.storage._query(
       `SELECT c.id, c.contractor_agent_id, c.hired_by_agent_id, c.contract_subject,
