@@ -193,7 +193,7 @@ function setupExitReporting() {
     const options = {
       hostname: '127.0.0.1',
       port: 3001,
-      path: '/internal/pty/exit',
+      path: '/v1/lifecycle/agents/internal/pty-exit',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
