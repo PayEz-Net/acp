@@ -6,7 +6,7 @@
  * Polls /health to confirm startup before renderer loads.
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execSync, ChildProcess } from 'child_process';
 import { createConnection } from 'net';
 import { randomBytes } from 'crypto';
 import path from 'path';
@@ -108,13 +108,35 @@ function waitForHealth(): Promise<boolean> {
  * Start the API server if not already running.
  * Returns true if backend is healthy, false if timed out or failed.
  */
+/** Kill any orphaned process on a port (Windows). Returns true if killed. */
+function killOrphanOnPort(port: number): boolean {
+  try {
+    const out = execSync(
+      `netstat -ano | findstr ":${port}" | findstr "LISTENING"`,
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim();
+    const match = out.match(/\s+(\d+)\s*$/m);
+    if (match) {
+      const pid = parseInt(match[1], 10);
+      console.log(`[ACP-API] Killing orphan on port ${port} (PID ${pid})`);
+      execSync(`taskkill /F /PID ${pid}`, { timeout: 5000 });
+      return true;
+    }
+  } catch { /* no listener or kill failed — either way, proceed */ }
+  return false;
+}
+
 export async function startApiServer(): Promise<boolean> {
   if (await isPortInUse(API_PORT)) {
-    // Port occupied by an external instance we didn't spawn — we can't auth to it.
-    // Return false so renderer disables mail (Option C).
-    console.log(`[ACP-API] Port ${API_PORT} already in use by external process — cannot authenticate, mail disabled`);
-    localSecret = null;
-    return false;
+    console.log(`[ACP-API] Port ${API_PORT} in use — killing orphan from previous session`);
+    killOrphanOnPort(API_PORT);
+    // Brief wait for port to release
+    await new Promise(r => setTimeout(r, 1000));
+    if (await isPortInUse(API_PORT)) {
+      console.log(`[ACP-API] Port ${API_PORT} still in use after kill — cannot start, mail disabled`);
+      localSecret = null;
+      return false;
+    }
   }
 
   // Generate fresh secret only when WE spawn the instance
