@@ -1,15 +1,38 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import {
-  IPC_CHANNELS,
-  AppSettings,
-  TerminalData,
-  AuthStatus,
-  LoginRequest,
-  LoginResult,
-  TwoFactorRequest,
-  TwoFactorResult,
-  VibeCredentials,
-} from '../shared/types';
+
+// Inline IPC channel constants — preload sandbox can't resolve ../shared/types
+const IPC_CHANNELS = {
+  PTY_SPAWN: 'pty:spawn',
+  PTY_WRITE: 'pty:write',
+  PTY_RESIZE: 'pty:resize',
+  PTY_KILL: 'pty:kill',
+  PTY_DATA: 'pty:data',
+  PTY_EXIT: 'pty:exit',
+  SETTINGS_GET: 'settings:get',
+  SETTINGS_SET: 'settings:set',
+  AUTH_LOGIN: 'auth:login',
+  AUTH_LOGOUT: 'auth:logout',
+  AUTH_REFRESH: 'auth:refresh',
+  AUTH_GET_STATUS: 'auth:getStatus',
+  AUTH_SEND_2FA: 'auth:send2fa',
+  AUTH_VERIFY_2FA: 'auth:verify2fa',
+  OAUTH_OPEN_URL: 'oauth:openUrl',
+  OAUTH_CALLBACK: 'oauth:callback',
+  WINDOW_MINIMIZE: 'window:minimize',
+  WINDOW_MAXIMIZE: 'window:maximize',
+  WINDOW_CLOSE: 'window:close',
+  VIBE_GET_CREDENTIALS: 'vibe:getCredentials',
+} as const;
+
+// Type aliases for preload (avoid importing from shared)
+type AppSettings = Record<string, unknown>;
+type TerminalData = { terminalId: string; data: string };
+type AuthStatus = { isAuthenticated: boolean; user: unknown; requires2FA: boolean; twoFactorComplete: boolean; expiresAt: string | null };
+type LoginRequest = { email: string; password: string };
+type LoginResult = { success: boolean; error?: string; requires2FA?: boolean; available2FAMethods?: string[] };
+type TwoFactorRequest = { code: string; method: 'email' | 'sms' };
+type TwoFactorResult = { success: boolean; error?: string };
+type VibeCredentials = { clientId: string; hmacKey: string };
 
 // Expose protected methods to renderer via contextBridge
 contextBridge.exposeInMainWorld('electronAPI', {

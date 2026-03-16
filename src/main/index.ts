@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, session } from 'electron';
 import path from 'path';
 import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
@@ -28,12 +28,13 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false, // Desktop app — no CORS/same-origin restrictions needed
     },
   });
 
   // Load the app
   if (isDev) {
-    mainWindow.loadURL('http://localhost:40010');
+    mainWindow.loadURL('http://localhost:40020');
     // DevTools: Ctrl+Shift+I or F12 to open manually
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -106,19 +107,34 @@ function setupIpcHandlers() {
 
   // Vibe credentials handler (HMAC auth for Agent Mail)
   ipcMain.handle(IPC_CHANNELS.VIBE_GET_CREDENTIALS, () => {
-    // Get credentials from environment variables or settings
     const settings = getSettings();
-    return {
-      clientId: process.env.VIBE_CLIENT_ID || settings.vibeClientId || '',
-      hmacKey: process.env.VIBE_HMAC_KEY || settings.vibeHmacKey || '',
-    };
+    const clientId = process.env.VIBE_CLIENT_ID || settings.vibeClientId || '';
+    const hmacKey = process.env.VIBE_HMAC_KEY || settings.vibeHmacKey || '';
+    console.log(`[Vibe] Credentials: clientId=${clientId ? clientId.substring(0, 10) + '...' : '(empty)'}, hmacKey=${hmacKey ? '(set)' : '(empty)'}`);
+    return { clientId, hmacKey };
   });
 }
 
 // App lifecycle
 app.whenReady().then(() => {
-  setupIpcHandlers();
+  // Bypass CORS — this is a desktop app, not a browser
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    delete details.requestHeaders['Origin'];
+    callback({ requestHeaders: details.requestHeaders });
+  });
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'access-control-allow-origin': ['*'],
+        'access-control-allow-headers': ['*'],
+        'access-control-allow-methods': ['GET, POST, PUT, DELETE, OPTIONS'],
+      },
+    });
+  });
+
   createWindow();
+  setupIpcHandlers();
 
   // Start background token refresh (will only refresh if user is logged in)
   startTokenRefreshTimer();

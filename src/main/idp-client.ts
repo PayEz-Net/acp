@@ -6,8 +6,10 @@
  */
 
 // Configuration
-const IDP_URL = process.env.IDP_URL || 'http://localhost:32785';
-const CLIENT_ID = 'payez-electron';
+const IDP_URL = process.env.IDP_URL || 'http://10.0.0.93:32785';
+const IDP_INTERNAL_URL = process.env.IDP_INTERNAL_URL || 'http://10.0.0.93:32774';
+const CLIENT_ID = 'idealvibe_online';
+const IS_DEV = !require('electron').app.isPackaged;
 
 interface IdpError {
   code: string;
@@ -57,11 +59,18 @@ interface Idp2FAResponse {
 
 /**
  * Login with email/password
+ * In dev mode, uses /dev/impersonate on internal IDP (no real password needed)
  */
 export async function idpLogin(
   email: string,
   password: string
 ): Promise<IdpLoginResponse> {
+  // Dev mode: use impersonate endpoint on internal IDP
+  // Always impersonate as admin-user (available personas: free-user, premium-user, admin-user, merchant)
+  if (IS_DEV) {
+    return idpDevImpersonate('admin-user');
+  }
+
   console.log('[IDP] Login attempt for:', email);
 
   try {
@@ -105,6 +114,57 @@ export async function idpLogin(
         code: 'NETWORK_ERROR',
         message: 'Failed to connect to authentication service',
       },
+    };
+  }
+}
+
+/**
+ * Dev-only: Impersonate a user via internal IDP TestHarness
+ */
+async function idpDevImpersonate(persona: string): Promise<IdpLoginResponse> {
+  console.log('[IDP] Dev impersonate:', persona);
+
+  try {
+    const response = await fetch(`${IDP_INTERNAL_URL}/dev/impersonate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona, clientId: 8 }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[IDP] Impersonate failed:', response.status, errorText);
+      return {
+        success: false,
+        error: { code: `HTTP_${response.status}`, message: `Impersonate failed: ${response.status}` },
+      };
+    }
+
+    const data = await response.json();
+    console.log('[IDP] Impersonate success for:', persona);
+
+    const user = data.user || {};
+    return {
+      success: true,
+      result: {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_in: data.expires_in || 3600,
+        requires_2fa: false,
+        two_factor_complete: true,
+        user: {
+          userId: String(user.id || 'dev-user'),
+          email: user.email || persona,
+          fullName: user.userName || persona,
+          roles: user.roles || ['admin'],
+        },
+      },
+    };
+  } catch (error) {
+    console.error('[IDP] Impersonate request failed:', error);
+    return {
+      success: false,
+      error: { code: 'NETWORK_ERROR', message: 'Failed to connect to internal IDP for impersonation' },
     };
   }
 }

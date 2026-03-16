@@ -6,10 +6,10 @@ import { ApiResponse } from '@shared/auth';
 // Configuration - localhost for dev, prod URL for release
 // @ts-expect-error Vite provides import.meta.env
 const IDP_URL = import.meta.env?.DEV
-  ? 'http://localhost:32785'
+  ? 'http://10.0.0.93:32785'
   : 'https://idp.payez.net';
 
-const CLIENT_ID = 'payez-electron';
+const CLIENT_ID = 'idealvibe_online';
 
 interface RequestOptions extends RequestInit {
   token?: string;

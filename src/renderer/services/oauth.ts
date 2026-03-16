@@ -14,10 +14,10 @@ import {
 const env = import.meta.env;
 const IDP_URL = env?.VITE_IDP_URL || (env?.DEV ? 'http://localhost:32785' : 'https://idp.payez.net');
 
-const CLIENT_ID = 'payez-electron';
+const CLIENT_ID = 'idealvibe_online';
 
 // Callback URL for OAuth - uses localhost server in Electron
-const OAUTH_CALLBACK_PORT = 40011;
+const OAUTH_CALLBACK_PORT = 40021;
 const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}/oauth/callback`;
 
 // ============================================================================

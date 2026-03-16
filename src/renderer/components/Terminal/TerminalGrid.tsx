@@ -50,9 +50,12 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
     );
   }
 
-  // Grid layout (default)
+  // Grid layout — adapts columns to agent count
+  const cols = agents.length <= 2 ? 'grid-cols-1' : agents.length <= 4 ? 'grid-cols-2' : 'grid-cols-3';
+  const rows = agents.length <= 3 ? 'grid-rows-1' : 'grid-rows-2';
+
   return (
-    <div className="h-full grid grid-cols-2 grid-rows-2 gap-2">
+    <div className={`h-full grid ${cols} ${rows} gap-2`}>
       {sortedAgents.map((agent) => (
         <TerminalPane
           key={agent.id}

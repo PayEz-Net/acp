@@ -198,14 +198,14 @@ Mail push via Server-Sent Events implementation is correct.
   },
   {
     id: 5,
-    title: 'Vibe Agents Architecture Overview',
-    content_md: `# Vibe Agents Architecture Overview
+    title: 'ACP Architecture Overview',
+    content_md: `# ACP Architecture Overview
 
 ## System Components
 
 \`\`\`
 ┌─────────────────────────────────────────────────────────────┐
-│                    Vibe Agents Harness                      │
+│               Agent Collaboration Platform                   │
 │                     (Electron + React)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │

@@ -30,7 +30,7 @@ export function TitleBar() {
       {/* App title */}
       <div className="flex items-center gap-2">
         <Bot className="w-5 h-5 text-vibe-500" />
-        <span className="text-sm font-semibold text-slate-200">Vibe Agents Harness</span>
+        <span className="text-sm font-semibold text-slate-200">Agent Collaboration Platform</span>
       </div>
 
       {/* Layout switcher */}

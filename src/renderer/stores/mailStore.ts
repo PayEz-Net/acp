@@ -1,8 +1,14 @@
 import { create } from 'zustand';
 import { MailMessage, AgentMailbox, PanelAction } from '@shared/types';
+import { useAppStore } from './appStore';
 
-const AGENT_MAIL_API = 'http://localhost:37933/v1/agentmail';
 const USE_MOCK_DATA = false;
+
+// Get the API base URL from appStore (configurable per environment)
+function getMailApiUrl(): string {
+  const url = useAppStore.getState().vibeApiUrl;
+  return `${url}/v1/agentmail`;
+}
 
 // -----------------------------------------------------------------------------
 // HMAC Authentication (Client ID + Signature - free tier pattern)
@@ -74,9 +80,11 @@ async function mailRequest(endpoint: string, options: { method?: string; body?: 
 
   // Add HMAC auth headers
   const { clientId, hmacKey } = await getVibeCredentials();
+  console.log(`[Mail] Credentials for ${endpoint}: clientId=${clientId || '(empty)'}, hmacKey=${hmacKey ? '(set)' : '(empty)'}`);
   if (clientId && hmacKey) {
     const timestamp = Math.floor(Date.now() / 1000);
-    const signaturePayload = `${timestamp}|${method}|${endpoint}`;
+    const fullPath = `/v1/agentmail${endpoint}`;
+    const signaturePayload = `${timestamp}|${method}|${fullPath}`;
 
     try {
       const signature = await generateHmacSignature(hmacKey, signaturePayload);
@@ -88,7 +96,7 @@ async function mailRequest(endpoint: string, options: { method?: string; body?: 
     }
   }
 
-  return fetch(`${AGENT_MAIL_API}${endpoint}`, {
+  return fetch(`${getMailApiUrl()}${endpoint}`, {
     method,
     headers,
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -226,7 +234,13 @@ export const useMailStore = create<MailStore>((set, get) => ({
         throw new Error(response.error || 'Request failed');
       }
 
-      const messages: MailMessage[] = response.data?.messages || [];
+      // Map API fields to our MailMessage shape (API uses read_at instead of is_read, no to_agent)
+      const rawMessages = response.data?.messages || [];
+      const messages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
+        ...m,
+        to_agent: (m.to_agent as string) || agent,
+        is_read: !!m.read_at,
+      }));
 
       setMailbox(agent, {
         messages,

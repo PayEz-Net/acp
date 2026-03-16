@@ -21,8 +21,8 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const fitAddonRef = useRef<FitAddon | null>(null);
   const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, mailPushEnabled } = useAppStore();
 
-  // Subscribe to mail push SSE when agent is active
-  useMailPush(agent.name, mailPushEnabled && agent.status !== 'offline');
+  // Subscribe to mail push SSE when agent is active — pass terminalId so push can write to PTY
+  useMailPush(agent.name, mailPushEnabled && agent.status !== 'offline', agent.terminalId);
 
   // Initialize terminal
   useEffect(() => {
@@ -65,6 +65,22 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     terminal.open(terminalRef.current);
     fitAddon.fit();
 
+    // Enable Ctrl+C to copy when text is selected (otherwise send to PTY)
+    terminal.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.key === 'c' && terminal.hasSelection()) {
+        navigator.clipboard.writeText(terminal.getSelection());
+        return false; // Don't send to PTY
+      }
+      // Ctrl+V to paste
+      if (e.ctrlKey && e.key === 'v') {
+        navigator.clipboard.readText().then((text) => {
+          if (text) terminal.paste(text);
+        });
+        return false;
+      }
+      return true;
+    });
+
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
@@ -98,6 +114,15 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         '\x1b[36m╚══════════════════════════════════════╝\x1b[0m',
         '',
         '\x1b[90m  "Solid backends. Reliable APIs. Always."\x1b[0m',
+        '',
+      ],
+      Aurum: [
+        '\x1b[38;5;208m╔══════════════════════════════════════╗\x1b[0m',
+        '\x1b[38;5;208m║\x1b[0m  \x1b[1;38;5;208mAurum\x1b[0m - Product Seer               \x1b[38;5;208m║\x1b[0m',
+        '\x1b[38;5;208m║\x1b[0m  UX Strategy & Human Experience      \x1b[38;5;208m║\x1b[0m',
+        '\x1b[38;5;208m╚══════════════════════════════════════╝\x1b[0m',
+        '',
+        '\x1b[90m  "Less, but sharper."\x1b[0m',
         '',
       ],
       QAPert: [
@@ -138,9 +163,11 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     if (!xtermRef.current || !agent.terminalId) return;
 
     const terminal = xtermRef.current;
+    terminal.focus();
 
     // Send keystrokes to PTY
     const dataHandler = terminal.onData((data) => {
+      console.log(`[Terminal] ${agent.name} input:`, JSON.stringify(data));
       window.electronAPI.writeTerminal(agent.terminalId!, data);
     });
 
@@ -157,11 +184,22 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       if (data.terminalId === agent.terminalId && xtermRef.current) {
         xtermRef.current.write(data.data);
 
-        // Detect status from output
-        if (data.data.includes('Thinking') || data.data.includes('Working')) {
-          updateAgentStatus(agent.id, 'busy');
-        } else if (data.data.includes('$ ') || data.data.includes('> ')) {
+        // Detect agent status from Claude Code output patterns
+        const chunk = data.data;
+
+        // Claude Code prompt "❯" means idle/waiting for input
+        if (chunk.includes('\u276F')) {
           updateAgentStatus(agent.id, 'idle');
+        }
+        // Active work indicators
+        else if (
+          chunk.includes('Thinking') ||
+          chunk.includes('Read(') || chunk.includes('Edit(') || chunk.includes('Write(') ||
+          chunk.includes('Bash(') || chunk.includes('Glob(') || chunk.includes('Grep(') ||
+          chunk.includes('Agent(') ||
+          chunk.includes('\u25CF') // ● bullet used for tool output lines
+        ) {
+          updateAgentStatus(agent.id, 'busy');
         }
       }
     });
@@ -190,6 +228,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       updateAgentStatus(agent.id, 'ready');
     } catch (err) {
       console.error('Failed to start agent:', err);
+      if (xtermRef.current) {
+        xtermRef.current.writeln(`\x1b[31mFailed to start: ${err instanceof Error ? err.message : String(err)}\x1b[0m`);
+      }
       updateAgentStatus(agent.id, 'error');
     }
   }, [agent.id, agent.name, agent.workDir, updateAgentStatus, setAgentTerminalId]);
@@ -221,7 +262,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   return (
     <div
       className={`terminal-pane h-full ${isFocused ? 'focused' : ''}`}
-      onClick={onFocus}
+      onClick={() => { onFocus(); xtermRef.current?.focus(); }}
       style={{ borderColor: isFocused ? agent.color : undefined }}
     >
       {/* Header */}
@@ -261,7 +302,26 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       </div>
 
       {/* Terminal */}
-      <div className="terminal-content" ref={terminalRef} />
+      <div
+        className="terminal-content"
+        ref={terminalRef}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        onClick={(e) => {
+          e.stopPropagation();
+          xtermRef.current?.focus();
+          const textarea = terminalRef.current?.querySelector('textarea');
+          if (textarea) textarea.focus();
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          const term = xtermRef.current;
+          if (term?.hasSelection()) {
+            navigator.clipboard.writeText(term.getSelection());
+            term.clearSelection();
+          }
+        }}
+      />
+
     </div>
   );
 }

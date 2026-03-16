@@ -1,14 +1,14 @@
 {
-  "name": "vibe-agents-harness",
+  "name": "agent-collaboration-platform",
   "version": "0.1.0",
-  "description": "Desktop application for orchestrating multiple Vibe AI agents",
+  "description": "Desktop application for orchestrating AI agent collaboration",
   "main": "dist/main/index.js",
   "author": "PayEz <dev@payez.net>",
   "license": "MIT",
   "scripts": {
-    "kill-port": "powershell -Command \"Get-NetTCPConnection -LocalPort 40010 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }\"",
+    "kill-port": "powershell -Command \"Get-NetTCPConnection -LocalPort 40010,40011 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }\"",
     "dev": "vite",
-    "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:40010 && electron .\"",
+    "dev:electron": "tsc -p tsconfig.main.json && concurrently -k \"vite\" \"wait-on http://localhost:40010 && electron .\"",
     "build": "tsc && vite build",
     "build:electron": "npm run build && tsc -p tsconfig.main.json",
     "electron": "electron .",
@@ -34,8 +34,8 @@
     "zustand": "^4.5.0"
   },
   "build": {
-    "appId": "net.payez.vibe-agents-harness",
-    "productName": "Vibe Agents Harness",
+    "appId": "net.payez.agent-collaboration-platform",
+    "productName": "ACP",
     "directories": {
       "output": "release"
     },
@@ -53,6 +53,7 @@
     }
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",

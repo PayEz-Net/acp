@@ -1,4 +1,4 @@
-import { Mail, PenSquare, RefreshCw, X } from 'lucide-react';
+import { FolderOpen, Mail, PenSquare, RefreshCw, X } from 'lucide-react';
 import { AgentState } from '@shared/types';
 import { useMail } from '../../hooks/useMail';
 import { MailAgentSection } from './MailAgentSection';
@@ -90,6 +90,12 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
           </div>
         </div>
 
+        {/* Project Banner */}
+        <div className="flex items-center gap-2 px-4 py-2 bg-cyan-950/40 border-b border-cyan-900/50">
+          <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">PAYEZ</span>
+        </div>
+
         {/* Agent Sections */}
         <div className="flex-1 overflow-y-auto">
           {agents.map((agent) => (
@@ -102,6 +108,7 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
               selectedMessageId={selectedMessage?.message_id}
               onSelectMessage={selectMessage}
               color={agent.color}
+              status={agent.status}
             />
           ))}
         </div>

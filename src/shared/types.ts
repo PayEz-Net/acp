@@ -203,6 +203,8 @@ export interface AppSettings {
   showSidebar: boolean;
   mailPushEnabled: boolean;
   mailPushUrl: string;
+  vibeApiUrl: string;
+  environment: 'prod' | 'dev';
   // Vibe API credentials (HMAC auth for free tier)
   vibeClientId?: string;
   vibeHmacKey?: string;
@@ -304,6 +306,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showSidebar: true,
   mailPushEnabled: true,
   mailPushUrl: 'https://api.idealvibe.online',
+  vibeApiUrl: 'https://api.idealvibe.online',
+  environment: 'prod',
+  vibeClientId: 'vibe_b2d2aac0315549d9',
+  vibeHmacKey: 'KAG7vjumrWhx4CHtPSNcowYzjkbeVZmSitD8xjdZXkw=',
 };
 
 // ============================================

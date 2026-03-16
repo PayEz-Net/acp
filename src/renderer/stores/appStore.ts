@@ -21,6 +21,7 @@ interface AppStore {
   // Mail push settings
   mailPushEnabled: boolean;
   mailPushUrl: string;
+  vibeApiUrl: string;
 
   // Autonomy state
   autonomyEnabled: boolean;
@@ -62,6 +63,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   terminalRefs: new Map(),
   mailPushEnabled: true,
   mailPushUrl: 'https://api.idealvibe.online',
+  vibeApiUrl: 'https://api.idealvibe.online',
   autonomyEnabled: false,
   autonomyStatus: null,
   autonomyPanelOpen: false,
@@ -99,7 +101,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     focusAgent: settings.focusAgent,
     showSidebar: settings.showSidebar,
     mailPushEnabled: settings.mailPushEnabled ?? true,
-    mailPushUrl: settings.mailPushUrl ?? 'https://api.idealvibe.online',
+    mailPushUrl: settings.mailPushUrl ?? settings.vibeApiUrl ?? 'https://api.idealvibe.online',
+    vibeApiUrl: settings.vibeApiUrl ?? 'https://api.idealvibe.online',
   }),
 
   registerTerminal: (agentName, terminal) => {

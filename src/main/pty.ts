@@ -1,5 +1,7 @@
-import { ipcMain, BrowserWindow } from 'electron';
+import { ipcMain, BrowserWindow, app } from 'electron';
 import * as pty from 'node-pty';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import { IPC_CHANNELS } from '../shared/types';
 
 interface ManagedPty {
@@ -10,11 +12,23 @@ interface ManagedPty {
 
 const terminals: Map<string, ManagedPty> = new Map();
 
+function getAcpBinDir(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'bin');
+  }
+  // Dev mode: resources/bin relative to repo root
+  return path.join(app.getAppPath(), 'resources', 'bin');
+}
+
 export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   // Spawn a new PTY for an agent
   ipcMain.handle(IPC_CHANNELS.PTY_SPAWN, (_, agentName: string, workDir: string) => {
     const id = crypto.randomUUID();
     const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+    const acpBinDir = getAcpBinDir();
+    const existingPath = process.env.PATH || process.env.Path || '';
+
+    console.log(`[PTY] Spawning ${agentName} shell=${shell} cwd=${workDir}`);
 
     const ptyProcess = pty.spawn(shell, [], {
       name: 'xterm-256color',
@@ -24,6 +38,11 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       env: {
         ...process.env,
         VIBE_AGENT: agentName,
+        ACP_SURFACE_ID: id,
+        ACP_AGENT_ID: `agent:${agentName}`,
+        ACP_API_URL: process.env.ACP_API_URL || 'http://localhost:3001',
+        ACP_BIN_DIR: acpBinDir,
+        PATH: `${acpBinDir}${path.delimiter}${existingPath}`,
       } as Record<string, string>,
     });
 
@@ -39,12 +58,33 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       terminals.delete(id);
     });
 
-    // Auto-inject claude and report as command
+    // Auto-inject claude with skip-permissions, then wait for ready prompt
     setTimeout(() => {
-      ptyProcess.write('claude\r');
+      ptyProcess.write('claude --dangerously-skip-permissions\r');
+
+      // Watch PTY output for Claude's ready indicator before sending report command
+      let reportSent = false;
+      const dataListener = ptyProcess.onData((data) => {
+        // Claude Code shows "❯" when ready for input
+        if (!reportSent && data.includes('\u276F')) {
+          reportSent = true;
+          console.log(`[PTY] Claude ready for ${agentName}, sending report command`);
+          setTimeout(() => {
+            ptyProcess.write(`report as ${agentName}\r`);
+          }, 500);
+          dataListener.dispose();
+        }
+      });
+
+      // Fallback: if prompt not detected in 15s, send anyway
       setTimeout(() => {
-        ptyProcess.write(`report as ${agentName}\r`);
-      }, 2000);
+        if (!reportSent) {
+          reportSent = true;
+          console.log(`[PTY] Fallback: sending report command for ${agentName}`);
+          ptyProcess.write(`report as ${agentName}\r`);
+          dataListener.dispose();
+        }
+      }, 15000);
     }, 500);
 
     return id;

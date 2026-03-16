@@ -1,7 +1,16 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
-import { MailMessage } from '@shared/types';
+import { MailMessage, AgentState } from '@shared/types';
 import { MailItem } from './MailItem';
+
+const STATUS_COLORS: Record<AgentState['status'], string> = {
+  offline: '#64748b',
+  starting: '#a855f7',
+  ready: '#3b82f6',
+  busy: '#f59e0b',
+  idle: '#22c55e',
+  error: '#ef4444',
+};
 
 interface MailAgentSectionProps {
   agent: string;
@@ -11,6 +20,7 @@ interface MailAgentSectionProps {
   selectedMessageId?: number;
   onSelectMessage: (message: MailMessage) => void;
   color?: string;
+  status?: AgentState['status'];
 }
 
 export function MailAgentSection({
@@ -20,7 +30,8 @@ export function MailAgentSection({
   isLoading,
   selectedMessageId,
   onSelectMessage,
-  color = '#7c3aed',
+  color: _color = '#7c3aed',
+  status = 'offline',
 }: MailAgentSectionProps) {
   const [isExpanded, setIsExpanded] = useState(true);
 
@@ -38,10 +49,10 @@ export function MailAgentSection({
           <ChevronRight className="w-4 h-4 text-slate-400" />
         )}
 
-        {/* Agent color indicator */}
+        {/* Agent status indicator */}
         <div
-          className="w-2 h-2 rounded-full"
-          style={{ backgroundColor: color }}
+          className={`w-2 h-2 rounded-full${status === 'starting' || status === 'busy' ? ' animate-pulse' : ''}`}
+          style={{ backgroundColor: STATUS_COLORS[status] }}
         />
 
         {/* Agent name */}

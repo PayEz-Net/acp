@@ -7,7 +7,7 @@ import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
 import { parse as parseUrl } from 'url';
 import { BrowserWindow } from 'electron';
 
-const OAUTH_PORT = 40011;
+const OAUTH_PORT = 40021;
 
 let server: Server | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -20,7 +20,7 @@ function getCallbackHtml(success: boolean, message: string): string {
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Vibe Agents - OAuth</title>
+  <title>ACP - OAuth</title>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

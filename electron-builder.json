@@ -1,6 +1,6 @@
 {
-  "appId": "com.idealvibe.agents-harness",
-  "productName": "Vibe Agents Harness",
+  "appId": "com.idealvibe.agent-collaboration-platform",
+  "productName": "ACP",
   "directories": {
     "output": "release"
   },
