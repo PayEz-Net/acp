@@ -42,6 +42,8 @@ declare global {
       getBackendStatus: () => Promise<{ available: boolean }>;
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
+      getApiLogs: () => Promise<string[]>;
+      onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
     };
   }
 }

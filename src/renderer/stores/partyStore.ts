@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { AgentSignal, RelevanceScore, MingleSession, ACPZone } from '@shared/types';
+import { AgentSignal, RelevanceScore, MingleSession } from '@shared/types';
 import { useAppStore } from './appStore';
 
 interface PartyStore {

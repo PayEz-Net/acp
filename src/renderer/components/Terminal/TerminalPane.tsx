@@ -5,7 +5,7 @@ import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 import { AgentState } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
-import { Play, Square, RotateCcw, AlertTriangle } from 'lucide-react';
+import { Play, Square, RotateCcw } from 'lucide-react';
 
 interface TerminalPaneProps {
   agent: AgentState;

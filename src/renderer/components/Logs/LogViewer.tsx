@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useAppStore } from '../../stores/appStore';
-import { X, Pause, Play, Filter } from 'lucide-react';
+import { X, Pause, Play } from 'lucide-react';
 
 interface LogViewerProps {
   isOpen: boolean;

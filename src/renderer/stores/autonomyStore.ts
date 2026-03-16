@@ -33,7 +33,7 @@ async function autonomyRequest(endpoint: string, options: { method?: string; bod
   });
 }
 
-export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
+export const useAutonomyStore = create<AutonomyStore>((set) => ({
   status: null,
   standupEntries: [],
   escalations: [],

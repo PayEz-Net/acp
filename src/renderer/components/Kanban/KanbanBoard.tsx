@@ -43,7 +43,7 @@ function TaskCard({ task, onSelect, onDragStart }: { task: KanbanTask; onSelect:
 }
 
 export function KanbanBoard({ isOpen, onClose }: KanbanBoardProps) {
-  const { tasks, loading, isCreatingTask, fetchTasks, moveTask, createTask, setSelectedTask, setCreatingTask } = useKanbanStore();
+  const { tasks, isCreatingTask, fetchTasks, moveTask, createTask, setSelectedTask, setCreatingTask } = useKanbanStore();
   const { backendAvailable } = useAppStore();
   const [dragTaskId, setDragTaskId] = useState<number | null>(null);
 

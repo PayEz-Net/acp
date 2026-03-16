@@ -13,24 +13,18 @@ interface KanbanSidebarProps {
 
 export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
   const {
-    boards,
-    selectedBoard,
     selectedTask,
     isCreatingTask,
     loading,
     backlogTasks,
-    readyTasks,
     inProgressTasks,
     reviewTasks,
     doneTasks,
     taskCounts,
-    selectBoard,
     selectTask,
     setCreatingTask,
     moveTask,
     createTask,
-    updateTask,
-    deleteTask,
     refresh
   } = useKanban({ enabled: isOpen });
 
@@ -72,34 +66,12 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
         </div>
       </div>
 
-      {/* Board Selector */}
-      {boards.length > 1 && (
-        <div className="p-2 border-b border-[#2d4a6b]">
-          <select
-            value={selectedBoard?.id || ''}
-            onChange={(e) => {
-              const board = boards.find((b) => b.id === parseInt(e.target.value, 10));
-              if (board) selectBoard(board);
-            }}
-            className="w-full px-2 py-1.5 bg-[#0d2137] border border-[#2d4a6b] rounded text-sm text-white focus:outline-none focus:border-blue-500"
-          >
-            {boards.map((board) => (
-              <option key={board.id} value={board.id}>
-                {board.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
       {/* Columns */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         {selectedTask ? (
           <TaskDetail
             task={selectedTask}
             onClose={() => selectTask(null)}
-            onUpdate={updateTask}
-            onDelete={deleteTask}
             agents={agents}
           />
         ) : (
@@ -108,13 +80,6 @@ export default function KanbanSidebar({ isOpen, agents }: KanbanSidebarProps) {
               lane="backlog"
               tasks={backlogTasks}
               count={taskCounts.backlog}
-              onTaskClick={selectTask}
-              onDrop={handleDrop}
-            />
-            <KanbanColumn
-              lane="ready"
-              tasks={readyTasks}
-              count={taskCounts.ready}
               onTaskClick={selectTask}
               onDrop={handleDrop}
             />

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { KanbanBoard, KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
+import { KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
 import { useAppStore } from './appStore';
 
 // Helper to make authenticated requests to acp-api kanban endpoints

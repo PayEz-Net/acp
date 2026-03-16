@@ -5,8 +5,8 @@ import { X, Trash2, User, Calendar, Loader2 } from 'lucide-react';
 interface TaskDetailProps {
   task: KanbanTask;
   onClose: () => void;
-  onUpdate: (taskId: number, updates: Partial<KanbanTask>) => Promise<boolean>;
-  onDelete: (taskId: number) => Promise<boolean>;
+  onUpdate?: (taskId: number, updates: Partial<KanbanTask>) => Promise<boolean>;
+  onDelete?: (taskId: number) => Promise<boolean>;
   agents: { id: string; name: string }[];
 }
 
@@ -30,7 +30,7 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
     if (!editedTitle.trim()) return;
 
     setIsUpdating(true);
-    await onUpdate(task.id, {
+    await onUpdate?.(task.id, {
       title: editedTitle.trim(),
       description: editedDescription.trim() || undefined,
       priority: editedPriority,
@@ -45,7 +45,7 @@ export default function TaskDetail({ task, onClose, onUpdate, onDelete, agents }
     if (!confirm('Delete this task?')) return;
 
     setIsDeleting(true);
-    await onDelete(task.id);
+    await onDelete?.(task.id);
     setIsDeleting(false);
   };
 
