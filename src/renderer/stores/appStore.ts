@@ -11,6 +11,7 @@ interface AppStore {
   showKanban: boolean;
   showStandup: boolean;
   showContractors: boolean;
+  showChat: boolean;
 
   // Agents
   agents: AgentState[];
@@ -38,6 +39,7 @@ interface AppStore {
   toggleKanban: () => void;
   toggleStandup: () => void;
   toggleContractors: () => void;
+  toggleChat: () => void;
   setActiveAgent: (id: string | null) => void;
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
@@ -61,6 +63,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   showKanban: false,
   showStandup: false,
   showContractors: false,
+  showChat: false,
   agents: [],
   activeAgentId: null,
   terminalRefs: new Map(),
@@ -78,6 +81,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   toggleKanban: () => set((s) => ({ showKanban: !s.showKanban })),
   toggleStandup: () => set((s) => ({ showStandup: !s.showStandup })),
   toggleContractors: () => set((s) => ({ showContractors: !s.showContractors })),
+  toggleChat: () => set((s) => ({ showChat: !s.showChat })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
   setAgents: (configs) => set({

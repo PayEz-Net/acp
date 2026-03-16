@@ -1,4 +1,4 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, User, FolderOpen, Briefcase, ChevronDown } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, MessageSquare, User, FolderOpen, Briefcase, ChevronDown } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useMailStore } from '../../stores/mailStore';
@@ -10,7 +10,7 @@ import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, showContractors, toggleContractors, backendAvailable } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, showContractors, toggleContractors, showChat, toggleChat, backendAvailable } = useAppStore();
   const { user } = useAuthStore();
   const { mailboxes } = useMailStore();
   const { unreadCount: standupUnread } = useStandupStore();
@@ -140,6 +140,19 @@ export function TitleBar() {
           title="Toggle Kanban"
         >
           <LayoutList className="w-4 h-4" />
+        </button>
+
+        {/* Chat toggle */}
+        <button
+          onClick={toggleChat}
+          className={`p-2 rounded transition-colors ${
+            showChat
+              ? 'bg-pink-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title="Toggle Chat"
+        >
+          <MessageSquare className="w-4 h-4" />
         </button>
 
         {/* Contractors toggle */}

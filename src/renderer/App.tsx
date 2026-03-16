@@ -26,10 +26,9 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, showContractors, toggleContractors, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showChat, toggleChat, showStandup, showContractors, toggleContractors, activeAgentId, setAgents, setSettings } = useAppStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
   const { showPicker, setShowPicker, fetchActiveProject, fetchProjects } = useProjectStore();
-  const [showChat, setShowChat] = useState(false);
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -166,7 +165,7 @@ export default function App() {
         <KanbanBoard isOpen={showKanban} onClose={toggleKanban} />
 
         {/* Chat Panel */}
-        <ChatPanel isOpen={showChat} onClose={() => setShowChat(false)} />
+        <ChatPanel isOpen={showChat} onClose={toggleChat} />
 
         {/* Contractor Panel */}
         <ContractorPanel isOpen={showContractors} onClose={toggleContractors} />
