@@ -22,10 +22,28 @@ function toCamel(str) {
   return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }
 
+// JSONB fields that should be parsed from string to array/object
+const JSONB_FIELDS = new Set([
+  'keywords', 'needs', 'offers', 'members', 'filesChanged',
+  'domainTags', 'typicalOffers', 'typicalNeeds', 'recentKeywords',
+  'customFunctions', 'preferences', 'memory',
+  'connectionInfo', 'capabilities'
+]);
+
 function rowToCamel(row) {
   const out = {};
   for (const [k, v] of Object.entries(row)) {
-    out[toCamel(k)] = v;
+    const camelKey = toCamel(k);
+    // Parse JSONB string fields back to arrays/objects
+    if (JSONB_FIELDS.has(camelKey) && typeof v === 'string') {
+      try {
+        out[camelKey] = JSON.parse(v);
+      } catch {
+        out[camelKey] = v; // Keep original if parse fails
+      }
+    } else {
+      out[camelKey] = v;
+    }
   }
   return out;
 }
@@ -172,6 +190,53 @@ CREATE TABLE IF NOT EXISTS escalation_log (
   created_at TEXT NOT NULL,
   resolved_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS acp_runtime_registry (
+  agent_id TEXT PRIMARY KEY,
+  runtime TEXT NOT NULL,
+  adapter TEXT NOT NULL,
+  connection_info JSONB NOT NULL DEFAULT '{}',
+  capabilities JSONB NOT NULL DEFAULT '{}',
+  registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  display_name TEXT,
+  role TEXT,
+  model TEXT,
+  expertise_json JSONB DEFAULT '{}',
+  agent_type VARCHAR(20) DEFAULT 'team',
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS agent_contracts (
+  id SERIAL PRIMARY KEY,
+  contractor_agent_id INTEGER NOT NULL,
+  hired_by_agent_id INTEGER NOT NULL,
+  contract_subject TEXT NOT NULL,
+  contract_message_id INTEGER,
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  profile_source TEXT,
+  profile_snapshot JSONB,
+  timeout_hours INTEGER DEFAULT 72,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
+
+CREATE INDEX IF NOT EXISTS idx_agents_type ON agents(agent_type);
+
+CREATE INDEX IF NOT EXISTS idx_contracts_contractor ON agent_contracts(contractor_agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_contracts_status ON agent_contracts(status) WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_contracts_hired_by ON agent_contracts(hired_by_agent_id) WHERE status = 'active';
 `;
 
 export class VibeSqlClient {
@@ -193,6 +258,10 @@ export class VibeSqlClient {
       err.detail = data.error?.detail;
       err.statusCode = res.status;
       throw err;
+    }
+    // Normalize response: VibeSQL omits 'rows' field on empty results
+    if (data.rows === undefined) {
+      data.rows = [];
     }
     return data;
   }
@@ -594,6 +663,186 @@ export class VibeSqlClient {
       `SELECT * FROM escalation_log WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`
     );
     return result.rows.map(rowToCamel);
+  }
+
+  // --- Runtime Registry ---
+
+  async registerAgent(reg) {
+    const result = await this._query(
+      `SELECT agent_id FROM acp_runtime_registry WHERE agent_id = ${escapeSql(reg.agentId)}`
+    );
+    if (result.rows.length > 0) {
+      await this._query(`UPDATE acp_runtime_registry SET
+        runtime = ${escapeSql(reg.runtime)},
+        adapter = ${escapeSql(reg.adapter)},
+        connection_info = ${escapeJsonb(reg.connectionInfo || {})},
+        capabilities = ${escapeJsonb(reg.capabilities || {})},
+        last_heartbeat = NOW()
+        WHERE agent_id = ${escapeSql(reg.agentId)}`);
+    } else {
+      await this._query(`INSERT INTO acp_runtime_registry
+        (agent_id, runtime, adapter, connection_info, capabilities)
+        VALUES (
+          ${escapeSql(reg.agentId)},
+          ${escapeSql(reg.runtime)},
+          ${escapeSql(reg.adapter)},
+          ${escapeJsonb(reg.connectionInfo || {})},
+          ${escapeJsonb(reg.capabilities || {})}
+        )`);
+    }
+  }
+
+  async deregisterAgent(agentId) {
+    await this._query(
+      `DELETE FROM acp_runtime_registry WHERE agent_id = ${escapeSql(agentId)}`
+    );
+  }
+
+  async getAgentRegistration(agentId) {
+    const result = await this._query(
+      `SELECT * FROM acp_runtime_registry WHERE agent_id = ${escapeSql(agentId)}`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
+  async listRegistrations() {
+    const result = await this._query('SELECT * FROM acp_runtime_registry ORDER BY registered_at');
+    return result.rows.map(rowToCamel);
+  }
+
+  // --- Agents ---
+
+  async getAgentByName(name) {
+    const result = await this._query(
+      `SELECT * FROM agents WHERE name = ${escapeSql(name)}`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
+  async getAgentById(id) {
+    const result = await this._query(
+      `SELECT * FROM agents WHERE id = ${escapeSql(id)}`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
+  async upsertAgent(agent) {
+    const result = await this._query(
+      `INSERT INTO agents (name, display_name, role, model, expertise_json, agent_type, is_active)
+       VALUES (
+         ${escapeSql(agent.name)},
+         ${escapeSql(agent.displayName || agent.name)},
+         ${escapeSql(agent.role || null)},
+         ${escapeSql(agent.model || null)},
+         ${escapeJsonb(agent.expertiseJson || {})},
+         ${escapeSql(agent.agentType || 'team')},
+         ${escapeSql(agent.isActive !== false)}
+       )
+       ON CONFLICT (name) DO NOTHING
+       RETURNING id, name, agent_type`
+    );
+    if (result.rows.length > 0) return rowToCamel(result.rows[0]);
+    // Already existed — fetch it
+    return this.getAgentByName(agent.name);
+  }
+
+  async updateAgent(id, updates) {
+    const sets = [];
+    if (updates.displayName !== undefined) sets.push(`display_name = ${escapeSql(updates.displayName)}`);
+    if (updates.role !== undefined) sets.push(`role = ${escapeSql(updates.role)}`);
+    if (updates.model !== undefined) sets.push(`model = ${escapeSql(updates.model)}`);
+    if (updates.expertiseJson !== undefined) sets.push(`expertise_json = ${escapeJsonb(updates.expertiseJson)}`);
+    if (updates.agentType !== undefined) sets.push(`agent_type = ${escapeSql(updates.agentType)}`);
+    if (updates.isActive !== undefined) sets.push(`is_active = ${escapeSql(updates.isActive)}`);
+    sets.push(`updated_at = NOW()`);
+    await this._query(`UPDATE agents SET ${sets.join(', ')} WHERE id = ${escapeSql(id)}`);
+  }
+
+  async listAgentsByType(agentType) {
+    const result = await this._query(
+      `SELECT * FROM agents WHERE agent_type = ${escapeSql(agentType)} ORDER BY name`
+    );
+    return result.rows.map(rowToCamel);
+  }
+
+  // --- Agent Contracts ---
+
+  async createContract(contract) {
+    const result = await this._query(
+      `INSERT INTO agent_contracts
+        (contractor_agent_id, hired_by_agent_id, contract_subject, contract_message_id, profile_source, profile_snapshot, timeout_hours)
+       VALUES (
+         ${escapeSql(contract.contractorAgentId)},
+         ${escapeSql(contract.hiredByAgentId)},
+         ${escapeSql(contract.contractSubject)},
+         ${escapeSql(contract.contractMessageId || null)},
+         ${escapeSql(contract.profileSource || null)},
+         ${escapeJsonb(contract.profileSnapshot || null)},
+         ${escapeSql(contract.timeoutHours ?? 72)}
+       ) RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async getContract(id) {
+    const result = await this._query(
+      `SELECT * FROM agent_contracts WHERE id = ${escapeSql(id)}`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
+  async listActiveContracts() {
+    const result = await this._query(
+      `SELECT c.*, a.name AS contractor_name, a.display_name AS contractor_display_name,
+              a.role AS contractor_role, a.model AS contractor_model, a.expertise_json AS contractor_expertise,
+              h.name AS hired_by_name
+       FROM agent_contracts c
+       JOIN agents a ON a.id = c.contractor_agent_id
+       JOIN agents h ON h.id = c.hired_by_agent_id
+       WHERE c.status = 'active'
+       ORDER BY c.created_at DESC`
+    );
+    return result.rows.map(rowToCamel);
+  }
+
+  async countActiveContractsByHirer(hiredByAgentId) {
+    const result = await this._query(
+      `SELECT COUNT(*) AS count FROM agent_contracts
+       WHERE hired_by_agent_id = ${escapeSql(hiredByAgentId)} AND status = 'active'`
+    );
+    return parseInt(result.rows[0]?.count || '0', 10);
+  }
+
+  async completeContract(contractId) {
+    const now = new Date().toISOString();
+    const result = await this._query(
+      `UPDATE agent_contracts SET status = 'completed', completed_at = ${escapeSql(now)}
+       WHERE id = ${escapeSql(contractId)} AND status = 'active'
+       RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async expireContracts() {
+    const result = await this._query(
+      `UPDATE agent_contracts
+       SET status = 'expired', completed_at = NOW()
+       WHERE status = 'active'
+         AND created_at + (timeout_hours || ' hours')::INTERVAL < NOW()
+       RETURNING *`
+    );
+    return result.rows.map(rowToCamel);
+  }
+
+  async updateContractMessageId(contractId, messageId) {
+    await this._query(
+      `UPDATE agent_contracts SET contract_message_id = ${escapeSql(messageId)}
+       WHERE id = ${escapeSql(contractId)}`
+    );
   }
 
   _sessionFromRow(row) {
