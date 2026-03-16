@@ -123,10 +123,11 @@ export async function startApiServer(): Promise<boolean> {
 
   const apiPath = getApiPath();
   const serverScript = path.join(apiPath, 'api/server.js');
+  const tsxBin = path.join(apiPath, 'node_modules/.bin/tsx');
 
-  console.log(`[ACP-API] Starting: node ${serverScript}`);
+  console.log(`[ACP-API] Starting: tsx ${serverScript}`);
 
-  apiProcess = spawn('node', [serverScript], {
+  apiProcess = spawn(tsxBin, [serverScript], {
     cwd: apiPath,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
