@@ -153,14 +153,23 @@ app.whenReady().then(async () => {
   console.log(`[ACP] Backend available: ${backendAvailable}`);
 
   // Bypass CORS — this is a desktop app, not a browser
+  // Must delete server-side CORS headers first to avoid duplicates
+  // (Express sends title-case, we set lowercase → two headers → browser rejects)
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     delete details.requestHeaders['Origin'];
     callback({ requestHeaders: details.requestHeaders });
   });
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders };
+    // Remove any server-side CORS headers (case-insensitive cleanup)
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase().startsWith('access-control-')) {
+        delete headers[key];
+      }
+    }
     callback({
       responseHeaders: {
-        ...details.responseHeaders,
+        ...headers,
         'access-control-allow-origin': ['*'],
         'access-control-allow-headers': ['*'],
         'access-control-allow-methods': ['GET, POST, PUT, DELETE, OPTIONS'],
