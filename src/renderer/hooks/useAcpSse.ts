@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useMailStore } from '../stores/mailStore';
+import { usePartyStore } from '../stores/partyStore';
+import { useAutonomyStore } from '../stores/autonomyStore';
 
 /**
  * Centralized SSE hook — single connection to acp-api, multiplexed by agent.
@@ -145,6 +147,24 @@ export function useAcpSse() {
                 fetchInbox(agentName);
               } catch (err) {
                 console.error('[AcpSse] Failed to parse mail event:', err);
+              }
+            }
+
+            // Phase 3: Party engine updates
+            if (eventType === 'party-update' && data) {
+              try {
+                usePartyStore.getState().updateFromSse(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse party event:', err);
+              }
+            }
+
+            // Phase 3: Autonomy updates
+            if (eventType === 'autonomy-update' && data) {
+              try {
+                useAutonomyStore.getState().updateFromSse(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse autonomy event:', err);
               }
             }
           }
