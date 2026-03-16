@@ -33,6 +33,7 @@ function isBackendAvailable(): boolean {
 /**
  * Make authenticated request to the mail API via acp-api.
  * Throws if backend is unavailable (Option C: mail disabled without backend).
+ * On 401, clears cached secret and retries once with fresh secret (Phase 5: secret rotation).
  */
 async function mailRequest(endpoint: string, options: { method?: string; body?: unknown } = {}) {
   if (!isBackendAvailable()) {
@@ -40,21 +41,32 @@ async function mailRequest(endpoint: string, options: { method?: string; body?: 
   }
 
   const { method = 'GET', body } = options;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const url = `http://127.0.0.1:3001/v1/mail${endpoint}`;
 
-  const secret = await getLocalSecret();
-  if (secret) {
-    headers['Authorization'] = `Bearer ${secret}`;
+  async function doFetch(): Promise<Response> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const secret = await getLocalSecret();
+    if (secret) {
+      headers['Authorization'] = `Bearer ${secret}`;
+    }
+    return fetch(url, {
+      method,
+      headers,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
   }
 
-  const url = `http://127.0.0.1:3001/v1/mail${endpoint}`;
   console.log(`[Mail] → acp-api: ${method} ${endpoint}`);
+  let res = await doFetch();
 
-  return fetch(url, {
-    method,
-    headers,
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
+  // Secret rotation: on 401, clear cache and retry once with fresh secret
+  if (res.status === 401) {
+    console.log('[Mail] 401 — rotating secret and retrying');
+    localSecretCache = null;
+    res = await doFetch();
+  }
+
+  return res;
 }
 
 // Mock data for demo

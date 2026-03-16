@@ -245,6 +245,8 @@ export const IPC_CHANNELS = {
   ACP_GET_BACKEND_STATUS: 'acp:getBackendStatus',
   ACP_GET_LOCAL_SECRET: 'acp:getLocalSecret',
   ACP_RETRY_BACKEND: 'acp:retryBackend',
+  ACP_GET_LOGS: 'acp:getLogs',
+  ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
 } as const;
 
 // Vibe credentials type

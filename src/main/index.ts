@@ -4,7 +4,7 @@ import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer } from './auth';
 import { startOAuthServer, stopOAuthServer } from './oauth-server';
-import { startApiServer, stopApiServer, getLocalSecret } from './api-server';
+import { startApiServer, stopApiServer, getLocalSecret, getApiLogs, setOnBackendStatusChange } from './api-server';
 import { startLifecycleServer, stopLifecycleServer } from './lifecycle-server';
 import { IPC_CHANNELS } from '../shared/types';
 
@@ -129,6 +129,17 @@ function setupIpcHandlers() {
     backendAvailable = await startApiServer();
     return { available: backendAvailable };
   });
+
+  // Log viewer support
+  ipcMain.handle(IPC_CHANNELS.ACP_GET_LOGS, () => {
+    return getApiLogs();
+  });
+
+  // Crash recovery: notify renderer when backend status changes
+  setOnBackendStatusChange((available, message) => {
+    backendAvailable = available;
+    mainWindow?.webContents.send(IPC_CHANNELS.ACP_BACKEND_STATUS_CHANGED, { available, message });
+  });
 }
 
 // App lifecycle
@@ -177,10 +188,28 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', async (e) => {
+  // Graceful quit: signal acp-api shutdown, wait, then clean up
+  console.log('[ACP] Graceful quit sequence starting...');
+
+  // Send shutdown signal to acp-api (if running)
+  try {
+    const secret = getLocalSecret();
+    if (secret) {
+      await Promise.race([
+        fetch('http://127.0.0.1:3001/internal/shutdown', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${secret}` },
+        }).catch(() => {}),
+        new Promise(resolve => setTimeout(resolve, 5000)), // 5s max wait
+      ]);
+    }
+  } catch { /* ignore — best effort */ }
+
   killAllPty();
   stopApiServer();
   stopLifecycleServer();
   stopOAuthServer();
   stopTokenRefreshTimer();
+  console.log('[ACP] Graceful quit complete');
 });

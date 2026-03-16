@@ -14,18 +14,43 @@ import { getCallbackPort } from './lifecycle-server';
 
 let apiProcess: ChildProcess | null = null;
 let localSecret: string | null = null;
+let crashCount = 0;
+let intentionalStop = false;
+let logBuffer: string[] = [];
+const MAX_LOG_LINES = 500;
 
 const API_PORT = 3001;
 const HEALTH_POLL_INTERVAL = 500;
 const HEALTH_TIMEOUT = 15_000;
+const MAX_CRASH_RETRIES = 3;
+
+/** Get captured log lines from acp-api stdout/stderr */
+export function getApiLogs(): string[] {
+  return logBuffer;
+}
+
+/** Notify renderer of backend status changes */
+let onBackendStatusChange: ((available: boolean, message?: string) => void) | null = null;
+export function setOnBackendStatusChange(cb: typeof onBackendStatusChange) {
+  onBackendStatusChange = cb;
+}
 
 /** Get the local secret (generated fresh each launch) */
 export function getLocalSecret(): string | null {
   return localSecret;
 }
 
-/** Resolve the acp-api repo path relative to this repo */
+/** Resolve the acp-api path — bundled in production, sibling folder in dev */
 function getApiPath(): string {
+  // Production: bundled in extraResources
+  if (require('electron').app.isPackaged) {
+    const bundledPath = path.join(process.resourcesPath, 'acp-api');
+    try {
+      require('fs').accessSync(path.join(bundledPath, 'api/server.js'));
+      return bundledPath;
+    } catch { /* fall through to dev paths */ }
+  }
+  // Dev: sibling folder
   const devPath = path.resolve(__dirname, '../../../acp-api');
   const legacyPath = path.resolve(__dirname, '../../../acp');
   try {
@@ -114,24 +139,54 @@ export async function startApiServer(): Promise<boolean> {
 
   apiProcess.stdout?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) console.log(`[ACP-API] ${line}`);
+    if (line) {
+      console.log(`[ACP-API] ${line}`);
+      logBuffer.push(`[out] ${line}`);
+      if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
+    }
   });
 
   apiProcess.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) console.error(`[ACP-API] ${line}`);
+    if (line) {
+      console.error(`[ACP-API] ${line}`);
+      logBuffer.push(`[err] ${line}`);
+      if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
+    }
   });
 
   apiProcess.on('exit', (code) => {
     console.log(`[ACP-API] Exited with code ${code}`);
     apiProcess = null;
+
+    // Crash recovery: auto-restart on unexpected exit
+    if (!intentionalStop && code !== 0) {
+      crashCount++;
+      console.log(`[ACP-API] Crash #${crashCount}/${MAX_CRASH_RETRIES}`);
+
+      if (crashCount <= MAX_CRASH_RETRIES) {
+        onBackendStatusChange?.(false, 'Backend restarting...');
+        // Restart with new secret after 2s
+        setTimeout(async () => {
+          const healthy = await startApiServer();
+          onBackendStatusChange?.(healthy, healthy ? undefined : 'Backend restart failed');
+        }, 2000);
+      } else {
+        console.error('[ACP-API] Max crash retries exceeded — Option C (mail disabled)');
+        onBackendStatusChange?.(false, 'Backend failed after 3 retries');
+      }
+    }
   });
+
+  intentionalStop = false;
+  crashCount = 0; // Reset on successful start
 
   return waitForHealth();
 }
 
-/** Stop the API server */
+/** Stop the API server (intentional — no crash recovery) */
 export function stopApiServer(): void {
+  intentionalStop = true;
   if (apiProcess) {
     console.log('[ACP-API] Stopping...');
     apiProcess.kill('SIGTERM');

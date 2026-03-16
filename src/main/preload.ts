@@ -25,6 +25,8 @@ const IPC_CHANNELS = {
   ACP_GET_BACKEND_STATUS: 'acp:getBackendStatus',
   ACP_GET_LOCAL_SECRET: 'acp:getLocalSecret',
   ACP_RETRY_BACKEND: 'acp:retryBackend',
+  ACP_GET_LOGS: 'acp:getLogs',
+  ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -147,6 +149,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   retryBackend: (): Promise<{ available: boolean }> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_RETRY_BACKEND);
   },
+
+  getApiLogs: (): Promise<string[]> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_LOGS);
+  },
+
+  onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, data: { available: boolean; message?: string }) => callback(data);
+    ipcRenderer.on(IPC_CHANNELS.ACP_BACKEND_STATUS_CHANGED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACP_BACKEND_STATUS_CHANGED, handler);
+  },
 });
 
 // Type declaration for renderer
@@ -181,6 +193,8 @@ declare global {
       getBackendStatus: () => Promise<{ available: boolean }>;
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
+      getApiLogs: () => Promise<string[]>;
+      onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
     };
   }
 }
