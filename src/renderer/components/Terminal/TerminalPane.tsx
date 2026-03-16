@@ -140,9 +140,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     terminal.writeln('\x1b[90m  Press ▷ to start agent...\x1b[0m');
     terminal.writeln('');
 
-    // Handle resize
+    // Handle resize — debounce fit + scrollToBottom to prevent scroll jump
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit();
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        fitAddon.fit();
+        terminal.scrollToBottom();
+      }, 100);
     });
     resizeObserver.observe(terminalRef.current);
 
@@ -178,7 +183,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
     const unsubscribe = window.electronAPI.onTerminalData((data) => {
       if (data.terminalId === agent.terminalId && xtermRef.current) {
-        xtermRef.current.write(data.data);
+        const term = xtermRef.current;
+        // Check if user is at bottom before write (don't steal scroll from scrollback reading)
+        const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+        term.write(data.data);
+        // Snap to bottom if user was already there
+        if (wasAtBottom) {
+          term.scrollToBottom();
+        }
 
         // Detect agent status from Claude Code output patterns
         const chunk = data.data;
