@@ -799,7 +799,10 @@ export class VibeSqlClient {
     return rowToCamel(result.rows[0]);
   }
 
-  async listActiveContracts() {
+  async listContracts(status = 'active') {
+    const statusFilter = status === 'all'
+      ? ''
+      : `WHERE c.status = ${escapeSql(status)}`;
     const result = await this._query(
       `SELECT c.*, a.name AS contractor_name, a.display_name AS contractor_display_name,
               a.role AS contractor_role, a.model AS contractor_model, a.expertise_json AS contractor_expertise,
@@ -807,7 +810,7 @@ export class VibeSqlClient {
        FROM agent_contracts c
        JOIN agents a ON a.id = c.contractor_agent_id
        JOIN agents h ON h.id = c.hired_by_agent_id
-       WHERE c.status = 'active'
+       ${statusFilter}
        ORDER BY c.created_at DESC`
     );
     return result.rows.map(rowToCamel);

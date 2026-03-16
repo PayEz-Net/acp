@@ -74,6 +74,45 @@ async function dirExists(dir: string): Promise<boolean> {
   }
 }
 
+function parseJsonb(val: any): any {
+  if (val == null) return null;
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch { return null; }
+}
+
+/**
+ * Transform a flat SQL JOIN row (camelCase) into the nested { agent, contract } shape
+ * expected by the frontend. Output keys are snake_case to match wire format.
+ */
+function transformContractRow(row: any): { agent: any; contract: any } {
+  return {
+    agent: {
+      id: row.contractorAgentId,
+      name: row.contractorName,
+      agent_type: 'contractor',
+      display_name: row.contractorDisplayName || null,
+      role: row.contractorRole || null,
+      model: row.contractorModel || null,
+      expertise_json: parseJsonb(row.contractorExpertise),
+      is_active: row.status === 'active',
+    },
+    contract: {
+      id: row.id,
+      contractor_agent_id: row.contractorAgentId,
+      hired_by_agent_id: row.hiredByAgentId,
+      hired_by_name: row.hiredByName || null,
+      contractor_name: row.contractorName,
+      contract_subject: row.contractSubject || null,
+      status: row.status,
+      profile_source: row.profileSource || null,
+      profile_snapshot: parseJsonb(row.profileSnapshot),
+      timeout_hours: row.timeoutHours,
+      created_at: row.createdAt,
+      completed_at: row.completedAt || null,
+    },
+  };
+}
+
 /**
  * Scan a pool directory for .md profiles with valid frontmatter.
  */
@@ -326,18 +365,23 @@ export class ContractorService {
   }
 
   /**
-   * List active contracts with agent data. Also runs on-read expiry check.
+   * List contracts with agent data. Runs on-read expiry check when fetching active or all.
+   * @param status - 'active' (default), 'completed', or 'all'
    */
-  async listActive(): Promise<any[]> {
-    // On-read expiry check — expire timed-out contracts
-    const expired = await this.storage.expireContracts();
-    for (const c of expired) {
-      this.eventBus.emit({
-        event: 'contractor-expired',
-        data: { contract_id: c.id, contractor_agent_id: c.contractorAgentId },
-      });
+  async listContracts(status: 'active' | 'completed' | 'all' = 'active'): Promise<any[]> {
+    // On-read expiry check — expire timed-out contracts (only relevant when viewing active)
+    if (status === 'active' || status === 'all') {
+      const expired = await this.storage.expireContracts();
+      for (const c of expired) {
+        this.eventBus.emit({
+          event: 'contractor-expired',
+          data: { contract_id: c.id, contractor_agent_id: c.contractorAgentId },
+        });
+      }
     }
-    return this.storage.listActiveContracts();
+
+    const rows = await this.storage.listContracts(status);
+    return rows.map(transformContractRow);
   }
 
   /**

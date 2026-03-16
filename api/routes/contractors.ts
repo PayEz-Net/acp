@@ -15,10 +15,16 @@ export default function contractorRoutes(contractorService: ContractorService): 
     }
   });
 
-  // GET /v1/contractors/active — list active contracts with agent profile data
+  // GET /v1/contractors/active — list contracts with agent profile data
+  // ?status=active (default) | completed | all
   router.get('/active', async (req: Request, res: Response) => {
     try {
-      const contracts = await contractorService.listActive();
+      const status = (req.query.status as string) || 'active';
+      if (!['active', 'completed', 'all'].includes(status)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'status must be active, completed, or all', 'contractors_active', (req as any).requestId));
+        return;
+      }
+      const contracts = await contractorService.listContracts(status as 'active' | 'completed' | 'all');
       res.json(success(contracts, 'contractors_active', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'contractors_active', (req as any).requestId));
