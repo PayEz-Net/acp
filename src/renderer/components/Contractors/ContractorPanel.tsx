@@ -221,9 +221,9 @@ function ProfileCard({
 
   const handleComplete = async () => {
     setCompleting(true);
-    await onComplete(contract.id);
+    const success = await onComplete(contract.id);
     setCompleting(false);
-    onBack();
+    if (success) onBack();
   };
 
   return (
@@ -390,11 +390,18 @@ function PoolProfileItem({
   const [hiring, setHiring] = useState(false);
   const [subject, setSubject] = useState('');
   const [showSubject, setShowSubject] = useState(false);
+  const [error, setError] = useState('');
 
   const handleHire = async () => {
     if (!subject.trim()) return;
     setHiring(true);
+    setError('');
     try {
+      // D-1: Use active agent identity, not hardcoded fallback
+      const { agents, activeAgentId } = useAppStore.getState();
+      const activeAgent = agents.find(a => a.id === activeAgentId);
+      const fromAgent = activeAgent?.name || agents[0]?.name || 'BAPert';
+
       const secret = await window.electronAPI.getLocalSecret();
       const res = await fetch('http://127.0.0.1:3001/v1/mail/send', {
         method: 'POST',
@@ -403,7 +410,7 @@ function PoolProfileItem({
           ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
         },
         body: JSON.stringify({
-          from_agent: useAppStore.getState().agents[0]?.name || 'BAPert',
+          from_agent: fromAgent,
           to: [profile.name],
           subject: subject.trim(),
           body: `Hiring ${profile.name} for: ${subject.trim()}`,
@@ -414,10 +421,14 @@ function PoolProfileItem({
         useContractorStore.getState().fetchActive();
         onClose();
       } else {
-        const err = await res.json().catch(() => ({}));
-        console.error('[Contractors] Hire failed:', err);
+        // D-4: Show error inline (e.g. 409 max contracts)
+        const errBody = await res.json().catch(() => ({ error: { message: `Error ${res.status}` } }));
+        const msg = errBody?.error?.message || errBody?.message || `Request failed (${res.status})`;
+        setError(msg);
+        console.error('[Contractors] Hire failed:', msg);
       }
     } catch (err) {
+      setError('Network error — backend may be unavailable');
       console.error('[Contractors] Hire failed:', err);
     } finally {
       setHiring(false);
@@ -460,11 +471,16 @@ function PoolProfileItem({
             type="text"
             placeholder="Contract subject (what's the task?)"
             value={subject}
-            onChange={(e) => setSubject(e.target.value)}
+            onChange={(e) => { setSubject(e.target.value); setError(''); }}
             className="w-full px-2 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
             autoFocus
             onKeyDown={(e) => { if (e.key === 'Enter') handleHire(); if (e.key === 'Escape') setShowSubject(false); }}
           />
+          {error && (
+            <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/50 rounded px-2 py-1">
+              {error}
+            </div>
+          )}
           <div className="flex gap-1">
             <button
               onClick={handleHire}
@@ -474,7 +490,7 @@ function PoolProfileItem({
               {hiring ? 'Hiring...' : 'Send contract'}
             </button>
             <button
-              onClick={() => setShowSubject(false)}
+              onClick={() => { setShowSubject(false); setError(''); }}
               className="text-xs py-1 px-2 rounded bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
             >
               Cancel
