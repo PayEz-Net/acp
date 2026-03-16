@@ -4,7 +4,7 @@
  * Downstream SSE clients subscribe and receive them alongside mail events.
  */
 
-export type LocalEventType = 'party-update' | 'autonomy-update' | 'standup-entry' | 'agent-status' | 'kanban-update' | 'chat-message' | 'contractor-hired' | 'contractor-completed' | 'contractor-expired';
+export type LocalEventType = 'party-update' | 'autonomy-update' | 'standup-entry' | 'agent-status' | 'kanban-update' | 'chat-message' | 'contractor-hired' | 'contractor-completed' | 'contractor-expired' | 'contractor-cancelled';
 
 export interface LocalEvent {
   event: LocalEventType;

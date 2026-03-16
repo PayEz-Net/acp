@@ -148,6 +148,12 @@ export default function mailProxyRoutes(
             } catch { /* non-fatal */ }
           }
         }
+        // DONE: auto-completion — check if sender is a contractor completing work
+        if (contractorService && from_agent && subject && Array.isArray(to)) {
+          try {
+            await contractorService.checkDoneAutoComplete(from_agent, subject, to);
+          } catch { /* non-fatal — don't break mail delivery */ }
+        }
         if (onMailSent && from_agent && subject) {
           try { onMailSent(from_agent, subject, to || []); } catch { /* non-fatal */ }
         }

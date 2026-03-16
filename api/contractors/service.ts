@@ -396,4 +396,52 @@ export class ContractorService {
     });
     return contract;
   }
+
+  /**
+   * Cancel a contract by contract ID. Sets status to 'cancelled'.
+   * Session kill deferred to Phase 2b (when sessions exist).
+   */
+  async cancelContract(contractId: number, reason?: string): Promise<any> {
+    const contract = await this.storage.cancelContract(contractId, reason || null);
+    if (!contract) return null;
+    this.eventBus.emit({
+      event: 'contractor-cancelled',
+      data: {
+        contract_id: contract.id,
+        contractor_agent_id: contract.contractorAgentId,
+        status: 'cancelled',
+        reason: reason || null,
+      },
+    });
+    return contract;
+  }
+
+  /**
+   * DONE: auto-completion hook. Called during mail send.
+   * Detects DONE: prefix in subject, matches contract by contractor + hiring agent.
+   * Returns the completed contract, or null if no match.
+   */
+  async checkDoneAutoComplete(fromAgentName: string, subject: string, toAgentNames: string[]): Promise<any | null> {
+    if (!subject.trim().match(/^done:/i)) return null;
+
+    // Sender is the contractor. Look up their agent ID.
+    const fromAgent = await this.storage.getAgentByName(fromAgentName);
+    if (!fromAgent || fromAgent.agentType !== 'contractor') return null;
+
+    // Match contract by contractor + hiring agent (TO field)
+    for (const toName of toAgentNames) {
+      const toAgent = await this.storage.getAgentByName(toName);
+      if (!toAgent) continue;
+
+      const contract = await this.storage.findActiveContractByContractorAndHirer(
+        fromAgent.id,
+        toAgent.id,
+      );
+      if (contract) {
+        return this.completeContract(contract.id);
+      }
+    }
+
+    return null; // No matching active contract — deliver mail normally
+  }
 }

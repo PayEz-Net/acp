@@ -26,5 +26,27 @@ export default function contractRoutes(contractorService: ContractorService): Ro
     }
   });
 
+  // POST /v1/contracts/:contract_id/cancel — cancel a contract
+  router.post('/:contract_id/cancel', async (req: Request, res: Response) => {
+    try {
+      const contractId = parseInt(req.params.contract_id as string, 10);
+      if (isNaN(contractId)) {
+        res.status(400).json(error('INVALID_REQUEST', 'contract_id must be an integer', 'contract_cancel', (req as any).requestId));
+        return;
+      }
+
+      const reason = req.body?.reason || null;
+      const contract = await contractorService.cancelContract(contractId, reason);
+      if (!contract) {
+        res.status(404).json(error('NOT_FOUND', 'Contract not found or not active/queued', 'contract_cancel', (req as any).requestId));
+        return;
+      }
+
+      res.json(success(contract, 'contract_cancel', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'contract_cancel', (req as any).requestId));
+    }
+  });
+
   return router;
 }

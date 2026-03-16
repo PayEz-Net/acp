@@ -239,6 +239,23 @@ CREATE INDEX IF NOT EXISTS idx_contracts_status ON agent_contracts(status) WHERE
 CREATE INDEX IF NOT EXISTS idx_contracts_hired_by ON agent_contracts(hired_by_agent_id) WHERE status = 'active';
 `;
 
+// Phase 2a migration: new columns on agent_contracts
+const PHASE2A_MIGRATION = [
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS session_pid INTEGER`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS session_started_at TIMESTAMPTZ`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS session_ended_at TIMESTAMPTZ`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS exit_code INTEGER`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS cancel_reason TEXT`,
+  // Update CHECK constraint to allow 'queued' and 'cancelled' statuses
+  // DROP + ADD is idempotent if we catch the drop error
+  `DO $$ BEGIN
+     ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check;
+     ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
+       CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired'));
+   EXCEPTION WHEN OTHERS THEN NULL;
+   END $$`,
+];
+
 export class VibeSqlClient {
   constructor(cfg) {
     this._config = cfg || defaultConfig;
@@ -276,6 +293,10 @@ export class VibeSqlClient {
       .filter((s) => s.length > 0);
     for (const stmt of statements) {
       await this._query(stmt);
+    }
+    // Phase 2a migration
+    for (const stmt of PHASE2A_MIGRATION) {
+      try { await this._query(stmt); } catch { /* column/constraint may already exist */ }
     }
   }
 
@@ -850,6 +871,29 @@ export class VibeSqlClient {
       `UPDATE agent_contracts SET contract_message_id = ${escapeSql(messageId)}
        WHERE id = ${escapeSql(contractId)}`
     );
+  }
+
+  async cancelContract(contractId, reason) {
+    const now = new Date().toISOString();
+    const result = await this._query(
+      `UPDATE agent_contracts
+       SET status = 'cancelled', completed_at = ${escapeSql(now)},
+           cancel_reason = ${escapeSql(reason || null)}
+       WHERE id = ${escapeSql(contractId)} AND status IN ('active', 'queued')
+       RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async findActiveContractByContractorAndHirer(contractorAgentId, hiredByAgentId) {
+    const result = await this._query(
+      `SELECT * FROM agent_contracts
+       WHERE contractor_agent_id = ${escapeSql(contractorAgentId)}
+         AND hired_by_agent_id = ${escapeSql(hiredByAgentId)}
+         AND status = 'active'
+       ORDER BY created_at DESC LIMIT 1`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
   }
 
   _sessionFromRow(row) {
