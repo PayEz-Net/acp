@@ -246,15 +246,13 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         });
         const data = await res.json();
         console.log(`[Agent] Spawn response for ${agent.name}:`, res.status, data);
-        // 409 = already running — grab the existing terminalId
-        if (res.status === 409) {
-          terminalId = data.terminalId || data.data?.terminalId;
-          if (!terminalId) throw new Error('Agent running but no terminalId returned');
-        } else if (!res.ok) {
+        // Extract terminalId — API returns snake_case terminal_id
+        const extractId = (d: any) => d?.terminal_id || d?.terminalId;
+        // 409 = already running — reattach via acp-api (returns 200 with reattached:true)
+        if (!res.ok) {
           throw new Error(data.message || data.error?.message || `Spawn failed: ${res.status}`);
-        } else {
-          terminalId = data.data?.terminalId || data.terminalId;
         }
+        terminalId = extractId(data.data) || extractId(data);
       } else {
         // Fallback: direct IPC to Electron main
         terminalId = await window.electronAPI.spawnAgent(agent.name, agent.workDir);
