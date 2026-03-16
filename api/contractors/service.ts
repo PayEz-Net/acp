@@ -81,6 +81,17 @@ function parseJsonb(val: any): any {
 }
 
 /**
+ * Compute session duration in seconds.
+ * If session is still running (no end time), computes from start to now.
+ */
+function computeDuration(startedAt: string | null, endedAt: string | null): number | null {
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  return Math.round((end - start) / 1000);
+}
+
+/**
  * Transform a flat SQL JOIN row (camelCase) into the nested { agent, contract } shape
  * expected by the frontend. Output keys are snake_case to match wire format.
  */
@@ -109,6 +120,12 @@ function transformContractRow(row: any): { agent: any; contract: any } {
       timeout_hours: row.timeoutHours,
       created_at: row.createdAt,
       completed_at: row.completedAt || null,
+      session_pid: row.sessionPid || null,
+      session_started_at: row.sessionStartedAt || null,
+      session_ended_at: row.sessionEndedAt || null,
+      exit_code: row.exitCode ?? null,
+      cancel_reason: row.cancelReason || null,
+      session_duration_seconds: computeDuration(row.sessionStartedAt, row.sessionEndedAt),
     },
   };
 }
