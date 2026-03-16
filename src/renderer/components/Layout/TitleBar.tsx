@@ -1,4 +1,4 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, MessageSquare } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useMailStore } from '../../stores/mailStore';
 import { useStandupStore } from '../../stores/standupStore';
@@ -8,7 +8,7 @@ import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, backendAvailable } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, backendAvailable } = useAppStore();
   const { mailboxes } = useMailStore();
   const { unreadCount: standupUnread } = useStandupStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
@@ -103,6 +103,19 @@ export function TitleBar() {
               {standupUnread > 9 ? '9+' : standupUnread}
             </span>
           )}
+        </button>
+
+        {/* Kanban toggle */}
+        <button
+          onClick={toggleKanban}
+          className={`p-2 rounded transition-colors ${
+            showKanban
+              ? 'bg-cyan-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title="Toggle Kanban"
+        >
+          <LayoutList className="w-4 h-4" />
         </button>
 
         {/* Mail sidebar toggle */}

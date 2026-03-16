@@ -3,10 +3,12 @@ import { MailSidebar } from './components/Mail';
 import { LoginScreen, TwoFactorScreen } from './components/Auth';
 import { SplashScreen } from './components/SplashScreen';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
+import { TitleBar } from './components/Layout/TitleBar';
+import { KanbanBoard } from './components/Kanban/KanbanBoard';
+import { ChatPanel } from './components/Chat/ChatPanel';
 import { useAppStore } from './stores/appStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useAcpSse } from './hooks/useAcpSse';
-import { Mail, MailOpen } from 'lucide-react';
 
 // The team
 const DEFAULT_AGENTS = [
@@ -18,7 +20,8 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showMail, toggleMail, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, activeAgentId, setAgents, setSettings } = useAppStore();
+  const [showChat, setShowChat] = useState(false);
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -118,43 +121,31 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col bg-[#0B1221] text-slate-300">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-2 border-b border-slate-800/50 bg-[#0B1221]/80 backdrop-blur-sm z-50">
-        <h1 className="text-lg font-bold text-white tracking-tight">
-          Agent Collaboration Platform
-        </h1>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-500">{agents.length} agents</span>
-          <button
-            onClick={toggleMail}
-            className={`p-2 rounded-lg transition-colors ${
-              showMail
-                ? 'bg-violet-600 text-white'
-                : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-            }`}
-            title={showMail ? 'Hide Mail' : 'Show Mail'}
-          >
-            {showMail ? <MailOpen className="w-5 h-5" /> : <Mail className="w-5 h-5" />}
-          </button>
-        </div>
-      </header>
+      {/* Title Bar */}
+      <TitleBar />
 
-      {/* Main: Terminals + Mail */}
+      {/* Main: Terminals + Panels */}
       <div className="flex-1 min-h-0 flex overflow-hidden p-2 gap-2">
         {/* Terminal Grid */}
         <div className="flex-1 min-w-0">
           <TerminalGrid agents={agents} />
         </div>
 
-        {/* Mail Stream */}
-        {showMail && (
+        {/* Mail Sidebar */}
+        {showSidebar && (
           <MailSidebar
             agents={agents}
             isOpen={true}
-            onClose={toggleMail}
+            onClose={toggleSidebar}
             activeAgent={activeAgent?.name}
           />
         )}
+
+        {/* Kanban Board */}
+        <KanbanBoard isOpen={showKanban} onClose={toggleKanban} />
+
+        {/* Chat Panel */}
+        <ChatPanel isOpen={showChat} onClose={() => setShowChat(false)} />
       </div>
     </div>
   );
