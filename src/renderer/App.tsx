@@ -5,7 +5,7 @@ import { SplashScreen } from './components/SplashScreen';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { useAppStore } from './stores/appStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
-// SignalR push service disabled — using SSE push via useMailPush hook in TerminalPane
+import { useAcpSse } from './hooks/useAcpSse';
 import { Mail, MailOpen } from 'lucide-react';
 
 // The team
@@ -44,7 +44,7 @@ export default function App() {
       } catch (err) {
         console.error('Failed to load settings, using defaults:', err);
         setAgents(DEFAULT_AGENTS);
-        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320, mailPushEnabled: true, mailPushUrl: 'https://api.idealvibe.online', vibeApiUrl: 'https://api.idealvibe.online', environment: 'prod' });
+        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320, vibeApiUrl: 'https://api.idealvibe.online', environment: 'prod' });
       } finally {
         setSettingsLoaded(true);
       }
@@ -52,9 +52,8 @@ export default function App() {
     loadSettings();
   }, [isAuthenticated, settingsLoaded, setSettings, setAgents]);
 
-  // SignalR push disabled — using SSE push via useMailPush hook in TerminalPane instead
-  // The SignalR hub at /hubs/agentmail requires server-side CORS config for Electron origins.
-  // SSE push (/v1/agentmail/stream) works with HMAC auth and no CORS issues.
+  // Phase 1b: Single centralized SSE connection through acp-api
+  useAcpSse();
 
   // Show splash screen on initial load
   if (showSplash) {

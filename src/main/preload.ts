@@ -22,6 +22,9 @@ const IPC_CHANNELS = {
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',
   VIBE_GET_CREDENTIALS: 'vibe:getCredentials',
+  ACP_GET_BACKEND_STATUS: 'acp:getBackendStatus',
+  ACP_GET_LOCAL_SECRET: 'acp:getLocalSecret',
+  ACP_RETRY_BACKEND: 'acp:retryBackend',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -127,9 +130,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.OAUTH_CALLBACK, handler);
   },
 
-  // Vibe credentials (HMAC auth for Agent Mail)
+  // Vibe credentials (client identity only — HMAC lives in acp-api)
   getVibeCredentials: (): Promise<VibeCredentials> => {
     return ipcRenderer.invoke(IPC_CHANNELS.VIBE_GET_CREDENTIALS);
+  },
+
+  // ACP backend
+  getBackendStatus: (): Promise<{ available: boolean }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_BACKEND_STATUS);
+  },
+
+  getLocalSecret: (): Promise<string | null> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_LOCAL_SECRET);
+  },
+
+  retryBackend: (): Promise<{ available: boolean }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_RETRY_BACKEND);
   },
 });
 
@@ -161,6 +177,10 @@ declare global {
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
       // Vibe credentials
       getVibeCredentials: () => Promise<VibeCredentials>;
+      // ACP backend
+      getBackendStatus: () => Promise<{ available: boolean }>;
+      getLocalSecret: () => Promise<string | null>;
+      retryBackend: () => Promise<{ available: boolean }>;
     };
   }
 }

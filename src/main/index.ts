@@ -4,9 +4,11 @@ import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer } from './auth';
 import { startOAuthServer, stopOAuthServer } from './oauth-server';
+import { startApiServer, stopApiServer, getLocalSecret } from './api-server';
 import { IPC_CHANNELS } from '../shared/types';
 
 let mainWindow: BrowserWindow | null = null;
+let backendAvailable = false;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -105,18 +107,35 @@ function setupIpcHandlers() {
   // PTY handlers
   setupPtyHandlers(mainWindow);
 
-  // Vibe credentials handler (HMAC auth for Agent Mail)
+  // Vibe credentials handler (client identity only — HMAC lives in acp-api now)
   ipcMain.handle(IPC_CHANNELS.VIBE_GET_CREDENTIALS, () => {
     const settings = getSettings();
     const clientId = process.env.VIBE_CLIENT_ID || settings.vibeClientId || '';
-    const hmacKey = process.env.VIBE_HMAC_KEY || settings.vibeHmacKey || '';
-    console.log(`[Vibe] Credentials: clientId=${clientId ? clientId.substring(0, 10) + '...' : '(empty)'}, hmacKey=${hmacKey ? '(set)' : '(empty)'}`);
-    return { clientId, hmacKey };
+    return { clientId, hmacKey: '' };
+  });
+
+  // ACP backend status + local secret
+  ipcMain.handle(IPC_CHANNELS.ACP_GET_BACKEND_STATUS, () => {
+    return { available: backendAvailable };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_GET_LOCAL_SECRET, () => {
+    return getLocalSecret();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_RETRY_BACKEND, async () => {
+    console.log('[ACP] Retrying backend startup...');
+    backendAvailable = await startApiServer();
+    return { available: backendAvailable };
   });
 }
 
 // App lifecycle
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Start ACP API server and wait for health check
+  backendAvailable = await startApiServer();
+  console.log(`[ACP] Backend available: ${backendAvailable}`);
+
   // Bypass CORS — this is a desktop app, not a browser
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     delete details.requestHeaders['Origin'];
@@ -155,6 +174,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   killAllPty();
+  stopApiServer();
   stopOAuthServer();
   stopTokenRefreshTimer();
 });

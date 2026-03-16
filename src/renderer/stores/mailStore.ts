@@ -4,99 +4,53 @@ import { useAppStore } from './appStore';
 
 const USE_MOCK_DATA = false;
 
-// Get the API base URL from appStore (configurable per environment)
-function getMailApiUrl(): string {
-  const url = useAppStore.getState().vibeApiUrl;
-  return `${url}/v1/agentmail`;
-}
-
 // -----------------------------------------------------------------------------
-// HMAC Authentication (Client ID + Signature - free tier pattern)
+// Mail API routing: acp-api (Bearer) only — no HMAC in renderer (Option C)
+// When backend is unavailable, mail is disabled entirely.
 // -----------------------------------------------------------------------------
 
-// Cache credentials to avoid repeated IPC calls
-let credentialsCache: { clientId: string; hmacKey: string } | null = null;
+// Cache the local secret to avoid repeated IPC calls
+let localSecretCache: string | null = null;
 
-// Get credentials from electron store or environment
-async function getVibeCredentials(): Promise<{ clientId: string; hmacKey: string }> {
-  // Return cached credentials if available
-  if (credentialsCache) {
-    return credentialsCache;
-  }
-
-  // In Electron, get credentials from main process via preload
-  if (window.electronAPI?.getVibeCredentials) {
+async function getLocalSecret(): Promise<string | null> {
+  if (localSecretCache) return localSecretCache;
+  if (window.electronAPI?.getLocalSecret) {
     try {
-      const creds = await window.electronAPI.getVibeCredentials();
-      credentialsCache = creds;
-      return creds;
+      localSecretCache = await window.electronAPI.getLocalSecret();
+      return localSecretCache;
     } catch (err) {
-      console.error('[Mail] Failed to get Vibe credentials:', err);
+      console.error('[Mail] Failed to get local secret:', err);
     }
   }
+  return null;
+}
 
-  // Fallback: check if injected globally (for testing)
-  const global = window as unknown as { VIBE_CLIENT_ID?: string; VIBE_HMAC_KEY?: string };
-  return {
-    clientId: global.VIBE_CLIENT_ID || '',
-    hmacKey: global.VIBE_HMAC_KEY || '',
-  };
+/** Check if acp-api backend is available */
+function isBackendAvailable(): boolean {
+  return useAppStore.getState().backendAvailable;
 }
 
 /**
- * Generate HMAC-SHA256 signature using Web Crypto API
- * Payload format: {timestamp}|{METHOD}|{path}
+ * Make authenticated request to the mail API via acp-api.
+ * Throws if backend is unavailable (Option C: mail disabled without backend).
  */
-async function generateHmacSignature(secret: string, payload: string): Promise<string> {
-  const encoder = new TextEncoder();
-
-  // DotNetPert said key is base64 encoded, so decode it first
-  const keyData = Uint8Array.from(atob(secret), c => c.charCodeAt(0));
-  const messageData = encoder.encode(payload);
-
-  // Import the secret as an HMAC key
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyData,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  // Sign the payload
-  const signature = await crypto.subtle.sign('HMAC', key, messageData);
-
-  // Convert to base64
-  const bytes = new Uint8Array(signature);
-  let binary = '';
-  bytes.forEach(b => binary += String.fromCharCode(b));
-  return btoa(binary);
-}
-
-// Helper to make authenticated requests to Agent Mail API
 async function mailRequest(endpoint: string, options: { method?: string; body?: unknown } = {}) {
+  if (!isBackendAvailable()) {
+    throw new Error('Mail unavailable: backend not connected');
+  }
+
   const { method = 'GET', body } = options;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
-  // Add HMAC auth headers
-  const { clientId, hmacKey } = await getVibeCredentials();
-  console.log(`[Mail] Credentials for ${endpoint}: clientId=${clientId || '(empty)'}, hmacKey=${hmacKey ? '(set)' : '(empty)'}`);
-  if (clientId && hmacKey) {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const fullPath = `/v1/agentmail${endpoint}`;
-    const signaturePayload = `${timestamp}|${method}|${fullPath}`;
-
-    try {
-      const signature = await generateHmacSignature(hmacKey, signaturePayload);
-      headers['X-Vibe-Client-Id'] = clientId;
-      headers['X-Vibe-Timestamp'] = timestamp.toString();
-      headers['X-Vibe-Signature'] = signature;
-    } catch (err) {
-      console.error('[Mail] HMAC signature generation failed:', err);
-    }
+  const secret = await getLocalSecret();
+  if (secret) {
+    headers['Authorization'] = `Bearer ${secret}`;
   }
 
-  return fetch(`${getMailApiUrl()}${endpoint}`, {
+  const url = `http://127.0.0.1:3001/v1/mail${endpoint}`;
+  console.log(`[Mail] → acp-api: ${method} ${endpoint}`);
+
+  return fetch(url, {
     method,
     headers,
     ...(body ? { body: JSON.stringify(body) } : {}),

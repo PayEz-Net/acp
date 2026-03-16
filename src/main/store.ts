@@ -57,12 +57,9 @@ export function getSettings(): AppSettings {
     windowBounds: store.get('windowBounds'),
     sidebarWidth: store.get('sidebarWidth'),
     showSidebar: store.get('showSidebar'),
-    mailPushEnabled: store.get('mailPushEnabled'),
-    mailPushUrl: store.get('mailPushUrl'),
     vibeApiUrl: store.get('vibeApiUrl') ?? 'https://api.idealvibe.online',
     environment: store.get('environment') ?? 'prod',
     vibeClientId: store.get('vibeClientId' as keyof AppSettings) as string ?? '',
-    vibeHmacKey: store.get('vibeHmacKey' as keyof AppSettings) as string ?? '',
   };
 }
 

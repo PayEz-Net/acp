@@ -5,7 +5,6 @@ import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 import { AgentState } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
-import { useMailPush } from '../../hooks/useMailPush';
 import { Play, Square, RotateCcw } from 'lucide-react';
 
 interface TerminalPaneProps {
@@ -19,10 +18,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, mailPushEnabled } = useAppStore();
+  const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal } = useAppStore();
 
-  // Subscribe to mail push SSE when agent is active — pass terminalId so push can write to PTY
-  useMailPush(agent.name, mailPushEnabled && agent.status !== 'offline', agent.terminalId);
+  // SSE push: handled by useAcpSse (Phase 1b) — single connection at App level, not per-pane
 
   // Initialize terminal
   useEffect(() => {

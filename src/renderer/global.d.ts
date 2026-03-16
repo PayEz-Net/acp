@@ -35,8 +35,13 @@ declare global {
       openOAuthUrl: (url: string) => Promise<void>;
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
 
-      // Vibe credentials (HMAC auth for Agent Mail)
+      // Vibe credentials (client identity — HMAC removed, kept for legacy compat)
       getVibeCredentials: () => Promise<VibeCredentials>;
+
+      // ACP backend
+      getBackendStatus: () => Promise<{ available: boolean }>;
+      getLocalSecret: () => Promise<string | null>;
+      retryBackend: () => Promise<{ available: boolean }>;
     };
   }
 }

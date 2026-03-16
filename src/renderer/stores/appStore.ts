@@ -18,9 +18,10 @@ interface AppStore {
   // Terminal refs for SSE message injection
   terminalRefs: Map<string, Terminal>;
 
-  // Mail push settings
-  mailPushEnabled: boolean;
-  mailPushUrl: string;
+  // ACP backend
+  backendAvailable: boolean;
+
+  // API settings
   vibeApiUrl: string;
 
   // Autonomy state
@@ -43,8 +44,7 @@ interface AppStore {
   registerTerminal: (agentName: string, terminal: Terminal) => void;
   unregisterTerminal: (agentName: string) => void;
   injectMessage: (agentName: string, message: string) => void;
-  toggleMailPush: () => void;
-  setMailPushEnabled: (enabled: boolean) => void;
+  setBackendAvailable: (available: boolean) => void;
   setAutonomyEnabled: (enabled: boolean) => void;
   setAutonomyStatus: (status: AutonomyStatus | null) => void;
   toggleAutonomyPanel: () => void;
@@ -61,8 +61,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   agents: [],
   activeAgentId: null,
   terminalRefs: new Map(),
-  mailPushEnabled: true,
-  mailPushUrl: 'https://api.idealvibe.online',
+  backendAvailable: false,
   vibeApiUrl: 'https://api.idealvibe.online',
   autonomyEnabled: false,
   autonomyStatus: null,
@@ -100,8 +99,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     layout: settings.layout,
     focusAgent: settings.focusAgent,
     showSidebar: settings.showSidebar,
-    mailPushEnabled: settings.mailPushEnabled ?? true,
-    mailPushUrl: settings.mailPushUrl ?? settings.vibeApiUrl ?? 'https://api.idealvibe.online',
     vibeApiUrl: settings.vibeApiUrl ?? 'https://api.idealvibe.online',
   }),
 
@@ -124,8 +121,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  toggleMailPush: () => set((s) => ({ mailPushEnabled: !s.mailPushEnabled })),
-  setMailPushEnabled: (enabled) => set({ mailPushEnabled: enabled }),
+  setBackendAvailable: (available) => set({ backendAvailable: available }),
   setAutonomyEnabled: (enabled) => set({ autonomyEnabled: enabled }),
   setAutonomyStatus: (status) => set({ autonomyStatus: status, autonomyEnabled: status?.enabled ?? false }),
   toggleAutonomyPanel: () => set((s) => ({ autonomyPanelOpen: !s.autonomyPanelOpen })),

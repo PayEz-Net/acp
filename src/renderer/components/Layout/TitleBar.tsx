@@ -8,7 +8,7 @@ import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, mailPushEnabled, toggleMailPush } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, backendAvailable } = useAppStore();
   const { mailboxes } = useMailStore();
   const { unreadCount: standupUnread } = useStandupStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
@@ -61,18 +61,13 @@ export function TitleBar() {
         {/* Notification Center */}
         <NotificationCenter />
 
-        {/* Mail push toggle */}
-        <button
-          onClick={toggleMailPush}
-          className={`relative p-2 rounded transition-colors ${
-            mailPushEnabled
-              ? 'bg-emerald-600 text-white'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-          title={mailPushEnabled ? 'Mail Push: ON (click to disable)' : 'Mail Push: OFF (click to enable)'}
+        {/* Backend status indicator */}
+        <div
+          className={`p-2 rounded ${backendAvailable ? 'text-emerald-400' : 'text-red-400'}`}
+          title={backendAvailable ? 'Backend: Connected' : 'Backend: Disconnected (mail disabled)'}
         >
-          <Radio className={`w-4 h-4 ${mailPushEnabled ? 'animate-pulse' : ''}`} />
-        </button>
+          <Radio className={`w-4 h-4 ${backendAvailable ? '' : 'animate-pulse'}`} />
+        </div>
 
         {/* Documents sidebar toggle */}
         <button

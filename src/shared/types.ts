@@ -201,13 +201,10 @@ export interface AppSettings {
   };
   sidebarWidth: number;
   showSidebar: boolean;
-  mailPushEnabled: boolean;
-  mailPushUrl: string;
   vibeApiUrl: string;
   environment: 'prod' | 'dev';
-  // Vibe API credentials (HMAC auth for free tier)
+  // Vibe API client identity (display/routing — HMAC creds now live in acp-api)
   vibeClientId?: string;
-  vibeHmacKey?: string;
 }
 
 // IPC channel names
@@ -241,8 +238,13 @@ export const IPC_CHANNELS = {
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_CLOSE: 'window:close',
 
-  // Vibe credentials (Client ID + HMAC key for free tier auth)
+  // Vibe credentials (Client ID + HMAC key — fallback mode only)
   VIBE_GET_CREDENTIALS: 'vibe:getCredentials',
+
+  // ACP backend (local acp-api)
+  ACP_GET_BACKEND_STATUS: 'acp:getBackendStatus',
+  ACP_GET_LOCAL_SECRET: 'acp:getLocalSecret',
+  ACP_RETRY_BACKEND: 'acp:retryBackend',
 } as const;
 
 // Vibe credentials type
@@ -304,12 +306,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   windowBounds: { x: 100, y: 100, width: 1600, height: 900 },
   sidebarWidth: 280,
   showSidebar: true,
-  mailPushEnabled: true,
-  mailPushUrl: 'https://api.idealvibe.online',
   vibeApiUrl: 'https://api.idealvibe.online',
   environment: 'prod',
   vibeClientId: 'vibe_b2d2aac0315549d9',
-  vibeHmacKey: 'KAG7vjumrWhx4CHtPSNcowYzjkbeVZmSitD8xjdZXkw=',
 };
 
 // ============================================
