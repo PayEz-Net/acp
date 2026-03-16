@@ -246,9 +246,13 @@ export class VibeSqlClient {
 
   async _query(sql) {
     const url = `${this._config.vibesqlUrl}/v1/query`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (this._config.vibesqlContainerSecret) {
+      headers['Authorization'] = `Secret ${this._config.vibesqlContainerSecret}`;
+    }
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ sql }),
     });
     const data = await res.json();
