@@ -183,7 +183,7 @@ export async function createApp(cfg) {
   // /v1/messages — chat + clusters RETIRED in Phase 5 (replaced by /v1/chat/*)
   app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
-  app.use('/v1/chat', chatRoutes(appConfig, localEventBus));
+  app.use('/v1/chat', chatRoutes(appConfig, localEventBus, storage));
   app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, sessionManager));
   app.use('/v1/contracts', contractRoutes(contractorService, sessionManager));
   app.use('/v1/projects', projectRoutes(storage, localEventBus));

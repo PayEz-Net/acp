@@ -4,7 +4,7 @@ import { ChatPersistence, VibeQueryClient } from '../../chat/persistence.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 import type { Config } from '../../config.js';
 
-export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus): Router {
+export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus, storage?: any): Router {
   const router = Router();
   const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl, vibesqlContainerSecret: cfg.vibesqlContainerSecret });
   const chat = new ChatPersistence(db);
@@ -17,7 +17,17 @@ export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus): R
         res.status(400).json(error('INVALID_REQUEST', 'title and type required', 'chat_create_conv', (req as any).requestId));
         return;
       }
-      const conversation = await chat.createConversation({ title, type, projectId, metadata });
+      // Stamp active project_id if not explicitly provided
+      const activeProjectId = projectId || (storage ? await storage.getActiveProjectId() : null);
+      // Archived project guard
+      if (activeProjectId && storage) {
+        const project = await storage.getProject(activeProjectId);
+        if (project?.status === 'archived') {
+          res.status(403).json(error('PROJECT_ARCHIVED', 'Project is archived', 'chat_create_conv', (req as any).requestId));
+          return;
+        }
+      }
+      const conversation = await chat.createConversation({ title, type, projectId: activeProjectId ? String(activeProjectId) : null, metadata });
 
       // Add participants if provided
       if (Array.isArray(participants)) {
@@ -53,7 +63,27 @@ export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus): R
       }
       const activity = await chat.getThreadActivity(agent);
       const unread = await chat.getUnreadCounts(agent);
-      res.json(success({ threads: activity, unread }, 'chat_list_conv', (req as any).requestId));
+      // Project scoping: filter threads by active project (post-fetch)
+      let filteredActivity = activity;
+      if (storage) {
+        const activeProjectId = await storage.getActiveProjectId();
+        if (activeProjectId) {
+          const pidStr = String(activeProjectId);
+          // Fetch conversations for these threads and filter by project
+          const convIds = [...new Set(activity.map((a: any) => a.conversationId))];
+          if (convIds.length > 0) {
+            const projectConvs = new Set<string>();
+            for (const cid of convIds) {
+              const conv = await chat.getConversation(cid);
+              if (conv && (!conv.projectId || conv.projectId === pidStr)) {
+                projectConvs.add(cid);
+              }
+            }
+            filteredActivity = activity.filter((a: any) => projectConvs.has(a.conversationId));
+          }
+        }
+      }
+      res.json(success({ threads: filteredActivity, unread }, 'chat_list_conv', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('CHAT_ERROR', err.message, 'chat_list_conv', (req as any).requestId));
     }
