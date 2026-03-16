@@ -129,6 +129,7 @@ export async function startApiServer(): Promise<boolean> {
 
   apiProcess = spawn(tsxBin, [serverScript], {
     cwd: apiPath,
+    shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
