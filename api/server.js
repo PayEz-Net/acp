@@ -29,6 +29,7 @@ import { Supervisor } from '../autonomy/supervisor.js';
 import { logger, setLogLevel, requestLogger } from './logging/logger.js';
 import { registerShutdownHandlers } from './lifecycle/shutdown.js';
 import { ContractorService } from './contractors/service.js';
+import { SessionManager } from './contractors/sessionManager.js';
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
 import { validateConfig } from './lifecycle/configValidator.js';
@@ -93,13 +94,20 @@ export async function createApp(cfg) {
   // Contractor service — resolution logic, pool scanning, timeout
   const contractorService = new ContractorService(storage, localEventBus);
 
+  // Session manager — auto-spawn contractor sessions (Phase 2b)
+  const sessionManager = new SessionManager(storage, localEventBus, appConfig);
+  // Orphan detection on startup
+  sessionManager.checkOrphans().then(n => {
+    if (n > 0) logger.info(`[SessionManager] Marked ${n} orphaned contract(s) as expired`);
+  }).catch(() => {});
+
   // Mail proxy — acp-api signs with HMAC, renderer only needs local bearer token
   // onMailSent callback wired after lifecycleHooks is created (below)
   // contractorService injected for pre-send contractor resolution
   let mailSentCallback = null;
   app.use('/v1/mail', mailProxyRoutes(appConfig, (from, subject, to) => {
     if (mailSentCallback) mailSentCallback(from, subject, to);
-  }, contractorService));
+  }, contractorService, sessionManager));
 
   // SSE — upstream (mail from cloud) + local (party/autonomy) events → downstream fan-out
   const upstreamSse = new UpstreamSseManager(appConfig);
@@ -176,7 +184,7 @@ export async function createApp(cfg) {
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus));
   app.use('/v1/contractors', contractorRoutes(contractorService, appConfig));
-  app.use('/v1/contracts', contractRoutes(contractorService));
+  app.use('/v1/contracts', contractRoutes(contractorService, sessionManager));
 
   // Autonomy supervisor — created at server level for hook integration
   const supervisor = new Supervisor(storage, appConfig);

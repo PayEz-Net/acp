@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
+import type { SessionManager } from '../contractors/sessionManager.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -77,6 +78,7 @@ export default function mailProxyRoutes(
   cfg: Config,
   onMailSent?: MailSentCallback,
   contractorService?: ContractorService,
+  sessionManager?: SessionManager,
 ): Router {
   const router = Router();
 
@@ -113,7 +115,7 @@ export default function mailProxyRoutes(
       const { from_agent, to, subject } = req.body || {};
 
       // Run contractor resolution for each recipient (if service available)
-      const contracts: any[] = [];
+      const contracts: { contract: any; agentName: string }[] = [];
       if (contractorService && from_agent && Array.isArray(to) && subject) {
         for (const recipientName of to) {
           const result = await contractorService.resolveRecipient(
@@ -129,7 +131,7 @@ export default function mailProxyRoutes(
             return;
           }
           if (result.action === 'new_contract' && result.contract) {
-            contracts.push(result.contract);
+            contracts.push({ contract: result.contract, agentName: recipientName });
           }
         }
       }
@@ -142,7 +144,7 @@ export default function mailProxyRoutes(
       if ((cloudResult.data as any)?.success) {
         const cloudMessageId = (cloudResult.data as any)?.data?.message_id;
         if (cloudMessageId && contracts.length > 0 && contractorService) {
-          for (const contract of contracts) {
+          for (const { contract } of contracts) {
             try {
               await (contractorService as any).storage.updateContractMessageId(contract.id, cloudMessageId);
             } catch { /* non-fatal */ }
@@ -153,6 +155,21 @@ export default function mailProxyRoutes(
           try {
             await contractorService.checkDoneAutoComplete(from_agent, subject, to);
           } catch { /* non-fatal — don't break mail delivery */ }
+        }
+        // Phase 2b: trigger auto-spawn for new contractor contracts
+        if (sessionManager && contracts.length > 0) {
+          for (const { contract, agentName } of contracts) {
+            try {
+              await sessionManager.trySpawnOrQueue({
+                contractId: contract.id,
+                agentName,
+                hiredByName: from_agent,
+                contractSubject: subject,
+                mailBody: req.body.body || '',
+                profilePath: contract.profileSource || null,
+              });
+            } catch { /* non-fatal — contract exists, spawn failure is recoverable */ }
+          }
         }
         if (onMailSent && from_agent && subject) {
           try { onMailSent(from_agent, subject, to || []); } catch { /* non-fatal */ }

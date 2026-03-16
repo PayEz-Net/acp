@@ -1,8 +1,9 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { ContractorService } from '../contractors/service.js';
+import type { SessionManager } from '../contractors/sessionManager.js';
 
-export default function contractRoutes(contractorService: ContractorService): Router {
+export default function contractRoutes(contractorService: ContractorService, sessionManager?: SessionManager): Router {
   const router = Router();
 
   // POST /v1/contracts/:contract_id/complete — mark contract complete
@@ -27,12 +28,18 @@ export default function contractRoutes(contractorService: ContractorService): Ro
   });
 
   // POST /v1/contracts/:contract_id/cancel — cancel a contract
+  // Phase 2b: also kills the running session if one exists
   router.post('/:contract_id/cancel', async (req: Request, res: Response) => {
     try {
       const contractId = parseInt(req.params.contract_id as string, 10);
       if (isNaN(contractId)) {
         res.status(400).json(error('INVALID_REQUEST', 'contract_id must be an integer', 'contract_cancel', (req as any).requestId));
         return;
+      }
+
+      // Kill running session if exists (Phase 2b)
+      if (sessionManager) {
+        sessionManager.monitor.killSession(contractId);
       }
 
       const reason = req.body?.reason || null;
@@ -45,6 +52,27 @@ export default function contractRoutes(contractorService: ContractorService): Ro
       res.json(success(contract, 'contract_cancel', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'contract_cancel', (req as any).requestId));
+    }
+  });
+
+  // GET /v1/contracts/:contract_id/output — session output ring buffer
+  router.get('/:contract_id/output', async (req: Request, res: Response) => {
+    try {
+      const contractId = parseInt(req.params.contract_id as string, 10);
+      if (isNaN(contractId)) {
+        res.status(400).json(error('INVALID_REQUEST', 'contract_id must be an integer', 'contract_output', (req as any).requestId));
+        return;
+      }
+
+      if (!sessionManager) {
+        res.json(success({ lines: [], truncated: false }, 'contract_output', (req as any).requestId));
+        return;
+      }
+
+      const output = sessionManager.monitor.getOutput(contractId);
+      res.json(success(output, 'contract_output', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'contract_output', (req as any).requestId));
     }
   });
 

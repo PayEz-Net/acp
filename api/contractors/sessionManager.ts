@@ -1,0 +1,195 @@
+import { spawn } from 'node:child_process';
+import { mkdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import type { LocalEventBus } from '../sse/localEventBus.js';
+import { ProcessMonitor } from './processMonitor.js';
+
+const DEFAULT_MAX_CONCURRENT = 2;
+
+interface SpawnRequest {
+  contractId: number;
+  agentName: string;
+  hiredByName: string;
+  contractSubject: string;
+  mailBody: string;
+  profilePath: string | null;
+}
+
+/**
+ * Manages contractor session lifecycle: spawning, queuing, and queue draining.
+ */
+export class SessionManager {
+  private storage: any;
+  private eventBus: LocalEventBus;
+  private cfg: any;
+  private processMonitor: ProcessMonitor;
+  private maxConcurrent: number;
+
+  constructor(storage: any, eventBus: LocalEventBus, cfg: any) {
+    this.storage = storage;
+    this.eventBus = eventBus;
+    this.cfg = cfg;
+    this.maxConcurrent = parseInt(process.env.ACP_MAX_CONTRACTORS || String(DEFAULT_MAX_CONCURRENT), 10);
+    this.processMonitor = new ProcessMonitor(storage, eventBus, cfg, () => this.drainQueue());
+  }
+
+  /** Expose process monitor for output/kill/status queries. */
+  get monitor(): ProcessMonitor {
+    return this.processMonitor;
+  }
+
+  /**
+   * Called after a contract is created and mail is sent.
+   * Decides whether to spawn immediately or queue.
+   */
+  async trySpawnOrQueue(request: SpawnRequest): Promise<'spawned' | 'queued'> {
+    // Check limits: global concurrent + per-contractor
+    const canSpawn =
+      this.processMonitor.activeCount < this.maxConcurrent &&
+      !this.processMonitor.hasRunningSession(request.agentName);
+
+    if (canSpawn) {
+      await this.spawnSession(request);
+      return 'spawned';
+    } else {
+      // Queue: update contract status to 'queued'
+      await this.storage._query(
+        `UPDATE agent_contracts SET status = 'queued'
+         WHERE id = ${request.contractId} AND status = 'active'`
+      );
+
+      // Calculate queue position
+      const posResult = await this.storage._query(
+        `SELECT COUNT(*) AS pos FROM agent_contracts WHERE status = 'queued'`
+      );
+      const position = parseInt(posResult.rows[0]?.pos || '1', 10);
+
+      this.eventBus.emit({
+        event: 'contractor-queued',
+        data: {
+          contract_id: request.contractId,
+          agent_name: request.agentName,
+          position,
+        },
+      });
+
+      return 'queued';
+    }
+  }
+
+  /**
+   * Spawn a Claude CLI session for a contract.
+   */
+  private async spawnSession(request: SpawnRequest): Promise<void> {
+    const { contractId, agentName, hiredByName, contractSubject, mailBody, profilePath } = request;
+
+    // Create isolated temp workspace
+    const workDir = join(tmpdir(), `acp-contractor-${contractId}`);
+    await mkdir(workDir, { recursive: true });
+
+    // Read profile content if available
+    let profileContent = '';
+    if (profilePath) {
+      try {
+        profileContent = await readFile(profilePath, 'utf-8');
+      } catch {
+        profileContent = `You are contractor agent "${agentName}".`;
+      }
+    } else {
+      profileContent = `You are contractor agent "${agentName}".`;
+    }
+
+    // Build task prompt (Option B: task-in-prompt)
+    const taskPrompt = `You are contractor agent "${agentName}", hired by ${hiredByName}.
+
+Your task: ${contractSubject}
+
+${mailBody}
+
+Do the work requested. Write your findings and results to stdout. When done, output a clear summary of what you did and found.`;
+
+    // Spawn claude CLI (cross-platform, no shell — DotNetPert F-3)
+    const args = [
+      '--print',
+      '--dangerously-skip-permissions',
+      '--system-prompt', profileContent,
+      '--prompt', taskPrompt,
+    ];
+
+    const child = spawn('claude', args, {
+      cwd: workDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    const pid = child.pid || 0;
+    const now = new Date().toISOString();
+
+    // Update contract with session info
+    await this.storage._query(
+      `UPDATE agent_contracts
+       SET session_pid = ${pid}, session_started_at = '${now}', status = 'active'
+       WHERE id = ${contractId}`
+    );
+
+    // Register with process monitor for exit/output tracking
+    this.processMonitor.register(contractId, agentName, hiredByName, contractSubject, child);
+
+    console.log(`[SessionManager] Spawned session for contract ${contractId} (${agentName}), PID: ${pid}`);
+  }
+
+  /**
+   * Drain the queue: spawn the oldest queued contract if capacity allows.
+   * Called by ProcessMonitor when a slot frees up.
+   */
+  private async drainQueue(): Promise<void> {
+    // Find oldest queued contract
+    const result = await this.storage._query(
+      `SELECT c.id, c.contractor_agent_id, c.hired_by_agent_id, c.contract_subject,
+              c.profile_source, a.name AS contractor_name, h.name AS hired_by_name
+       FROM agent_contracts c
+       JOIN agents a ON a.id = c.contractor_agent_id
+       JOIN agents h ON h.id = c.hired_by_agent_id
+       WHERE c.status = 'queued'
+       ORDER BY c.created_at ASC LIMIT 1`
+    );
+
+    if (result.rows.length === 0) return;
+    const row = result.rows[0];
+
+    // Check if we can spawn (global limit + per-contractor)
+    if (
+      this.processMonitor.activeCount >= this.maxConcurrent ||
+      this.processMonitor.hasRunningSession(row.contractor_name)
+    ) {
+      return; // Still at capacity
+    }
+
+    // Spawn it
+    await this.spawnSession({
+      contractId: row.id,
+      agentName: row.contractor_name,
+      hiredByName: row.hired_by_name,
+      contractSubject: row.contract_subject,
+      mailBody: '', // Original mail body not stored — task is in contract_subject
+      profilePath: row.profile_source || null,
+    });
+  }
+
+  /**
+   * Run orphan detection on startup.
+   */
+  async checkOrphans(): Promise<number> {
+    return this.processMonitor.checkOrphans();
+  }
+
+  /** Current status for settings panel. */
+  getStatus(): { active: number; queued: number; max: number } {
+    return {
+      active: this.processMonitor.activeCount,
+      queued: 0, // Will be populated from DB if needed
+      max: this.maxConcurrent,
+    };
+  }
+}
