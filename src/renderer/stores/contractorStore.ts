@@ -111,7 +111,7 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     if (!useAppStore.getState().backendAvailable) return;
     set({ loading: true, error: undefined });
     try {
-      const res = await contractorRequest('/active');
+      const res = await contractorRequest('/active?status=all');
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
       const activeContractors: ActiveContractor[] = data.data?.contractors || data.data || [];
