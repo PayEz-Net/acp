@@ -215,6 +215,14 @@ export function useAcpSse() {
                 console.error('[AcpSse] Failed to parse contractor-expired event:', err);
               }
             }
+
+            if (eventType === 'contractor-cancelled' && data) {
+              try {
+                useContractorStore.getState().handleContractorCancelled(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-cancelled event:', err);
+              }
+            }
           }
         }
 

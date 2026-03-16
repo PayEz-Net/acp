@@ -28,10 +28,11 @@ export interface AgentContract {
   hired_by_name?: string;
   contractor_name?: string;
   contract_subject: string;
-  status: 'active' | 'completed' | 'cancelled' | 'expired';
+  status: 'active' | 'completed' | 'cancelled' | 'expired' | 'queued';
   profile_source?: string;
   profile_snapshot?: ContractorProfile;
   timeout_hours: number;
+  cancel_reason?: string;
   created_at: string;
   completed_at?: string;
 }
@@ -39,6 +40,15 @@ export interface AgentContract {
 export interface ActiveContractor {
   agent: ContractorAgent;
   contract: AgentContract;
+}
+
+export interface ContractMailMessage {
+  id: number;
+  from_agent: string;
+  to: string[];
+  subject: string;
+  body: string;
+  created_at: string;
 }
 
 // --- API helper ---
@@ -89,11 +99,14 @@ interface ContractorStore {
   fetchActive: () => Promise<void>;
   fetchPool: () => Promise<void>;
   completeContract: (contractId: number) => Promise<boolean>;
+  cancelContract: (contractId: number, reason?: string) => Promise<boolean>;
+  fetchContractMail: (agentName: string, contractId: number) => Promise<ContractMailMessage[]>;
 
   // SSE handlers
   handleContractorHired: (data: Record<string, unknown>) => void;
   handleContractorCompleted: (data: Record<string, unknown>) => void;
   handleContractorExpired: (data: Record<string, unknown>) => void;
+  handleContractorCancelled: (data: Record<string, unknown>) => void;
 }
 
 export const useContractorStore = create<ContractorStore>((set, get) => ({
@@ -150,6 +163,35 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     }
   },
 
+  cancelContract: async (contractId, reason) => {
+    if (!useAppStore.getState().backendAvailable) return false;
+    try {
+      const res = await contractRequest(`/${contractId}/cancel`, {
+        method: 'POST',
+        body: reason ? { reason } : undefined,
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await get().fetchActive();
+      return true;
+    } catch (err) {
+      console.error('[Contractors] Failed to cancel contract:', err);
+      return false;
+    }
+  },
+
+  fetchContractMail: async (agentName, contractId) => {
+    if (!useAppStore.getState().backendAvailable) return [];
+    try {
+      const res = await contractorRequest(`/${encodeURIComponent(agentName)}/mail?contract_id=${contractId}`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const data = await res.json();
+      return (data.data?.messages || data.data || []) as ContractMailMessage[];
+    } catch (err) {
+      console.error('[Contractors] Failed to fetch contract mail:', err);
+      return [];
+    }
+  },
+
   // SSE: new contractor hired — refresh list
   handleContractorHired: (_data) => {
     get().fetchActive();
@@ -162,6 +204,11 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
 
   // SSE: contract expired — refresh list
   handleContractorExpired: (_data) => {
+    get().fetchActive();
+  },
+
+  // SSE: contract cancelled — refresh list
+  handleContractorCancelled: (_data) => {
     get().fetchActive();
   },
 }));

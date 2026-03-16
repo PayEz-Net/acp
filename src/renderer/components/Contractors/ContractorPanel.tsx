@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { X, RefreshCw, UserPlus, CheckCircle, Clock, AlertCircle, Briefcase } from 'lucide-react';
-import { useContractorStore, ActiveContractor, ContractorProfile } from '../../stores/contractorStore';
+import { X, RefreshCw, UserPlus, CheckCircle, Clock, AlertCircle, Briefcase, XCircle, Mail } from 'lucide-react';
+import { useContractorStore, ActiveContractor, ContractorProfile, ContractMailMessage } from '../../stores/contractorStore';
 import { useAppStore } from '../../stores/appStore';
 
 interface ContractorPanelProps {
@@ -76,6 +76,7 @@ export function ContractorPanel({ isOpen, onClose }: ContractorPanelProps) {
           contractor={selectedContractor}
           onBack={() => setSelectedContractor(null)}
           onComplete={completeContract}
+          onCancel={useContractorStore.getState().cancelContract}
         />
       ) : (
         <ContractorList
@@ -192,6 +193,7 @@ function ContractorListItem({
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     active: 'text-emerald-400 bg-emerald-900/30',
+    queued: 'text-blue-400 bg-blue-900/30',
     completed: 'text-slate-400 bg-slate-800',
     expired: 'text-amber-400 bg-amber-900/30',
     cancelled: 'text-red-400 bg-red-900/30',
@@ -210,15 +212,29 @@ function ProfileCard({
   contractor,
   onBack,
   onComplete,
+  onCancel,
 }: {
   contractor: ActiveContractor;
   onBack: () => void;
   onComplete: (contractId: number) => Promise<boolean>;
+  onCancel: (contractId: number, reason?: string) => Promise<boolean>;
 }) {
   const { agent, contract } = contractor;
   const profile = contract.profile_snapshot;
   const [completing, setCompleting] = useState(false);
   const [completeError, setCompleteError] = useState('');
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+  const [mailThread, setMailThread] = useState<ContractMailMessage[]>([]);
+  const [mailLoading, setMailLoading] = useState(false);
+
+  useEffect(() => {
+    setMailLoading(true);
+    useContractorStore.getState().fetchContractMail(agent.name, contract.id)
+      .then(setMailThread)
+      .finally(() => setMailLoading(false));
+  }, [agent.name, contract.id]);
 
   const handleComplete = async () => {
     setCompleting(true);
@@ -229,6 +245,17 @@ function ProfileCard({
       onBack();
     } else {
       setCompleteError('Failed to complete contract. Try again.');
+    }
+  };
+
+  const handleCancel = async () => {
+    setCancelling(true);
+    const success = await onCancel(contract.id, cancelReason.trim() || undefined);
+    setCancelling(false);
+    if (success) {
+      onBack();
+    } else {
+      setCompleteError('Failed to cancel contract. Try again.');
     }
   };
 
@@ -301,18 +328,63 @@ function ProfileCard({
             <AlertCircle className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
             <span className="text-xs text-slate-300">Timeout: {contract.timeout_hours}h</span>
           </div>
+          {contract.cancel_reason && (
+            <div className="text-xs text-red-400">
+              Cancelled: {contract.cancel_reason}
+            </div>
+          )}
         </div>
 
-        {/* Complete button */}
+        {/* Action buttons */}
         {contract.status === 'active' && (
-          <button
-            onClick={handleComplete}
-            disabled={completing}
-            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
-          >
-            <CheckCircle className="w-4 h-4" />
-            {completing ? 'Completing...' : 'Mark Complete'}
-          </button>
+          <div className="space-y-2">
+            <button
+              onClick={handleComplete}
+              disabled={completing || cancelling}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+            >
+              <CheckCircle className="w-4 h-4" />
+              {completing ? 'Completing...' : 'Mark Complete'}
+            </button>
+            {!showCancelConfirm ? (
+              <button
+                onClick={() => setShowCancelConfirm(true)}
+                disabled={completing}
+                className="w-full flex items-center justify-center gap-2 py-1.5 px-3 rounded border border-red-800/50 text-red-400 hover:bg-red-900/20 text-xs font-medium transition-colors"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                Cancel Contract
+              </button>
+            ) : (
+              <div className="border border-red-800/50 rounded p-2 space-y-2 bg-red-900/10">
+                <p className="text-xs text-red-300">Cancel this contract?</p>
+                <input
+                  type="text"
+                  placeholder="Reason (optional)"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="w-full px-2 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded text-slate-200 placeholder-slate-500 focus:outline-none focus:border-red-500"
+                  autoFocus
+                  onKeyDown={(e) => { if (e.key === 'Escape') setShowCancelConfirm(false); }}
+                />
+                <div className="flex gap-1">
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="flex-1 text-xs py-1 rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white transition-colors"
+                  >
+                    {cancelling ? 'Cancelling...' : 'Confirm Cancel'}
+                  </button>
+                  <button
+                    onClick={() => { setShowCancelConfirm(false); setCancelReason(''); }}
+                    className="text-xs py-1 px-2 rounded bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+                  >
+                    Back
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
         {completeError && (
           <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/50 rounded px-2 py-1">
@@ -325,6 +397,68 @@ function ProfileCard({
             Completed: {new Date(contract.completed_at).toLocaleString()}
           </div>
         )}
+
+        {/* Mail thread */}
+        <ContractMailThread messages={mailThread} loading={mailLoading} />
+      </div>
+    </div>
+  );
+}
+
+// --- Contract Mail Thread ---
+
+function ContractMailThread({
+  messages,
+  loading,
+}: {
+  messages: ContractMailMessage[];
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="border-t border-slate-800 pt-3">
+        <div className="flex items-center gap-1.5 mb-2">
+          <Mail className="w-3.5 h-3.5 text-slate-500" />
+          <span className="text-xs font-medium text-slate-400">Mail Thread</span>
+        </div>
+        <div className="text-xs text-slate-500">Loading...</div>
+      </div>
+    );
+  }
+
+  if (messages.length === 0) {
+    return (
+      <div className="border-t border-slate-800 pt-3">
+        <div className="flex items-center gap-1.5 mb-2">
+          <Mail className="w-3.5 h-3.5 text-slate-500" />
+          <span className="text-xs font-medium text-slate-400">Mail Thread</span>
+        </div>
+        <div className="text-xs text-slate-500">No messages yet</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-800 pt-3">
+      <div className="flex items-center gap-1.5 mb-2">
+        <Mail className="w-3.5 h-3.5 text-slate-500" />
+        <span className="text-xs font-medium text-slate-400">Mail Thread ({messages.length})</span>
+      </div>
+      <div className="space-y-2 max-h-60 overflow-y-auto">
+        {messages.map(msg => (
+          <div key={msg.id} className="rounded bg-slate-800/50 border border-slate-700/50 p-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] font-medium text-slate-300">{msg.from_agent}</span>
+              <span className="text-[10px] text-slate-600">
+                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+            {msg.subject && (
+              <div className="text-[10px] text-slate-400 font-medium mb-0.5">{msg.subject}</div>
+            )}
+            <div className="text-xs text-slate-400 whitespace-pre-wrap break-words">{msg.body}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
