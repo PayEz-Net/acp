@@ -205,6 +205,9 @@ export interface AppSettings {
   environment: 'prod' | 'dev';
   // Vibe API client identity (display/routing — HMAC creds now live in acp-api)
   vibeClientId?: string;
+  // Claude Code effort level: low, medium, high, max
+  // NOTE: publish/distribute with 'high' — 'max' is for internal dev only
+  claudeEffort?: 'low' | 'medium' | 'high' | 'max';
 }
 
 // IPC channel names
@@ -311,6 +314,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   vibeApiUrl: 'https://api.idealvibe.online',
   environment: 'prod',
   vibeClientId: 'vibe_b2d2aac0315549d9',
+  claudeEffort: 'max',
 };
 
 // ============================================

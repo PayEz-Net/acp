@@ -3,6 +3,7 @@ import * as pty from 'node-pty';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { IPC_CHANNELS } from '../shared/types';
+import { getSettings } from './store';
 
 interface ManagedPty {
   id: string;
@@ -73,7 +74,8 @@ export function spawnAgent(agentName: string, workDir: string): string {
 
   // Auto-inject claude with skip-permissions, then wait for ready prompt
   setTimeout(() => {
-    ptyProcess.write('claude --dangerously-skip-permissions --effort max\r');
+    const effort = getSettings().claudeEffort || 'high';
+    ptyProcess.write(`claude --dangerously-skip-permissions --effort ${effort}\r`);
 
     let reportSent = false;
     const dataListener = ptyProcess.onData((data) => {
