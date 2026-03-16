@@ -1,19 +1,21 @@
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, User, FolderOpen, Briefcase } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, ClipboardList, FileText, LayoutList, User, FolderOpen, Briefcase, ChevronDown } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useAuthStore } from '../../stores/authStore';
 import { useMailStore } from '../../stores/mailStore';
 import { useStandupStore } from '../../stores/standupStore';
 import { useDocumentStore } from '../../stores/documentStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { ModeIndicator } from '../Autonomy';
 import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
 export function TitleBar() {
-  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, showContractors, toggleContractors, backendAvailable, agents } = useAppStore();
+  const { layout, setLayout, showSidebar, toggleSidebar, showStandup, toggleStandup, showKanban, toggleKanban, showContractors, toggleContractors, backendAvailable } = useAppStore();
   const { user } = useAuthStore();
   const { mailboxes } = useMailStore();
   const { unreadCount: standupUnread } = useStandupStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
+  const { activeProject, setShowPicker } = useProjectStore();
 
   // Calculate total unread
   const totalUnread = Object.values(mailboxes).reduce(
@@ -36,10 +38,14 @@ export function TitleBar() {
           <span className="text-sm font-semibold text-slate-200">ACP</span>
         </div>
         <div className="w-px h-4 bg-slate-700" />
-        <div className="flex items-center gap-2 text-xs text-slate-400">
+        <button
+          onClick={() => setShowPicker(true)}
+          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+        >
           <FolderOpen className="w-3.5 h-3.5" />
-          <span>{agents[0]?.workDir || 'No project'}</span>
-        </div>
+          <span>{activeProject?.name || 'No project'}</span>
+          <ChevronDown className="w-3 h-3" />
+        </button>
         {user && (
           <>
             <div className="w-px h-4 bg-slate-700" />

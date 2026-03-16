@@ -9,8 +9,10 @@ import { ChatPanel } from './components/Chat/ChatPanel';
 import { StandupView } from './components/Autonomy/StandupView';
 import { DocumentSidebar } from './components/Documents/DocumentSidebar';
 import { ContractorPanel } from './components/Contractors';
+import { ProjectPicker } from './components/Projects';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
+import { useProjectStore } from './stores/projectStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useAcpSse } from './hooks/useAcpSse';
 
@@ -26,6 +28,7 @@ const DEFAULT_AGENTS = [
 export default function App() {
   const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, showContractors, toggleContractors, activeAgentId, setAgents, setSettings } = useAppStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
+  const { showPicker, setShowPicker, fetchActiveProject, fetchProjects } = useProjectStore();
   const [showChat, setShowChat] = useState(false);
   const { authFlowState, isLoading: authLoading, loadStatus } = useAuthStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
@@ -81,6 +84,19 @@ export default function App() {
 
     return unsubscribe;
   }, []);
+
+  // Load active project once backend is available
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    fetchActiveProject();
+    fetchProjects().then(() => {
+      // Auto-select if only 1 project and none active
+      const state = useProjectStore.getState();
+      if (!state.activeProject && state.projects.length === 1) {
+        state.switchProject(state.projects[0].id);
+      }
+    });
+  }, [settingsLoaded, fetchActiveProject, fetchProjects]);
 
   // Phase 1b: Single centralized SSE connection through acp-api
   useAcpSse();
@@ -161,6 +177,9 @@ export default function App() {
 
       {/* Standup View — renders as overlay/bottom panel when toggled */}
       {showStandup && <StandupView />}
+
+      {/* Project Picker — overlay */}
+      <ProjectPicker isOpen={showPicker} onClose={() => setShowPicker(false)} />
     </div>
   );
 }

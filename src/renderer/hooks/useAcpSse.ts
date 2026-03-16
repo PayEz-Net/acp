@@ -6,6 +6,7 @@ import { useAutonomyStore } from '../stores/autonomyStore';
 import { useKanbanStore } from '../stores/kanbanStore';
 import { useChatStore } from '../stores/chatStore';
 import { useContractorStore } from '../stores/contractorStore';
+import { useProjectStore } from '../stores/projectStore';
 
 /**
  * Centralized SSE hook — single connection to acp-api, multiplexed by agent.
@@ -253,6 +254,14 @@ export function useAcpSse() {
                 useContractorStore.getState().handleSessionExited(JSON.parse(data));
               } catch (err) {
                 console.error('[AcpSse] Failed to parse session-exited event:', err);
+              }
+            }
+
+            if (eventType === 'project-switched' && data) {
+              try {
+                useProjectStore.getState().handleProjectSwitched(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse project-switched event:', err);
               }
             }
           }
