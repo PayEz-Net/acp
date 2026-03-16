@@ -3,6 +3,8 @@ import { useAppStore } from '../stores/appStore';
 import { useMailStore } from '../stores/mailStore';
 import { usePartyStore } from '../stores/partyStore';
 import { useAutonomyStore } from '../stores/autonomyStore';
+import { useKanbanStore } from '../stores/kanbanStore';
+import { useChatStore } from '../stores/chatStore';
 
 /**
  * Centralized SSE hook — single connection to acp-api, multiplexed by agent.
@@ -165,6 +167,24 @@ export function useAcpSse() {
                 useAutonomyStore.getState().updateFromSse(JSON.parse(data));
               } catch (err) {
                 console.error('[AcpSse] Failed to parse autonomy event:', err);
+              }
+            }
+
+            // Phase 4: Kanban updates
+            if (eventType === 'kanban-update' && data) {
+              try {
+                useKanbanStore.getState().updateFromSse(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse kanban event:', err);
+              }
+            }
+
+            // Phase 4: Chat messages
+            if (eventType === 'chat-message' && data) {
+              try {
+                useChatStore.getState().updateFromSse(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse chat event:', err);
               }
             }
           }
