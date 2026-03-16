@@ -269,9 +269,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     }
   }, [agent.id, agent.name, agent.workDir, backendAvailable, updateAgentStatus, setAgentTerminalId]);
 
-  // Stop agent — route through acp-api when available
+  // Stop agent — kill PTY via both lifecycle API and direct IPC
   const stopAgent = useCallback(async () => {
-    if (!agent.terminalId) return;
+    const tid = agent.terminalId;
     try {
       if (backendAvailable) {
         const secret = await window.electronAPI.getLocalSecret();
@@ -281,20 +281,33 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
             'Content-Type': 'application/json',
             ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
           },
-        });
-      } else {
-        window.electronAPI.killTerminal(agent.terminalId);
+        }).catch(() => {});
       }
+      // Always direct-kill as backstop
+      if (tid) window.electronAPI.killTerminal(tid);
     } catch (err) {
       console.error('Failed to stop agent:', err);
-      // Fallback: direct kill
-      window.electronAPI.killTerminal(agent.terminalId!);
+      if (tid) window.electronAPI.killTerminal(tid);
     }
+    // Clear terminal and reset state
+    if (xtermRef.current) {
+      xtermRef.current.clear();
+      xtermRef.current.writeln('\x1b[90mAgent stopped.\x1b[0m');
+    }
+    setAgentTerminalId(agent.id, undefined as any);
     updateAgentStatus(agent.id, 'offline');
-  }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus]);
+  }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus, setAgentTerminalId]);
 
-  // Restart agent via acp-api (includes crash-loop backoff)
+  // Restart agent — stop then start fresh
   const restartAgent = useCallback(async () => {
+    await stopAgent();
+    // Brief delay for PTY cleanup
+    await new Promise(r => setTimeout(r, 500));
+    await startAgent();
+  }, [stopAgent, startAgent]);
+
+  // Legacy restart via acp-api (unused — keeping restartAgent simple above)
+  const _restartViaLifecycle = useCallback(async () => {
     if (backendAvailable) {
       updateAgentStatus(agent.id, 'starting');
       try {
@@ -307,8 +320,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
           },
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `Restart failed: ${res.status}`);
-        const terminalId = data.data?.terminalId || data.terminalId;
+        if (!res.ok) throw new Error(data.message || data.error?.message || `Restart failed: ${res.status}`);
+        const extractId = (d: any) => d?.terminal_id || d?.terminalId;
+        const terminalId = extractId(data.data) || extractId(data);
         if (terminalId) setAgentTerminalId(agent.id, terminalId);
         updateAgentStatus(agent.id, 'ready');
       } catch (err) {
