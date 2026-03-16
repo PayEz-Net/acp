@@ -73,7 +73,7 @@ export function spawnAgent(agentName: string, workDir: string): string {
 
   // Auto-inject claude with skip-permissions, then wait for ready prompt
   setTimeout(() => {
-    ptyProcess.write('claude --dangerously-skip-permissions\r');
+    ptyProcess.write('claude --dangerously-skip-permissions --effort max\r');
 
     let reportSent = false;
     const dataListener = ptyProcess.onData((data) => {
