@@ -101,12 +101,14 @@ interface MailStore {
   selectedMessageSuggested?: string;
   isComposing: boolean;
   replyTo: MailMessage | null;
+  showUnreadOnly: boolean;
 
   // Actions
   setMailbox: (agent: string, mailbox: Partial<ExtendedMailbox>) => void;
   selectMessage: (message: MailMessage | null) => void;
   setComposing: (isComposing: boolean, replyTo?: MailMessage | null) => void;
   markAsRead: (messageId: number) => void;
+  toggleUnreadFilter: () => void;
 
   // API actions
   fetchInbox: (agent: string) => Promise<void>;
@@ -123,6 +125,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
   selectedMessageSuggested: undefined,
   isComposing: false,
   replyTo: null,
+  showUnreadOnly: false,
 
   setMailbox: (agent, update) => set((state) => {
     const existing = state.mailboxes[agent] || {
@@ -151,6 +154,17 @@ export const useMailStore = create<MailStore>((set, get) => ({
     replyTo,
     selectedMessage: null,
   }),
+
+  toggleUnreadFilter: () => {
+    const newValue = !get().showUnreadOnly;
+    set({ showUnreadOnly: newValue });
+    // Re-fetch all inboxes with new filter
+    const agents = Object.keys(get().mailboxes);
+    if (agents.length > 0) {
+      const { fetchInbox } = get();
+      agents.forEach(agent => fetchInbox(agent));
+    }
+  },
 
   markAsRead: (messageId) => set((state) => {
     const newMailboxes = { ...state.mailboxes };
@@ -187,7 +201,8 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
     try {
       // Call the new ActionPanel-formatted endpoint
-      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}`);
+      const unreadParam = get().showUnreadOnly ? '?unread=true' : '';
+      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${unreadParam}`);
 
       if (!res.ok) {
         throw new Error(`Failed to fetch: ${res.status}`);
@@ -211,7 +226,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
       setMailbox(agent, {
         messages,
-        unreadCount: messages.filter((m) => !m.is_read).length,
+        unreadCount: response.data?.unread_count ?? messages.filter((m) => !m.is_read).length,
         loading: false,
         actions: response.actions,
         suggested: response.suggested,

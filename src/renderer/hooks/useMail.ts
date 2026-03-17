@@ -23,6 +23,8 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     markAsRead,
     sendMessage,
     executeAction,
+    showUnreadOnly,
+    toggleUnreadFilter,
   } = useMailStore();
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -106,6 +108,7 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     isComposing,
     replyTo,
     totalUnread,
+    showUnreadOnly,
 
     // Per-agent helpers
     getUnreadCount,
@@ -118,5 +121,6 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     sendMessage,
     executeAction: handleExecuteAction,
     refresh,
+    toggleUnreadFilter,
   };
 }

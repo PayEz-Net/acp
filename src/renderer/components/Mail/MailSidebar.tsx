@@ -1,6 +1,7 @@
-import { FolderOpen, Mail, PenSquare, RefreshCw, X } from 'lucide-react';
+import { FolderOpen, Mail, MailOpen, PenSquare, RefreshCw, X } from 'lucide-react';
 import { AgentState } from '@shared/types';
 import { useMail } from '../../hooks/useMail';
+import { useProjectStore } from '../../stores/projectStore';
 import { MailAgentSection } from './MailAgentSection';
 import { MailDetail } from './MailDetail';
 import { ComposeModal } from './ComposeModal';
@@ -30,6 +31,8 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
     sendMessage,
     executeAction,
     refresh,
+    showUnreadOnly,
+    toggleUnreadFilter,
   } = useMail({
     agents: agentNames,
     pollInterval: 30000,
@@ -67,6 +70,13 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={toggleUnreadFilter}
+              className={`p-1.5 rounded transition-colors ${showUnreadOnly ? 'text-violet-400 bg-violet-900/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+              title={showUnreadOnly ? 'Show all messages' : 'Show unread only'}
+            >
+              {showUnreadOnly ? <Mail className="w-4 h-4" /> : <MailOpen className="w-4 h-4" />}
+            </button>
+            <button
               onClick={refresh}
               className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
               title="Refresh"
@@ -93,7 +103,7 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
         {/* Project Banner */}
         <div className="flex items-center gap-2 px-4 py-2 bg-cyan-950/40 border-b border-cyan-900/50">
           <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">PAYEZ</span>
+          <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">{useProjectStore.getState().activeProject?.name || 'ACP'}</span>
         </div>
 
         {/* Agent Sections */}
