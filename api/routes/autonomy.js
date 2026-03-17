@@ -123,5 +123,19 @@ export default function autonomyRoutes(supervisor) {
     }
   });
 
+  // Emergency hard stop — immediate kill, no graceful shutdown (F-1)
+  router.post('/unattended/emergency-stop', async (req, res, next) => {
+    try {
+      req.operationCode = 'emergency_stop';
+      const result = await supervisor.emergencyStop();
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(result, 'emergency_stop', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }

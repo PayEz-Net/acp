@@ -59,8 +59,14 @@ export async function moveTask(storage, id, newStatus) {
   return { ...task, ...updates };
 }
 
-export async function assignTask(storage, id, agentName) {
+export async function assignTask(storage, id, agentName, { requireUnassigned = false } = {}) {
   const task = await getTask(storage, id);
+  // F-3: Optimistic lock for self-assignment race condition
+  if (requireUnassigned && task.assignedTo) {
+    const err = new Error(`Task ${id} is already assigned to ${task.assignedTo}`);
+    err.code = 'CONFLICT';
+    throw err;
+  }
   const updates = { assignedTo: agentName, updatedAt: new Date().toISOString() };
   await storage.updateTask(id, updates);
   return { ...task, ...updates };

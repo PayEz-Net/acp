@@ -98,7 +98,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
         err.code = 'INVALID_REQUEST';
         throw err;
       }
-      const task = await assignTask(storage, parseInt(req.params.id as string, 10), agent);
+      const requireUnassigned = req.body.requireUnassigned === true;
+      const task = await assignTask(storage, parseInt(req.params.id as string, 10), agent, { requireUnassigned });
       localEventBus?.emit({
         event: 'kanban-update',
         data: { action: 'assigned', task_id: req.params.id, agent },
@@ -107,7 +108,11 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       res.json(success(task, 'kanban_assign', (req as any).requestId, {
         performance: { response_time_ms: elapsed },
       }));
-    } catch (err) {
+    } catch (err: any) {
+      if (err.code === 'CONFLICT') {
+        res.status(409).json({ success: false, message: err.message, error: { code: 'CONFLICT' } });
+        return;
+      }
       next(err);
     }
   });

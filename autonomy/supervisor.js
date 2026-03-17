@@ -151,6 +151,47 @@ export class Supervisor {
     return state;
   }
 
+  /**
+   * Emergency hard stop — immediate kill, no graceful shutdown.
+   * Stops party engine, stops supervisor, returns kill list for caller to terminate PTYs.
+   */
+  async emergencyStop() {
+    this.unattendedMode = false;
+
+    if (this._partyEngine) {
+      this._partyEngine.stop();
+    }
+
+    await this._storage.updateAutonomyState({
+      enabled: false,
+      unattendedMode: false,
+      stoppedAt: new Date().toISOString(),
+      stopReason: 'emergency',
+    });
+
+    if (this._eventBus) {
+      this._eventBus.emit({
+        event: 'unattended-paused',
+        data: { reason: 'emergency', was_unattended: true, hard_stop: true },
+      });
+    }
+
+    return { stopped: true, reason: 'emergency' };
+  }
+
+  /**
+   * Check process memory usage. Returns 'memory' stop reason if RSS exceeds threshold.
+   * @param maxRssMb - RSS threshold in MB (default 2048 = 2GB)
+   */
+  checkMemory(maxRssMb = 2048) {
+    const usage = process.memoryUsage();
+    const rssMb = Math.round(usage.rss / 1024 / 1024);
+    if (rssMb > maxRssMb) {
+      return { exceeded: true, rssMb, maxRssMb };
+    }
+    return { exceeded: false, rssMb, maxRssMb };
+  }
+
   async checkStopConditions(tasks = []) {
     const state = await this.getState();
     if (!state?.enabled) return null;
@@ -174,6 +215,10 @@ export class Supervisor {
         return 'max_runtime';
       }
     }
+
+    // F-2: Memory guardrail
+    const mem = this.checkMemory();
+    if (mem.exceeded) return 'memory';
 
     return null;
   }
