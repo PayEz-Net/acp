@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 
 // Contractor pool directories (custom takes precedence)
-const CUSTOM_POOL_DIR = 'E:/Repos/Agents/contractors';
-const BUILTIN_POOL_DIR = 'E:/Repos/everything-claude-code/agents';
+const CUSTOM_POOL_DIR = process.env.ACP_CONTRACTOR_POOL_DIR || 'E:/Repos/Agents/contractors';
+const BUILTIN_POOL_DIR = process.env.ACP_BUILTIN_POOL_DIR || 'E:/Repos/everything-claude-code/agents';
 
 interface ProfileFrontmatter {
   name: string;

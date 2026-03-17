@@ -645,7 +645,10 @@ export class VibeSqlClient {
         ${escapeJsonb(msg.keywords || [])},
         ${escapeSql(msg.createdAt || now)}
       ) RETURNING id`);
-    return result.rows[0]?.id;
+    if (!result.rows || result.rows.length === 0) {
+      throw new Error('createMessage: INSERT returned no rows');
+    }
+    return result.rows[0].id;
   }
 
   async getMessageById(id) {
@@ -735,7 +738,10 @@ export class VibeSqlClient {
         ${escapeSql(task.createdAt || now)},
         ${escapeSql(projectId)}
       ) RETURNING id`);
-    return result.rows[0]?.id;
+    if (!result.rows || result.rows.length === 0) {
+      throw new Error('createTask: INSERT returned no rows');
+    }
+    return result.rows[0].id;
   }
 
   async getTask(id) {
