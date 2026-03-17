@@ -13,6 +13,7 @@ import {
 // @ts-expect-error Vite provides import.meta.env
 const env = import.meta.env;
 const IDP_URL = env?.VITE_IDP_URL || (env?.DEV ? 'http://localhost:32785' : 'https://idp.payez.net');
+const CLIENT_SECRET = env?.VITE_PAYEZ_CLIENT_SECRET || '';
 
 const CLIENT_ID = 'idealvibe_online';
 
@@ -52,6 +53,7 @@ export async function getIDPClientConfig(forceRefresh = false): Promise<IDPClien
       subject: CLIENT_ID,
       audience: 'urn:payez:externalauth:clientconfig',
       expires_in: 60,
+      client_secret: CLIENT_SECRET,
     }),
   });
 
