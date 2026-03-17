@@ -48,6 +48,7 @@ html, body, #root {
 /* xterm.js terminal styles */
 .xterm {
   padding: 8px;
+  overflow: hidden;
 }
 
 .xterm-viewport::-webkit-scrollbar {
@@ -97,6 +98,8 @@ html, body, #root {
 .terminal-content {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
+  position: relative;
 }
 
 /* Status indicators */
