@@ -5,11 +5,9 @@ import { useAppStore } from './appStore';
 // --- Unattended Mode Types ---
 
 export interface UnattendedConfig {
-  stopCondition: 'milestone' | 'time' | 'blocker' | 'manual';
+  leadAgent: string;
+  pingIntervalMinutes: number;
   maxRuntimeHours: number;
-  escalationLevel: 1 | 2 | 3 | 4;
-  notifyPhone?: string;
-  notifyWebhook?: string;
 }
 
 export interface UnattendedState {
@@ -19,9 +17,7 @@ export interface UnattendedState {
   config: UnattendedConfig | null;
   startedAt?: string;
   elapsedMinutes?: number;
-  tasksCompleted?: number;
-  tasksBlocked?: number;
-  partyEngineActive?: boolean;
+  lastPingAt?: string;
 }
 
 // --- Store Interface ---
@@ -95,9 +91,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
             config: state.config || get().unattended.config,
             startedAt: state.startedAt,
             elapsedMinutes: state.elapsedMinutes,
-            tasksCompleted: state.tasksCompleted,
-            tasksBlocked: state.tasksBlocked,
-            partyEngineActive: state.partyEngineActive,
+            lastPingAt: state.lastPingAt,
           },
         });
       } else {
@@ -174,9 +168,6 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
           paused: false,
           config,
           startedAt: new Date().toISOString(),
-          tasksCompleted: 0,
-          tasksBlocked: 0,
-          partyEngineActive: true,
         },
       });
       useAppStore.getState().setAutonomyEnabled(true);
@@ -204,7 +195,6 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
           active: false,
           paused: reason !== 'manual',
           pauseReason: reason || 'manual',
-          partyEngineActive: false,
         },
       });
       useAppStore.getState().setAutonomyEnabled(false);
@@ -257,9 +247,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
           paused: (data.paused as boolean) ?? prev.paused,
           pauseReason: (data.pauseReason as string) ?? prev.pauseReason,
           elapsedMinutes: (data.elapsedMinutes as number) ?? prev.elapsedMinutes,
-          tasksCompleted: (data.tasksCompleted as number) ?? prev.tasksCompleted,
-          tasksBlocked: (data.tasksBlocked as number) ?? prev.tasksBlocked,
-          partyEngineActive: (data.partyEngineActive as boolean) ?? prev.partyEngineActive,
+          lastPingAt: (data.lastPingAt as string) ?? prev.lastPingAt,
         },
       });
       if (data.unattendedMode === true) {

@@ -10,13 +10,6 @@ function formatRuntime(minutes: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-const ESCALATION_LABELS: Record<number, string> = {
-  1: 'relaxed',
-  2: 'balanced',
-  3: 'cautious',
-  4: 'strict',
-};
-
 export function UnattendedBanner() {
   const { unattended, startUnattended, dismissPaused } = useAutonomyStore();
   const { backendAvailable } = useAppStore();
@@ -33,15 +26,10 @@ export function UnattendedBanner() {
     return () => clearInterval(interval);
   }, [unattended.active, unattended.startedAt]);
 
-  // Use server-side elapsed if available
   const displayElapsed = unattended.elapsedMinutes ?? elapsed;
 
   // Active banner
   if (unattended.active) {
-    const escalation = unattended.config?.escalationLevel
-      ? ESCALATION_LABELS[unattended.config.escalationLevel] || 'balanced'
-      : 'balanced';
-
     return (
       <div className="h-7 bg-emerald-950/80 border-b border-emerald-800/50 flex items-center justify-between px-4 text-xs">
         <div className="flex items-center gap-3">
@@ -52,16 +40,14 @@ export function UnattendedBanner() {
           <div className="w-px h-3.5 bg-emerald-800/50" />
           <span className="text-emerald-300/70">Running {formatRuntime(displayElapsed)}</span>
           <div className="w-px h-3.5 bg-emerald-800/50" />
-          <span className="text-emerald-300/70">{unattended.tasksCompleted ?? 0} tasks done</span>
+          <span className="text-emerald-300/70">Lead: {unattended.config?.leadAgent || 'BAPert'}</span>
           <div className="w-px h-3.5 bg-emerald-800/50" />
-          <span className="text-emerald-300/70">{unattended.tasksBlocked ?? 0} blocked</span>
+          <span className="text-emerald-300/70">Ping: every {unattended.config?.pingIntervalMinutes ?? 10}m</span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-emerald-300/50">
-            Stop: {unattended.config?.stopCondition || 'milestone'}
+            Max: {unattended.config?.maxRuntimeHours ?? 8}h
           </span>
-          <div className="w-px h-3.5 bg-emerald-800/50" />
-          <span className="text-emerald-300/50">Escalation: {escalation}</span>
         </div>
       </div>
     );
@@ -85,8 +71,6 @@ export function UnattendedBanner() {
           </div>
           <div className="w-px h-3.5 bg-amber-800/50" />
           <span className="text-amber-300/70">Ran {formatRuntime(displayElapsed)}</span>
-          <div className="w-px h-3.5 bg-amber-800/50" />
-          <span className="text-amber-300/70">{unattended.tasksCompleted ?? 0} tasks done</span>
           <div className="w-px h-3.5 bg-amber-800/50" />
           <span className="text-amber-300/70">
             Reason: {unattended.pauseReason || 'unknown'}
@@ -122,6 +106,5 @@ export function UnattendedBanner() {
     );
   }
 
-  // Neither active nor paused — don't render
   return null;
 }
