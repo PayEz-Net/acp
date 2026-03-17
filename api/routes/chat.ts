@@ -69,16 +69,15 @@ export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus, st
         const activeProjectId = await storage.getActiveProjectId();
         if (activeProjectId) {
           const pidStr = String(activeProjectId);
-          // Fetch conversations for these threads and filter by project
+          // Batch fetch conversations and filter by project (C-3: eliminates N+1)
           const convIds = [...new Set(activity.map((a: any) => a.conversationId))];
           if (convIds.length > 0) {
-            const projectConvs = new Set<string>();
-            for (const cid of convIds) {
-              const conv = await chat.getConversation(cid);
-              if (conv && (!conv.projectId || conv.projectId === pidStr)) {
-                projectConvs.add(cid);
-              }
-            }
+            const convs = await chat.getConversationsByIds(convIds);
+            const projectConvs = new Set<string>(
+              convs
+                .filter((c: any) => !c.projectId || c.projectId === pidStr)
+                .map((c: any) => c.id)
+            );
             filteredActivity = activity.filter((a: any) => projectConvs.has(a.conversationId));
           }
         }

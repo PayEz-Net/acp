@@ -648,6 +648,14 @@ export class VibeSqlClient {
     return result.rows[0]?.id;
   }
 
+  async getMessageById(id) {
+    const result = await this._query(
+      `SELECT * FROM messages WHERE id = ${escapeSql(id)}`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
   async getMessages(filter = {}) {
     const conditions = ['1=1'];
     if (filter.messageType) conditions.push(`message_type = ${escapeSql(filter.messageType)}`);

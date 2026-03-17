@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { success, error } from '../response.js';
 import { createBroadcast, listBroadcasts } from '../../collaboration/broadcast.js';
-import { sendChat, createCluster, getCluster, getClusterMessages } from '../../collaboration/chat.js';
 import { sendMail, getInbox, markRead, markAllRead, archiveMail } from '../../collaboration/mail.js';
+
+// Phase 5: /v1/messages/chat and /v1/messages/clusters RETIRED — replaced by /v1/chat/*
 
 export default function messagingRoutes(storage) {
   const router = Router();
@@ -13,19 +14,6 @@ export default function messagingRoutes(storage) {
       const id = await createBroadcast(storage, req.body);
       const elapsed = Math.round(performance.now() - req.startTime);
       res.json(success({ id }, 'msg_broadcast', req.requestId, {
-        performance: { response_time_ms: elapsed },
-      }));
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.post('/chat', async (req, res, next) => {
-    try {
-      req.operationCode = 'msg_chat';
-      const id = await sendChat(storage, req.body);
-      const elapsed = Math.round(performance.now() - req.startTime);
-      res.json(success({ id }, 'msg_chat', req.requestId, {
         performance: { response_time_ms: elapsed },
       }));
     } catch (err) {
@@ -74,36 +62,6 @@ export default function messagingRoutes(storage) {
     }
   });
 
-  router.get('/clusters/:id', async (req, res, next) => {
-    try {
-      req.operationCode = 'msg_cluster_get';
-      const cluster = await getCluster(storage, req.params.id);
-      if (!cluster) {
-        return res.status(404).json(error('CLUSTER_NOT_FOUND', `Cluster "${req.params.id}" not found`, 'msg_cluster_get', req.requestId));
-      }
-      const messages = await getClusterMessages(storage, req.params.id);
-      const elapsed = Math.round(performance.now() - req.startTime);
-      res.json(success({ cluster, messages }, 'msg_cluster_get', req.requestId, {
-        performance: { response_time_ms: elapsed },
-      }));
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.post('/clusters', async (req, res, next) => {
-    try {
-      req.operationCode = 'msg_cluster_create';
-      const cluster = await createCluster(storage, req.body);
-      const elapsed = Math.round(performance.now() - req.startTime);
-      res.json(success(cluster, 'msg_cluster_create', req.requestId, {
-        performance: { response_time_ms: elapsed },
-      }));
-    } catch (err) {
-      next(err);
-    }
-  });
-
   router.put('/inbox/:agent/read', async (req, res, next) => {
     try {
       req.operationCode = 'msg_mark_all_read';
@@ -133,8 +91,7 @@ export default function messagingRoutes(storage) {
   router.get('/:id', async (req, res, next) => {
     try {
       req.operationCode = 'msg_read';
-      const messages = await storage.getMessages({});
-      const msg = messages.find((m) => String(m.id) === req.params.id);
+      const msg = await storage.getMessageById(parseInt(req.params.id, 10));
       if (!msg) {
         return res.status(404).json(error('NOT_FOUND', `Message ${req.params.id} not found`, 'msg_read', req.requestId));
       }

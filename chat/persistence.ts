@@ -149,6 +149,15 @@ export class ChatPersistence {
     return this.rowToConversation(result.rows[0]);
   }
 
+  async getConversationsByIds(ids: string[]): Promise<Conversation[]> {
+    if (ids.length === 0) return [];
+    const inClause = ids.map(id => escapeSql(id)).join(', ');
+    const result = await this.db.query(
+      `SELECT * FROM acp_conversations WHERE id IN (${inClause})`
+    );
+    return (result.rows || []).map((r: Record<string, unknown>) => this.rowToConversation(r));
+  }
+
   // ── Participants ─────────────────────────────────────────────────
 
   async addParticipant(conversationId: string, input: AddParticipantInput): Promise<Participant> {

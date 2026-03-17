@@ -19,8 +19,7 @@ export async function getInbox(storage, agentName, opts = {}) {
 }
 
 export async function getMail(storage, id) {
-  const results = await storage.getMessages({});
-  return results.find((m) => m.id === id) || null;
+  return storage.getMessageById(id);
 }
 
 export async function markRead(storage, id) {
