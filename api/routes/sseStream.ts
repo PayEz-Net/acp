@@ -84,5 +84,19 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
     });
   });
 
+  // POST /v1/sse/refresh — restart all upstream SSE connections
+  router.post('/refresh', (req: Request, res: Response) => {
+    const agents = (req.body?.agents as string[]) || Object.keys(upstreamManager.getStatus());
+    if (agents.length === 0) {
+      res.status(400).json({ success: false, error: 'No agents to refresh' });
+      return;
+    }
+    upstreamManager.refresh(agents);
+    res.json({
+      success: true,
+      data: { refreshed: agents, downstream_clients: clients.size },
+    });
+  });
+
   return router;
 }
