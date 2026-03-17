@@ -15,6 +15,8 @@ type LocalEventHandler = (event: LocalEvent) => void;
 
 export class LocalEventBus {
   private handlers: LocalEventHandler[] = [];
+  /** Current downstream SSE client count — updated by sseStream on connect/disconnect. */
+  sseClientCount: number = 0;
 
   onEvent(handler: LocalEventHandler): void {
     this.handlers.push(handler);

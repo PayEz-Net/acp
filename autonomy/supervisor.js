@@ -14,6 +14,52 @@ export class Supervisor {
     this._eventBus = eventBus;
   }
 
+  /**
+   * Dead man's switch: if 0 SSE clients for deadManTimeoutMs (default 5 min)
+   * while unattended mode is ON, auto-pause.
+   * Called on party engine tick or its own interval.
+   */
+  _deadManZeroSince = null;
+  _deadManTimeoutMs = 5 * 60 * 1000;
+  _deadManTimer = null;
+
+  startDeadManSwitch() {
+    if (this._deadManTimer) return;
+    this._deadManTimer = setInterval(() => this._checkDeadMan(), 10_000); // check every 10s
+  }
+
+  stopDeadManSwitch() {
+    if (this._deadManTimer) {
+      clearInterval(this._deadManTimer);
+      this._deadManTimer = null;
+    }
+    this._deadManZeroSince = null;
+  }
+
+  async _checkDeadMan() {
+    if (!this.unattendedMode || !this._eventBus) return;
+
+    const clientCount = this._eventBus.sseClientCount;
+    if (clientCount > 0) {
+      // Clients connected — reset timer
+      this._deadManZeroSince = null;
+      return;
+    }
+
+    // No clients
+    if (!this._deadManZeroSince) {
+      this._deadManZeroSince = Date.now();
+      return;
+    }
+
+    const elapsed = Date.now() - this._deadManZeroSince;
+    if (elapsed >= this._deadManTimeoutMs) {
+      console.warn('[Supervisor] Dead mans switch triggered — no SSE clients for 5 minutes');
+      this._deadManZeroSince = null;
+      await this.stopUnattended('dead_mans_switch');
+    }
+  }
+
   async start(opts = {}) {
     const state = await this.getState();
     if (state?.enabled) {
@@ -83,6 +129,9 @@ export class Supervisor {
       this._partyEngine.start();
     }
 
+    // Start dead man's switch
+    this.startDeadManSwitch();
+
     // Emit SSE event
     if (this._eventBus) {
       this._eventBus.emit({
@@ -110,6 +159,9 @@ export class Supervisor {
     if (this._partyEngine) {
       this._partyEngine.stop();
     }
+
+    // Stop dead man's switch
+    this.stopDeadManSwitch();
 
     // Persist unattended off
     await this._storage.updateAutonomyState({
@@ -157,6 +209,7 @@ export class Supervisor {
    */
   async emergencyStop() {
     this.unattendedMode = false;
+    this.stopDeadManSwitch();
 
     if (this._partyEngine) {
       this._partyEngine.stop();
