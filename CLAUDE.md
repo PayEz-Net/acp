@@ -41,13 +41,12 @@ acp/
 │   ├── bootstrap.js     Agent initialization
 │   ├── exec_with_agent.js  Execution context
 │   └── modify_self.js  Self-modification
-├── storage/          Data layer
-│   ├── adapter.js       Storage adapter (VibeSQL)
-│   ├── file_backup.js   File-based backup
-│   └── vibe_api_client.js  Vibe API client
+├── storage/          Data layer (VibeSQL only)
+│   ├── adapter.js       Storage adapter factory
+│   └── vibesql_client.js  VibeSQL client (POST /v1/query)
 ├── agents/
 │   └── session_manager.js  Agent session lifecycle
-├── config.js         Environment configuration
+├── config.ts         Environment configuration
 └── __tests__/        Jest test suite
 ```
 
