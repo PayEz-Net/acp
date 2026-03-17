@@ -1,16 +1,16 @@
 import { Octagon } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
+import { useAutonomyStore } from '../../stores/autonomyStore';
 
 export function EmergencyStopButton() {
-  const { autonomyEnabled, setAutonomyStatus, setAutonomyEnabled } = useAppStore();
+  const { autonomyEnabled } = useAppStore();
 
   if (!autonomyEnabled) return null;
 
   const handleEmergencyStop = async () => {
-    // TODO: Call backend API POST /v1/autonomy/stop with reason: 'emergency'
-    // Immediate stop - no confirmation needed
-    setAutonomyStatus(null);
-    setAutonomyEnabled(false);
+    // Immediate stop — no confirmation needed
+    const { stopUnattended } = useAutonomyStore.getState();
+    await stopUnattended('emergency');
     console.log('[Autonomy] Emergency stop triggered');
   };
 

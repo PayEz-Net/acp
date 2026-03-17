@@ -2,6 +2,30 @@ import { create } from 'zustand';
 import { AutonomyStatus, StandupEntry, StandupFilters } from '@shared/types';
 import { useAppStore } from './appStore';
 
+// --- Unattended Mode Types ---
+
+export interface UnattendedConfig {
+  stopCondition: 'milestone' | 'time' | 'blocker' | 'manual';
+  maxRuntimeHours: number;
+  escalationLevel: 1 | 2 | 3 | 4;
+  notifyPhone?: string;
+  notifyWebhook?: string;
+}
+
+export interface UnattendedState {
+  active: boolean;
+  paused: boolean;
+  pauseReason?: string;
+  config: UnattendedConfig | null;
+  startedAt?: string;
+  elapsedMinutes?: number;
+  tasksCompleted?: number;
+  tasksBlocked?: number;
+  partyEngineActive?: boolean;
+}
+
+// --- Store Interface ---
+
 interface AutonomyStore {
   // State
   status: AutonomyStatus | null;
@@ -11,11 +35,17 @@ interface AutonomyStore {
   loading: boolean;
   error?: string;
 
+  // Unattended mode
+  unattended: UnattendedState;
+
   // Actions
   fetchStatus: () => Promise<void>;
   fetchStandup: (agent?: string, type?: string) => Promise<void>;
   startAutonomy: (config: { specId?: number; maxRuntimeHours?: number; stopCondition?: string }) => Promise<boolean>;
   stopAutonomy: () => Promise<boolean>;
+  startUnattended: (config: UnattendedConfig) => Promise<boolean>;
+  stopUnattended: (reason?: string) => Promise<boolean>;
+  dismissPaused: () => void;
   updateFromSse: (data: Record<string, unknown>) => void;
   setFilters: (filters: Partial<StandupFilters>) => void;
 }
@@ -33,20 +63,45 @@ async function autonomyRequest(endpoint: string, options: { method?: string; bod
   });
 }
 
-export const useAutonomyStore = create<AutonomyStore>((set) => ({
+const DEFAULT_UNATTENDED: UnattendedState = {
+  active: false,
+  paused: false,
+  config: null,
+};
+
+export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   status: null,
   standupEntries: [],
   escalations: [],
   filters: { agents: [], eventTypes: [], since: 'today' },
   loading: false,
+  unattended: DEFAULT_UNATTENDED,
 
   fetchStatus: async () => {
     if (!useAppStore.getState().backendAvailable) return;
     try {
-      const res = await autonomyRequest('/status');
+      const res = await autonomyRequest('/unattended/status');
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      set({ status: data.data || data });
+      const state = data.data || data;
+      if (state.unattendedMode !== undefined) {
+        set({
+          status: state,
+          unattended: {
+            active: state.unattendedMode,
+            paused: state.paused || false,
+            pauseReason: state.pauseReason,
+            config: state.config || get().unattended.config,
+            startedAt: state.startedAt,
+            elapsedMinutes: state.elapsedMinutes,
+            tasksCompleted: state.tasksCompleted,
+            tasksBlocked: state.tasksBlocked,
+            partyEngineActive: state.partyEngineActive,
+          },
+        });
+      } else {
+        set({ status: state });
+      }
     } catch (err) {
       console.error('[Autonomy] Failed to fetch status:', err);
     }
@@ -102,6 +157,67 @@ export const useAutonomyStore = create<AutonomyStore>((set) => ({
     }
   },
 
+  startUnattended: async (config) => {
+    if (!useAppStore.getState().backendAvailable) return false;
+    try {
+      const res = await autonomyRequest('/unattended/start', {
+        method: 'POST',
+        body: config,
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const data = await res.json();
+      set({
+        status: data.data || data,
+        unattended: {
+          active: true,
+          paused: false,
+          config,
+          startedAt: new Date().toISOString(),
+          tasksCompleted: 0,
+          tasksBlocked: 0,
+          partyEngineActive: true,
+        },
+      });
+      useAppStore.getState().setAutonomyEnabled(true);
+      return true;
+    } catch (err) {
+      console.error('[Autonomy] Failed to start unattended:', err);
+      return false;
+    }
+  },
+
+  stopUnattended: async (reason) => {
+    if (!useAppStore.getState().backendAvailable) return false;
+    try {
+      const res = await autonomyRequest('/unattended/stop', {
+        method: 'POST',
+        body: { reason: reason || 'manual' },
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const data = await res.json();
+      const prev = get().unattended;
+      set({
+        status: data.data || data,
+        unattended: {
+          ...prev,
+          active: false,
+          paused: reason !== 'manual',
+          pauseReason: reason || 'manual',
+          partyEngineActive: false,
+        },
+      });
+      useAppStore.getState().setAutonomyEnabled(false);
+      return true;
+    } catch (err) {
+      console.error('[Autonomy] Failed to stop unattended:', err);
+      return false;
+    }
+  },
+
+  dismissPaused: () => {
+    set({ unattended: DEFAULT_UNATTENDED });
+  },
+
   updateFromSse: (data) => {
     // SSE autonomy-update event
     if (data.status) {
@@ -115,6 +231,27 @@ export const useAutonomyStore = create<AutonomyStore>((set) => ({
           ? [entry, ...state.escalations]
           : state.escalations,
       }));
+    }
+    // Unattended mode SSE events
+    if (data.mode === 'unattended' || data.unattendedMode !== undefined) {
+      const prev = get().unattended;
+      set({
+        unattended: {
+          ...prev,
+          active: (data.unattendedMode as boolean) ?? prev.active,
+          paused: (data.paused as boolean) ?? prev.paused,
+          pauseReason: (data.pauseReason as string) ?? prev.pauseReason,
+          elapsedMinutes: (data.elapsedMinutes as number) ?? prev.elapsedMinutes,
+          tasksCompleted: (data.tasksCompleted as number) ?? prev.tasksCompleted,
+          tasksBlocked: (data.tasksBlocked as number) ?? prev.tasksBlocked,
+          partyEngineActive: (data.partyEngineActive as boolean) ?? prev.partyEngineActive,
+        },
+      });
+      if (data.unattendedMode === true) {
+        useAppStore.getState().setAutonomyEnabled(true);
+      } else if (data.unattendedMode === false) {
+        useAppStore.getState().setAutonomyEnabled(false);
+      }
     }
   },
 

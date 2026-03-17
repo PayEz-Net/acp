@@ -10,6 +10,7 @@ import { StandupView } from './components/Autonomy/StandupView';
 import { DocumentSidebar } from './components/Documents/DocumentSidebar';
 import { ContractorPanel } from './components/Contractors';
 import { ProjectPicker } from './components/Projects';
+import { UnattendedBanner, EmergencyStopButton } from './components/Autonomy';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useProjectStore } from './stores/projectStore';
@@ -144,6 +145,9 @@ export default function App() {
       {/* Title Bar */}
       <TitleBar />
 
+      {/* Unattended Mode Status Banner */}
+      <UnattendedBanner />
+
       {/* Main: Terminals + Panels */}
       <div className="flex-1 min-h-0 flex overflow-hidden p-2 gap-2">
         {/* Terminal Grid */}
@@ -179,6 +183,9 @@ export default function App() {
 
       {/* Project Picker — overlay */}
       <ProjectPicker isOpen={showPicker} onClose={() => setShowPicker(false)} />
+
+      {/* Emergency Stop — floating button when unattended active */}
+      <EmergencyStopButton />
     </div>
   );
 }

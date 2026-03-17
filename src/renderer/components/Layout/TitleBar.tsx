@@ -5,7 +5,7 @@ import { useMailStore } from '../../stores/mailStore';
 import { useStandupStore } from '../../stores/standupStore';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useProjectStore } from '../../stores/projectStore';
-import { ModeIndicator } from '../Autonomy';
+import { UnattendedToggle } from '../Autonomy';
 import { NotificationCenter } from '../Notifications/NotificationCenter';
 import { LayoutMode } from '@shared/types';
 
@@ -77,8 +77,8 @@ export function TitleBar() {
 
       {/* Mode indicator + Sidebar toggles + Window controls */}
       <div className="flex items-center gap-2">
-        {/* Autonomy Mode Indicator */}
-        <ModeIndicator />
+        {/* Unattended Mode Toggle */}
+        <UnattendedToggle />
 
         <div className="w-px h-4 bg-slate-700" />
 

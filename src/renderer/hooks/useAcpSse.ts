@@ -264,6 +264,15 @@ export function useAcpSse() {
                 console.error('[AcpSse] Failed to parse project-switched event:', err);
               }
             }
+
+            // Unattended mode events
+            if ((eventType === 'unattended-started' || eventType === 'unattended-paused') && data) {
+              try {
+                useAutonomyStore.getState().updateFromSse(JSON.parse(data));
+              } catch (err) {
+                console.error(`[AcpSse] Failed to parse ${eventType} event:`, err);
+              }
+            }
           }
         }
 
