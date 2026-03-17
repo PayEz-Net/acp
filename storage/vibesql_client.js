@@ -27,7 +27,8 @@ const JSONB_FIELDS = new Set([
   'keywords', 'needs', 'offers', 'members', 'filesChanged',
   'domainTags', 'typicalOffers', 'typicalNeeds', 'recentKeywords',
   'customFunctions', 'preferences', 'memory',
-  'connectionInfo', 'capabilities'
+  'connectionInfo', 'capabilities',
+  'expertiseJson', 'profileSnapshot'
 ]);
 
 function rowToCamel(row) {
@@ -296,6 +297,91 @@ const PROJECTS_MIGRATION = [
   `UPDATE standup_entries SET project_id = (SELECT id FROM projects WHERE name = 'Default') WHERE project_id IS NULL`,
 ];
 
+// Chat schema migration — creates acp_* tables (from chat/schema.sql)
+// Must be ordered: conversations → participants → threads → subscriptions → messages → attachments/reactions/delivery
+const CHAT_SCHEMA_MIGRATION = [
+  `CREATE TABLE IF NOT EXISTS acp_conversations (
+     id TEXT PRIMARY KEY,
+     title TEXT NOT NULL,
+     type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'channel')),
+     state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'resolved', 'archived')),
+     project_id TEXT,
+     metadata JSONB DEFAULT '{}',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_conversation_participants (
+     conversation_id TEXT NOT NULL REFERENCES acp_conversations(id),
+     participant_id TEXT NOT NULL,
+     participant_type TEXT NOT NULL CHECK (participant_type IN ('agent', 'human', 'system')),
+     display_name TEXT NOT NULL,
+     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     left_at TIMESTAMPTZ,
+     PRIMARY KEY (conversation_id, participant_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_threads (
+     id TEXT PRIMARY KEY,
+     conversation_id TEXT NOT NULL REFERENCES acp_conversations(id),
+     subject TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_thread_subscriptions (
+     thread_id TEXT NOT NULL REFERENCES acp_threads(id),
+     participant_id TEXT NOT NULL,
+     level TEXT NOT NULL DEFAULT 'mention-only' CHECK (level IN ('subscribed', 'mention-only', 'muted')),
+     PRIMARY KEY (thread_id, participant_id)
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_messages (
+     id TEXT PRIMARY KEY,
+     thread_id TEXT NOT NULL REFERENCES acp_threads(id),
+     author_id TEXT NOT NULL,
+     text TEXT NOT NULL,
+     formatted TEXT,
+     raw JSONB,
+     parent_message_id TEXT REFERENCES acp_messages(id),
+     dedupe_key TEXT UNIQUE,
+     flags TEXT[] DEFAULT '{}',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     deleted_at TIMESTAMPTZ
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_attachments (
+     id TEXT PRIMARY KEY,
+     message_id TEXT NOT NULL REFERENCES acp_messages(id),
+     type TEXT NOT NULL CHECK (type IN ('file', 'image', 'code', 'spec', 'artifact')),
+     name TEXT NOT NULL,
+     mime_type TEXT,
+     size_bytes BIGINT,
+     storage_ref TEXT NOT NULL,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_reactions (
+     message_id TEXT NOT NULL REFERENCES acp_messages(id),
+     participant_id TEXT NOT NULL,
+     emoji TEXT NOT NULL CHECK (length(emoji) <= 32),
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     PRIMARY KEY (message_id, participant_id, emoji)
+   )`,
+  `CREATE TABLE IF NOT EXISTS acp_delivery (
+     message_id TEXT NOT NULL REFERENCES acp_messages(id),
+     participant_id TEXT NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'read', 'undeliverable')),
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     delivered_at TIMESTAMPTZ,
+     read_at TIMESTAMPTZ,
+     retry_count INT NOT NULL DEFAULT 0,
+     PRIMARY KEY (message_id, participant_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON acp_messages(thread_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_author ON acp_messages(author_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_dedupe ON acp_messages(dedupe_key) WHERE dedupe_key IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_delivery_pending ON acp_delivery(participant_id, status) WHERE status = 'pending'`,
+  `CREATE INDEX IF NOT EXISTS idx_threads_conversation ON acp_threads(conversation_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_participants_conv ON acp_conversation_participants(participant_id)`,
+];
+
 export class VibeSqlClient {
   constructor(cfg) {
     this._config = cfg || defaultConfig;
@@ -336,11 +422,21 @@ export class VibeSqlClient {
     }
     // Phase 2a migration
     for (const stmt of PHASE2A_MIGRATION) {
-      try { await this._query(stmt); } catch { /* column/constraint may already exist */ }
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Phase2a migration step skipped:', e.message || e);
+      }
     }
     // Projects migration
     for (const stmt of PROJECTS_MIGRATION) {
-      try { await this._query(stmt); } catch { /* tables/columns may already exist */ }
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Projects migration step failed:', e.message || e);
+      }
+    }
+    // Chat schema migration (acp_* tables)
+    for (const stmt of CHAT_SCHEMA_MIGRATION) {
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Chat schema migration step skipped:', e.message || e);
+      }
     }
   }
 
@@ -908,7 +1004,7 @@ export class VibeSqlClient {
     const now = new Date().toISOString();
     const result = await this._query(
       `UPDATE agent_contracts SET status = 'completed', completed_at = ${escapeSql(now)}
-       WHERE id = ${escapeSql(contractId)} AND status = 'active'
+       WHERE id = ${escapeSql(contractId)} AND status IN ('active', 'queued')
        RETURNING *`
     );
     return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
@@ -958,7 +1054,7 @@ export class VibeSqlClient {
   // ── Projects + App Config ─────────────────────────────────
 
   async listProjects() {
-    const result = await this._query(`SELECT * FROM projects ORDER BY created_at DESC`);
+    const result = await this._query(`SELECT * FROM projects ORDER BY id`);
     return result.rows.map(rowToCamel);
   }
 
