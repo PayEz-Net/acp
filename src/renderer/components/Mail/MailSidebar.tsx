@@ -22,7 +22,6 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
     selectedMessageSuggested,
     isComposing,
     replyTo,
-    totalUnread,
     getUnreadCount,
     getMessages,
     isLoading,
@@ -62,11 +61,6 @@ export function MailSidebar({ agents, isOpen, onClose, activeAgent }: MailSideba
           <div className="flex items-center gap-2">
             <Mail className="w-5 h-5 text-violet-400" />
             <span className="text-sm font-semibold text-slate-200">Mail</span>
-            {totalUnread > 0 && (
-              <span className="px-1.5 py-0.5 text-xs font-semibold bg-violet-600 text-white rounded-full">
-                {totalUnread}
-              </span>
-            )}
           </div>
           <div className="flex items-center gap-1">
             <button
