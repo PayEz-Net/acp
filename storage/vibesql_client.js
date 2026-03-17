@@ -412,9 +412,9 @@ export class VibeSqlClient {
       err.statusCode = res.status;
       throw err;
     }
-    // Normalize response: VibeSQL omits 'rows' field on empty results
+    // Normalize response: VibeSQL Server returns rows in 'data' field, not 'rows'
     if (data.rows === undefined) {
-      data.rows = [];
+      data.rows = data.data || [];
     }
     return data;
   }
@@ -462,34 +462,27 @@ export class VibeSqlClient {
 
   async saveSession(session) {
     const now = new Date().toISOString();
-    const result = await this._query(
-      `SELECT id FROM agent_sessions WHERE agent_name = ${escapeSql(session.agentName)}`
-    );
-    if (result.rows.length > 0) {
-      await this._query(`UPDATE agent_sessions SET
-        session_id = ${escapeSql(session.sessionId)},
-        character = ${escapeSql(session.character || null)},
-        custom_functions = ${escapeJsonb(session.customFunctions || {})},
-        preferences = ${escapeJsonb(session.preferences || {})},
-        memory = ${escapeJsonb(session.memory || {})},
-        updated_at = ${escapeSql(now)},
-        version = ${escapeSql(session.version || 1)}
-        WHERE agent_name = ${escapeSql(session.agentName)}`);
-    } else {
-      await this._query(`INSERT INTO agent_sessions
-        (session_id, agent_name, character, custom_functions, preferences, memory, created_at, updated_at, version)
-        VALUES (
-          ${escapeSql(session.sessionId)},
-          ${escapeSql(session.agentName)},
-          ${escapeSql(session.character || null)},
-          ${escapeJsonb(session.customFunctions || {})},
-          ${escapeJsonb(session.preferences || {})},
-          ${escapeJsonb(session.memory || {})},
-          ${escapeSql(session.createdAt || now)},
-          ${escapeSql(now)},
-          ${escapeSql(session.version || 1)}
-        )`);
-    }
+    await this._query(`INSERT INTO agent_sessions
+      (session_id, agent_name, character, custom_functions, preferences, memory, created_at, updated_at, version)
+      VALUES (
+        ${escapeSql(session.sessionId)},
+        ${escapeSql(session.agentName)},
+        ${escapeSql(session.character || null)},
+        ${escapeJsonb(session.customFunctions || {})},
+        ${escapeJsonb(session.preferences || {})},
+        ${escapeJsonb(session.memory || {})},
+        ${escapeSql(session.createdAt || now)},
+        ${escapeSql(now)},
+        ${escapeSql(session.version || 1)}
+      )
+      ON CONFLICT (agent_name) DO UPDATE SET
+        session_id = EXCLUDED.session_id,
+        character = EXCLUDED.character,
+        custom_functions = EXCLUDED.custom_functions,
+        preferences = EXCLUDED.preferences,
+        memory = EXCLUDED.memory,
+        updated_at = EXCLUDED.updated_at,
+        version = EXCLUDED.version`);
   }
 
   async deleteSession(agentName) {
@@ -505,34 +498,27 @@ export class VibeSqlClient {
 
   async upsertSignal(signal) {
     const now = new Date().toISOString();
-    const result = await this._query(
-      `SELECT id FROM agent_signals WHERE agent_id = ${escapeSql(signal.agentId)}`
-    );
-    if (result.rows.length > 0) {
-      await this._query(`UPDATE agent_signals SET
-        agent_name = ${escapeSql(signal.agentName)},
-        zone = ${escapeSql(signal.zone || 'entrance')},
-        working_on = ${escapeSql(signal.workingOn || null)},
-        keywords = ${escapeJsonb(signal.keywords || [])},
-        needs = ${escapeJsonb(signal.needs || [])},
-        offers = ${escapeJsonb(signal.offers || [])},
-        updated_at = ${escapeSql(now)}
-        WHERE agent_id = ${escapeSql(signal.agentId)}`);
-    } else {
-      await this._query(`INSERT INTO agent_signals
-        (agent_id, agent_name, zone, working_on, keywords, needs, offers, created_at, updated_at)
-        VALUES (
-          ${escapeSql(signal.agentId)},
-          ${escapeSql(signal.agentName)},
-          ${escapeSql(signal.zone || 'entrance')},
-          ${escapeSql(signal.workingOn || null)},
-          ${escapeJsonb(signal.keywords || [])},
-          ${escapeJsonb(signal.needs || [])},
-          ${escapeJsonb(signal.offers || [])},
-          ${escapeSql(now)},
-          ${escapeSql(now)}
-        )`);
-    }
+    await this._query(`INSERT INTO agent_signals
+      (agent_id, agent_name, zone, working_on, keywords, needs, offers, created_at, updated_at)
+      VALUES (
+        ${escapeSql(signal.agentId)},
+        ${escapeSql(signal.agentName)},
+        ${escapeSql(signal.zone || 'entrance')},
+        ${escapeSql(signal.workingOn || null)},
+        ${escapeJsonb(signal.keywords || [])},
+        ${escapeJsonb(signal.needs || [])},
+        ${escapeJsonb(signal.offers || [])},
+        ${escapeSql(now)},
+        ${escapeSql(now)}
+      )
+      ON CONFLICT (agent_id) DO UPDATE SET
+        agent_name = EXCLUDED.agent_name,
+        zone = EXCLUDED.zone,
+        working_on = EXCLUDED.working_on,
+        keywords = EXCLUDED.keywords,
+        needs = EXCLUDED.needs,
+        offers = EXCLUDED.offers,
+        updated_at = EXCLUDED.updated_at`);
   }
 
   async getSignal(agentId) {
@@ -549,39 +535,32 @@ export class VibeSqlClient {
   }
 
   async upsertRelevance(rel) {
-    const result = await this._query(
-      `SELECT id FROM agent_relevance WHERE observer_agent = ${escapeSql(rel.observerAgent)} AND subject_agent = ${escapeSql(rel.subjectAgent)}`
-    );
-    if (result.rows.length > 0) {
-      await this._query(`UPDATE agent_relevance SET
-        domain_tags = ${escapeJsonb(rel.domainTags || [])},
-        typical_offers = ${escapeJsonb(rel.typicalOffers || [])},
-        typical_needs = ${escapeJsonb(rel.typicalNeeds || [])},
-        recent_keywords = ${escapeJsonb(rel.recentKeywords || [])},
-        last_broadcast_ts = ${escapeSql(rel.lastBroadcastTs || null)},
-        total_mingles = ${escapeSql(rel.totalMingles || 0)},
-        successful_mingles = ${escapeSql(rel.successfulMingles || 0)},
-        last_mingle_ts = ${escapeSql(rel.lastMingleTs || null)},
-        last_mingle_outcome = ${escapeSql(rel.lastMingleOutcome || null)},
-        base_relevance = ${escapeSql(rel.baseRelevance || 0)},
-        recent_relevance = ${escapeSql(rel.recentRelevance || 0)},
-        interaction_score = ${escapeSql(rel.interactionScore ?? 0.5)},
-        combined_score = ${escapeSql(rel.combinedScore || 0)}
-        WHERE observer_agent = ${escapeSql(rel.observerAgent)} AND subject_agent = ${escapeSql(rel.subjectAgent)}`);
-    } else {
-      await this._query(`INSERT INTO agent_relevance
-        (observer_agent, subject_agent, domain_tags, typical_offers, typical_needs, recent_keywords, last_broadcast_ts, total_mingles, successful_mingles, last_mingle_ts, last_mingle_outcome, base_relevance, recent_relevance, interaction_score, combined_score)
-        VALUES (
-          ${escapeSql(rel.observerAgent)}, ${escapeSql(rel.subjectAgent)},
-          ${escapeJsonb(rel.domainTags || [])}, ${escapeJsonb(rel.typicalOffers || [])},
-          ${escapeJsonb(rel.typicalNeeds || [])}, ${escapeJsonb(rel.recentKeywords || [])},
-          ${escapeSql(rel.lastBroadcastTs || null)}, ${escapeSql(rel.totalMingles || 0)},
-          ${escapeSql(rel.successfulMingles || 0)}, ${escapeSql(rel.lastMingleTs || null)},
-          ${escapeSql(rel.lastMingleOutcome || null)}, ${escapeSql(rel.baseRelevance || 0)},
-          ${escapeSql(rel.recentRelevance || 0)}, ${escapeSql(rel.interactionScore ?? 0.5)},
-          ${escapeSql(rel.combinedScore || 0)}
-        )`);
-    }
+    await this._query(`INSERT INTO agent_relevance
+      (observer_agent, subject_agent, domain_tags, typical_offers, typical_needs, recent_keywords, last_broadcast_ts, total_mingles, successful_mingles, last_mingle_ts, last_mingle_outcome, base_relevance, recent_relevance, interaction_score, combined_score)
+      VALUES (
+        ${escapeSql(rel.observerAgent)}, ${escapeSql(rel.subjectAgent)},
+        ${escapeJsonb(rel.domainTags || [])}, ${escapeJsonb(rel.typicalOffers || [])},
+        ${escapeJsonb(rel.typicalNeeds || [])}, ${escapeJsonb(rel.recentKeywords || [])},
+        ${escapeSql(rel.lastBroadcastTs || null)}, ${escapeSql(rel.totalMingles || 0)},
+        ${escapeSql(rel.successfulMingles || 0)}, ${escapeSql(rel.lastMingleTs || null)},
+        ${escapeSql(rel.lastMingleOutcome || null)}, ${escapeSql(rel.baseRelevance || 0)},
+        ${escapeSql(rel.recentRelevance || 0)}, ${escapeSql(rel.interactionScore ?? 0.5)},
+        ${escapeSql(rel.combinedScore || 0)}
+      )
+      ON CONFLICT (observer_agent, subject_agent) DO UPDATE SET
+        domain_tags = EXCLUDED.domain_tags,
+        typical_offers = EXCLUDED.typical_offers,
+        typical_needs = EXCLUDED.typical_needs,
+        recent_keywords = EXCLUDED.recent_keywords,
+        last_broadcast_ts = EXCLUDED.last_broadcast_ts,
+        total_mingles = EXCLUDED.total_mingles,
+        successful_mingles = EXCLUDED.successful_mingles,
+        last_mingle_ts = EXCLUDED.last_mingle_ts,
+        last_mingle_outcome = EXCLUDED.last_mingle_outcome,
+        base_relevance = EXCLUDED.base_relevance,
+        recent_relevance = EXCLUDED.recent_relevance,
+        interaction_score = EXCLUDED.interaction_score,
+        combined_score = EXCLUDED.combined_score`);
   }
 
   async getRelevance(observer, subject) {
@@ -869,28 +848,21 @@ export class VibeSqlClient {
   // --- Runtime Registry ---
 
   async registerAgent(reg) {
-    const result = await this._query(
-      `SELECT agent_id FROM acp_runtime_registry WHERE agent_id = ${escapeSql(reg.agentId)}`
-    );
-    if (result.rows.length > 0) {
-      await this._query(`UPDATE acp_runtime_registry SET
-        runtime = ${escapeSql(reg.runtime)},
-        adapter = ${escapeSql(reg.adapter)},
-        connection_info = ${escapeJsonb(reg.connectionInfo || {})},
-        capabilities = ${escapeJsonb(reg.capabilities || {})},
-        last_heartbeat = NOW()
-        WHERE agent_id = ${escapeSql(reg.agentId)}`);
-    } else {
-      await this._query(`INSERT INTO acp_runtime_registry
-        (agent_id, runtime, adapter, connection_info, capabilities)
-        VALUES (
-          ${escapeSql(reg.agentId)},
-          ${escapeSql(reg.runtime)},
-          ${escapeSql(reg.adapter)},
-          ${escapeJsonb(reg.connectionInfo || {})},
-          ${escapeJsonb(reg.capabilities || {})}
-        )`);
-    }
+    await this._query(`INSERT INTO acp_runtime_registry
+      (agent_id, runtime, adapter, connection_info, capabilities)
+      VALUES (
+        ${escapeSql(reg.agentId)},
+        ${escapeSql(reg.runtime)},
+        ${escapeSql(reg.adapter)},
+        ${escapeJsonb(reg.connectionInfo || {})},
+        ${escapeJsonb(reg.capabilities || {})}
+      )
+      ON CONFLICT (agent_id) DO UPDATE SET
+        runtime = EXCLUDED.runtime,
+        adapter = EXCLUDED.adapter,
+        connection_info = EXCLUDED.connection_info,
+        capabilities = EXCLUDED.capabilities,
+        last_heartbeat = NOW()`);
   }
 
   async deregisterAgent(agentId) {
