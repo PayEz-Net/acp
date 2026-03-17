@@ -158,6 +158,7 @@ export async function startApiServer(): Promise<boolean> {
       ACP_LOCAL_SECRET: localSecret,
       PORT: String(API_PORT),
       ACP_CALLBACK_PORT: String(getCallbackPort() || ''),
+      STORAGE_MODE: process.env.STORAGE_MODE || 'vibesql',
     },
   });
 

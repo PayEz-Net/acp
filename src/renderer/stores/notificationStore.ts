@@ -17,49 +17,9 @@ interface NotificationStore {
   setOpen: (open: boolean) => void;
 }
 
-// Mock notifications for development
-const mockNotifications: Notification[] = [
-  {
-    id: 1,
-    type: 'mail',
-    title: 'New message from BAPert',
-    message: 'TASK: Integrate @vibe/agent-ui components',
-    agent: 'BAPert',
-    read: false,
-    created_at: new Date(Date.now() - 5 * 60000).toISOString(), // 5 min ago
-  },
-  {
-    id: 2,
-    type: 'review',
-    title: 'Code review approved',
-    message: 'QAPert approved your Mail Push SSE implementation',
-    agent: 'QAPert',
-    read: false,
-    created_at: new Date(Date.now() - 30 * 60000).toISOString(), // 30 min ago
-  },
-  {
-    id: 3,
-    type: 'task',
-    title: 'Task assigned',
-    message: 'Day 2 - Document Viewer + Notifications',
-    agent: 'BAPert',
-    link: '/kanban/task/42',
-    read: true,
-    created_at: new Date(Date.now() - 2 * 3600000).toISOString(), // 2 hours ago
-  },
-  {
-    id: 4,
-    type: 'system',
-    title: 'Autonomy mode enabled',
-    message: 'All agents are now running autonomously until milestone completion',
-    read: true,
-    created_at: new Date(Date.now() - 4 * 3600000).toISOString(), // 4 hours ago
-  },
-];
-
 export const useNotificationStore = create<NotificationStore>((set) => ({
-  notifications: mockNotifications,
-  unreadCount: mockNotifications.filter((n) => !n.read).length,
+  notifications: [],
+  unreadCount: 0,
   isOpen: false,
 
   setNotifications: (notifications) =>
