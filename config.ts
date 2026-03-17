@@ -1,7 +1,6 @@
 export const config = {
   port: parseInt(process.env.PORT ?? '', 10) || 3001,
   host: '127.0.0.1',
-  storageMode: process.env.STORAGE_MODE || 'physical',
   vibesqlUrl: process.env.VIBESQL_URL || 'http://10.0.0.93:52411',
   vibeApiUrl: process.env.VIBE_API_URL || 'https://api.idealvibe.online',
   vibeClientId: process.env.VIBE_CLIENT_ID || 'vibe_b2d2aac0315549d9',
@@ -18,7 +17,6 @@ export const config = {
   execTimeoutMs: parseInt(process.env.EXEC_TIMEOUT_MS ?? '', 10) || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
-  acpDataDir: process.env.ACP_DATA_DIR || '.acp',
   redisUrl: process.env.REDIS_URL || 'redis://10.0.0.93:6379',
   vibesqlContainerSecret: process.env.VIBESQL_CONTAINER_SECRET || 'ContainersSuperDevSecret',
   vibesqlDirectUrl: process.env.VIBESQL_DIRECT_URL || process.env.VIBESQL_URL || 'http://10.0.0.93:52411',

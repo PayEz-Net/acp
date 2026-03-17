@@ -22,19 +22,19 @@ describe('SessionManager', () => {
       status: 200,
       json: async () => ({ success: true, rows: [], rowCount: 0 }),
     }));
-    manager = new SessionManager({ storageMode: 'physical', vibesqlUrl: 'http://localhost:5173', acpDataDir: '.acp-test' });
+    manager = new SessionManager({ vibesqlUrl: 'http://localhost:5173' });
   });
 
   afterEach(() => {
     delete global.fetch;
   });
 
-  test('load returns null when session not found anywhere', async () => {
+  test('load returns null when session not found', async () => {
     const result = await manager.load('NonExistent');
     expect(result).toBeNull();
   });
 
-  test('load returns session from primary storage with vibesql source', async () => {
+  test('load returns session from vibesql with correct source', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -61,7 +61,7 @@ describe('SessionManager', () => {
     expect(result.session.agentName).toBe('TestAgent');
   });
 
-  test('save returns savedTo with both targets on success', async () => {
+  test('save returns savedTo with vibesql', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -70,19 +70,16 @@ describe('SessionManager', () => {
 
     const result = await manager.save(mockSession);
     expect(result.savedTo).toContain('vibesql');
-    expect(result.savedTo).toContain('file');
     expect(global.fetch).toHaveBeenCalled();
   });
 
-  test('save returns savedTo with only file when primary fails', async () => {
+  test('save throws when vibesql fails (no fallback)', async () => {
     global.fetch = jest.fn(async () => { throw new Error('network error'); });
 
-    const result = await manager.save(mockSession);
-    expect(result.savedTo).toEqual(['file']);
-    expect(result.savedTo).not.toContain('vibesql');
+    await expect(manager.save(mockSession)).rejects.toThrow('network error');
   });
 
-  test('delete calls primary storage', async () => {
+  test('delete calls vibesql storage', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -93,7 +90,7 @@ describe('SessionManager', () => {
     expect(global.fetch).toHaveBeenCalled();
   });
 
-  test('list returns sessions from primary storage', async () => {
+  test('list returns sessions from vibesql', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -111,18 +108,16 @@ describe('SessionManager', () => {
     expect(result[0].agentName).toBe('A1');
   });
 
-  test('list falls back to file backup when primary fails', async () => {
+  test('list throws when vibesql fails (no fallback)', async () => {
     global.fetch = jest.fn(async () => { throw new Error('connection refused'); });
 
-    const result = await manager.list();
-    expect(Array.isArray(result)).toBe(true);
+    await expect(manager.list()).rejects.toThrow('connection refused');
   });
 
-  test('load falls back gracefully when primary storage throws', async () => {
+  test('load throws when vibesql fails (no fallback)', async () => {
     global.fetch = jest.fn(async () => { throw new Error('network error'); });
 
-    const result = await manager.load('TestAgent');
-    expect(result).toBeNull();
+    await expect(manager.load('TestAgent')).rejects.toThrow('network error');
   });
 
   test('exposes storage adapter via getter', () => {

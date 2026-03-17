@@ -233,7 +233,7 @@ if (process.argv[1]?.endsWith('server.js')) {
 
   const app = await createApp();
   const server = app.listen(config.port, config.host, () => {
-    logger.info('server', `Server running on ${config.host}:${config.port}`, { storage: config.storageMode });
+    logger.info('server', `Server running on ${config.host}:${config.port}`, { storage: 'vibesql' });
     if (config.acpLocalSecret) {
       logger.info('server', 'Local auth enabled');
     }

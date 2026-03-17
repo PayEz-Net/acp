@@ -7,7 +7,6 @@ beforeAll(async () => {
   const supertest = await import('supertest');
   request = supertest.default;
   app = await createApp({
-    storageMode: 'physical',
     vibesqlUrl: 'http://localhost:0',
     vibeApiUrl: 'http://localhost:0',
     vibeClientId: 1,
@@ -18,7 +17,6 @@ beforeAll(async () => {
     execTimeoutMs: 5000,
     nodeEnv: 'test',
     logLevel: 'error',
-    acpDataDir: '.acp-test-collab',
     corsOrigins: '*',
     partyTickMs: 999999,
     autonomyMaxRuntimeHours: 4,
