@@ -208,6 +208,7 @@ export class Supervisor {
    * Stops party engine, stops supervisor, returns kill list for caller to terminate PTYs.
    */
   async emergencyStop() {
+    if (!this.unattendedMode) return { stopped: false, reason: 'not_running' };
     this.unattendedMode = false;
     this.stopDeadManSwitch();
 
