@@ -1,10 +1,8 @@
 import { Router } from 'express';
-import { success } from '../response.js';
-import { Supervisor } from '../../autonomy/supervisor.js';
+import { success, error } from '../response.js';
 
-export default function autonomyRoutes(storage, cfg = {}) {
+export default function autonomyRoutes(supervisor) {
   const router = Router();
-  const supervisor = new Supervisor(storage, cfg);
 
   router.post('/start', async (req, res, next) => {
     try {
@@ -65,6 +63,59 @@ export default function autonomyRoutes(storage, cfg = {}) {
       const id = await supervisor.addStandupEntry(req.body);
       const elapsed = Math.round(performance.now() - req.startTime);
       res.json(success({ id }, 'autonomy_standup_add', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── Unattended Mode ─────────────────────────────────
+
+  router.post('/unattended/start', async (req, res, next) => {
+    try {
+      req.operationCode = 'unattended_start';
+      const { stopCondition, maxRuntimeHours, escalationLevel, milestone, notifyWebhook } = req.body || {};
+      const state = await supervisor.startUnattended({
+        stopCondition,
+        maxRuntimeHours,
+        escalationLevel,
+        milestone,
+        notifyWebhook,
+      });
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(state, 'unattended_start', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/unattended/stop', async (req, res, next) => {
+    try {
+      req.operationCode = 'unattended_stop';
+      const { reason } = req.body || {};
+      const state = await supervisor.stopUnattended(reason || 'manual');
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success(state, 'unattended_stop', req.requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/unattended/status', async (req, res, next) => {
+    try {
+      req.operationCode = 'unattended_status';
+      const state = await supervisor.getState();
+      const elapsed = Math.round(performance.now() - req.startTime);
+      res.json(success({
+        ...(state || { enabled: false }),
+        unattendedMode: supervisor.unattendedMode,
+        partyEngineActive: supervisor._partyEngine?.running ?? false,
+      }, 'unattended_status', req.requestId, {
         performance: { response_time_ms: elapsed },
       }));
     } catch (err) {

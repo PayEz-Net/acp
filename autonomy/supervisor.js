@@ -3,6 +3,15 @@ export class Supervisor {
     this._storage = storage;
     this._maxRuntimeHours = cfg.autonomyMaxRuntimeHours || 4;
     this._notifyWebhook = cfg.notifyWebhook || null;
+    this._partyEngine = null;
+    this._eventBus = null;
+    this.unattendedMode = false;
+  }
+
+  /** Inject party engine and event bus for unattended mode wiring. */
+  link({ partyEngine, eventBus }) {
+    this._partyEngine = partyEngine;
+    this._eventBus = eventBus;
   }
 
   async start(opts = {}) {
@@ -42,8 +51,104 @@ export class Supervisor {
     return this.getState();
   }
 
+  /**
+   * Start unattended mode: supervisor + party engine linked.
+   * Agents work autonomously until a stop condition is met.
+   */
+  async startUnattended(config = {}) {
+    if (this.unattendedMode) {
+      const err = new Error('Unattended mode is already active');
+      err.code = 'INVALID_REQUEST';
+      throw err;
+    }
+
+    // Start supervisor with config
+    await this.start({
+      stopCondition: config.stopCondition || 'milestone',
+      maxRuntimeHours: config.maxRuntimeHours || this._maxRuntimeHours,
+      milestone: config.milestone || null,
+      notifyWebhook: config.notifyWebhook || this._notifyWebhook,
+    });
+
+    this.unattendedMode = true;
+
+    // Persist unattended fields
+    await this._storage.updateAutonomyState({
+      unattendedMode: true,
+      escalationLevel: config.escalationLevel ?? 2,
+    });
+
+    // Start party engine
+    if (this._partyEngine) {
+      this._partyEngine.start();
+    }
+
+    // Emit SSE event
+    if (this._eventBus) {
+      this._eventBus.emit({
+        event: 'unattended-started',
+        data: {
+          mode: 'unattended',
+          stop_condition: config.stopCondition || 'milestone',
+          max_runtime_hours: config.maxRuntimeHours || this._maxRuntimeHours,
+          escalation_level: config.escalationLevel ?? 2,
+        },
+      });
+    }
+
+    return this.getState();
+  }
+
+  /**
+   * Stop unattended mode: party engine stops, supervisor stops, human notified.
+   */
+  async stopUnattended(reason = 'manual') {
+    const wasUnattended = this.unattendedMode;
+    this.unattendedMode = false;
+
+    // Stop party engine
+    if (this._partyEngine) {
+      this._partyEngine.stop();
+    }
+
+    // Persist unattended off
+    await this._storage.updateAutonomyState({
+      unattendedMode: false,
+    });
+
+    // Stop supervisor (handles webhook notify)
+    let state;
+    try {
+      state = await this.stop(reason);
+    } catch {
+      // Supervisor may not be running if stop conditions already triggered
+      state = await this.getState();
+    }
+
+    // Emit SSE event
+    if (this._eventBus) {
+      this._eventBus.emit({
+        event: 'unattended-paused',
+        data: {
+          reason,
+          was_unattended: wasUnattended,
+          runtime_minutes: state?.startedAt
+            ? Math.round((Date.now() - new Date(state.startedAt).getTime()) / 60000)
+            : 0,
+        },
+      });
+    }
+
+    return state;
+  }
+
   async getState() {
-    return this._storage.getAutonomyState();
+    const state = await this._storage.getAutonomyState();
+    if (state) {
+      state.unattendedMode = this.unattendedMode;
+      state.partyEngineActive = this._partyEngine?.running ?? false;
+    }
+    return state;
   }
 
   async checkStopConditions(tasks = []) {

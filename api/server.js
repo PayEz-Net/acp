@@ -29,7 +29,7 @@ import { Supervisor } from '../autonomy/supervisor.js';
 import { logger, setLogLevel, requestLogger } from './logging/logger.js';
 import { registerShutdownHandlers } from './lifecycle/shutdown.js';
 import { ContractorService } from './contractors/service.js';
-import { SessionManager } from './contractors/sessionManager.js';
+import { SessionManager as ContractorSessionManager } from './contractors/sessionManager.js';
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
@@ -96,9 +96,9 @@ export async function createApp(cfg) {
   const contractorService = new ContractorService(storage, localEventBus);
 
   // Session manager — auto-spawn contractor sessions (Phase 2b)
-  const sessionManager = new SessionManager(storage, localEventBus, appConfig);
+  const contractorSessionManager = new ContractorSessionManager(storage, localEventBus, appConfig);
   // Orphan detection on startup
-  sessionManager.checkOrphans().then(n => {
+  contractorSessionManager.checkOrphans().then(n => {
     if (n > 0) logger.info(`[SessionManager] Marked ${n} orphaned contract(s) as expired`);
   }).catch(() => {});
 
@@ -108,7 +108,7 @@ export async function createApp(cfg) {
   let mailSentCallback = null;
   app.use('/v1/mail', mailProxyRoutes(appConfig, (from, subject, to) => {
     if (mailSentCallback) mailSentCallback(from, subject, to);
-  }, contractorService, sessionManager));
+  }, contractorService, contractorSessionManager));
 
   // SSE — upstream (mail from cloud) + local (party/autonomy) events → downstream fan-out
   const upstreamSse = new UpstreamSseManager(appConfig);
@@ -184,13 +184,14 @@ export async function createApp(cfg) {
   app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus, storage));
-  app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, sessionManager));
-  app.use('/v1/contracts', contractRoutes(contractorService, sessionManager));
+  app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
+  app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
   app.use('/v1/projects', projectRoutes(storage, localEventBus));
 
-  // Autonomy supervisor — created at server level for hook integration
+  // Autonomy supervisor — single instance shared with routes and lifecycle hooks
   const supervisor = new Supervisor(storage, appConfig);
-  app.use('/v1/autonomy', autonomyRoutes(storage, appConfig));
+  supervisor.link({ partyEngine, eventBus: localEventBus });
+  app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
 

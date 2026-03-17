@@ -297,6 +297,12 @@ const PROJECTS_MIGRATION = [
   `UPDATE standup_entries SET project_id = (SELECT id FROM projects WHERE name = 'Default') WHERE project_id IS NULL`,
 ];
 
+// Unattended mode migration: new columns on autonomy_state
+const UNATTENDED_MIGRATION = [
+  `ALTER TABLE autonomy_state ADD COLUMN IF NOT EXISTS unattended_mode BOOLEAN DEFAULT FALSE`,
+  `ALTER TABLE autonomy_state ADD COLUMN IF NOT EXISTS escalation_level INTEGER DEFAULT 2`,
+];
+
 // Chat schema migration — creates acp_* tables (from chat/schema.sql)
 // Must be ordered: conversations → participants → threads → subscriptions → messages → attachments/reactions/delivery
 const CHAT_SCHEMA_MIGRATION = [
@@ -430,6 +436,12 @@ export class VibeSqlClient {
     for (const stmt of PROJECTS_MIGRATION) {
       try { await this._query(stmt); } catch (e) {
         console.warn('[VibeSqlClient] Projects migration step failed:', e.message || e);
+      }
+    }
+    // Unattended mode migration
+    for (const stmt of UNATTENDED_MIGRATION) {
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Unattended migration step skipped:', e.message || e);
       }
     }
     // Chat schema migration (acp_* tables)
