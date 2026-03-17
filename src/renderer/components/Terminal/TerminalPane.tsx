@@ -1,11 +1,11 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 import { AgentState } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
-import { Play, Square, RotateCcw } from 'lucide-react';
+import { Play, Square, RotateCcw, ChevronDown } from 'lucide-react';
 
 interface TerminalPaneProps {
   agent: AgentState;
@@ -18,10 +18,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  // Scroll-pause: when user scrolls up, pause auto-scroll for SCROLL_PAUSE_MS then snap back
-  const scrollPauseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Scroll-pause: user scrolls up = pause, scrolls back to bottom = resume. No timers.
   const isScrollPaused = useRef(false);
-  const SCROLL_PAUSE_MS = 20000;
+  const [showScrollPill, setShowScrollPill] = useState(false);
   const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, backendAvailable } = useAppStore();
 
   // Initialize terminal
@@ -84,24 +83,16 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
-    // Detect user scrolling up — pause auto-scroll, then auto-return after timeout
+    // Scroll position IS the toggle — no timers, no fighting the user
     terminal.onScroll(() => {
       const atBottom = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
       if (!atBottom) {
-        // User scrolled up — pause auto-scroll
+        // User scrolled up — pause auto-scroll, respect their intent
         isScrollPaused.current = true;
-        if (scrollPauseTimer.current) clearTimeout(scrollPauseTimer.current);
-        scrollPauseTimer.current = setTimeout(() => {
-          isScrollPaused.current = false;
-          terminal.scrollToBottom();
-        }, SCROLL_PAUSE_MS);
       } else {
-        // User scrolled back to bottom manually — cancel pause
+        // User returned to bottom — resume auto-scroll, hide pill
         isScrollPaused.current = false;
-        if (scrollPauseTimer.current) {
-          clearTimeout(scrollPauseTimer.current);
-          scrollPauseTimer.current = null;
-        }
+        setShowScrollPill(false);
       }
     });
 
@@ -187,7 +178,6 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     return () => {
       resizeObserver.disconnect();
       unregisterTerminal(agent.name);
-      if (scrollPauseTimer.current) clearTimeout(scrollPauseTimer.current);
       terminal.dispose();
       xtermRef.current = null;
     };
@@ -219,9 +209,11 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       if (data.terminalId === agent.terminalId && xtermRef.current) {
         const term = xtermRef.current;
         term.write(data.data);
-        // Always snap to bottom unless user has manually scrolled up (pause active)
         if (!isScrollPaused.current) {
           term.scrollToBottom();
+        } else {
+          // User is reading scrollback — show "new output" pill, don't interrupt
+          setShowScrollPill(true);
         }
 
         // Detect agent status from Claude Code output patterns
@@ -398,25 +390,44 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       </div>
 
       {/* Terminal */}
-      <div
-        className="terminal-content"
-        ref={terminalRef}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        onClick={(e) => {
-          e.stopPropagation();
-          xtermRef.current?.focus();
-          const textarea = terminalRef.current?.querySelector('textarea');
-          if (textarea) textarea.focus();
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          const term = xtermRef.current;
-          if (term?.hasSelection()) {
-            navigator.clipboard.writeText(term.getSelection());
-            term.clearSelection();
-          }
-        }}
-      />
+      <div className="relative flex-1 min-h-0">
+        <div
+          className="terminal-content h-full"
+          ref={terminalRef}
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          onClick={(e) => {
+            e.stopPropagation();
+            xtermRef.current?.focus();
+            const textarea = terminalRef.current?.querySelector('textarea');
+            if (textarea) textarea.focus();
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            const term = xtermRef.current;
+            if (term?.hasSelection()) {
+              navigator.clipboard.writeText(term.getSelection());
+              term.clearSelection();
+            }
+          }}
+        />
+
+        {/* "New output below" pill — visible when user is reading scrollback */}
+        <button
+          className="absolute bottom-3 right-3 flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-700/80 text-slate-200 hover:bg-slate-600/90 backdrop-blur-sm shadow-lg cursor-pointer select-none"
+          style={{
+            opacity: showScrollPill ? 1 : 0,
+            pointerEvents: showScrollPill ? 'auto' : 'none',
+            transition: 'opacity 150ms ease-in-out',
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            xtermRef.current?.scrollToBottom();
+          }}
+        >
+          <ChevronDown className="w-3.5 h-3.5" />
+          New output
+        </button>
+      </div>
 
     </div>
   );
