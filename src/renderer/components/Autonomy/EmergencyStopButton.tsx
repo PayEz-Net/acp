@@ -8,10 +8,10 @@ export function EmergencyStopButton() {
   if (!autonomyEnabled) return null;
 
   const handleEmergencyStop = async () => {
-    // Immediate stop — no confirmation needed
-    const { stopUnattended } = useAutonomyStore.getState();
-    await stopUnattended('emergency');
-    console.log('[Autonomy] Emergency stop triggered');
+    // Hard stop — immediate kill, not soft shutdown
+    const { emergencyStop } = useAutonomyStore.getState();
+    await emergencyStop();
+    console.log('[Autonomy] Emergency hard stop triggered');
   };
 
   return (

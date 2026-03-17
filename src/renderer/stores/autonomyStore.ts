@@ -45,6 +45,7 @@ interface AutonomyStore {
   stopAutonomy: () => Promise<boolean>;
   startUnattended: (config: UnattendedConfig) => Promise<boolean>;
   stopUnattended: (reason?: string) => Promise<boolean>;
+  emergencyStop: () => Promise<boolean>;
   dismissPaused: () => void;
   updateFromSse: (data: Record<string, unknown>) => void;
   setFilters: (filters: Partial<StandupFilters>) => void;
@@ -212,6 +213,20 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
       console.error('[Autonomy] Failed to stop unattended:', err);
       return false;
     }
+  },
+
+  emergencyStop: async () => {
+    // Hard stop — immediate kill, bypasses soft shutdown SLA
+    try {
+      const res = await autonomyRequest('/unattended/emergency-stop', { method: 'POST' });
+      if (!res.ok) throw new Error(`${res.status}`);
+    } catch (err) {
+      console.error('[Autonomy] Emergency stop API call failed:', err);
+    }
+    // Always clear local state regardless of API result
+    set({ unattended: { ...DEFAULT_UNATTENDED, paused: true, pauseReason: 'emergency' } });
+    useAppStore.getState().setAutonomyEnabled(false);
+    return true;
   },
 
   dismissPaused: () => {
