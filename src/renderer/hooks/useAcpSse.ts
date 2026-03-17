@@ -48,13 +48,13 @@ async function getSecret(): Promise<string | null> {
  */
 export function useAcpSse() {
   const abortRef = useRef<AbortController | null>(null);
-  const { backendAvailable, agents, injectMessage } = useAppStore();
-  const { fetchInbox } = useMailStore();
+  // Only subscribe to backendAvailable — agent status changes must NOT reconnect SSE
+  const backendAvailable = useAppStore(s => s.backendAvailable);
   const connectionStateRef = useRef<SseConnectionState>('disconnected');
   const lastPingRef = useRef<number>(0);
 
   useEffect(() => {
-    console.log(`[AcpSse] Effect fired — backendAvailable: ${backendAvailable}, agents: ${agents.length}`);
+    console.log(`[AcpSse] Effect fired — backendAvailable: ${backendAvailable}`);
     if (!backendAvailable) {
       console.log('[AcpSse] Skipping — backend not available');
       connectionStateRef.current = 'disconnected';
@@ -150,7 +150,7 @@ export function useAcpSse() {
                 }
 
                 // Refresh mail sidebar
-                fetchInbox(agentName);
+                useMailStore.getState().fetchInbox(agentName);
               } catch (err) {
                 console.error('[AcpSse] Failed to parse mail event:', err);
               }
@@ -291,7 +291,7 @@ export function useAcpSse() {
       abortRef.current = null;
       connectionStateRef.current = 'disconnected';
     };
-  }, [backendAvailable, agents, injectMessage, fetchInbox]);
+  }, [backendAvailable]);
 
   return {
     connectionState: connectionStateRef,

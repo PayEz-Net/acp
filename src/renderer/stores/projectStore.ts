@@ -81,11 +81,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const data = await res.json();
       const project: Project | null = data.data?.project || data.data || null;
       set({ activeProject: project });
-      // If no active project, show picker
-      if (!project) set({ showPicker: true });
+      // If no active project but projects exist, show picker
+      if (!project) {
+        const projRes = await projectRequest('');
+        const projData = await projRes.json();
+        const allProjects: Project[] = projData.data?.projects || projData.data || [];
+        if (allProjects.length > 1) {
+          set({ showPicker: true });
+        } else if (allProjects.length === 1) {
+          // Auto-select the only project
+          await get().switchProject(allProjects[0].id);
+        }
+        // 0 projects — don't show picker, nothing to pick
+      }
     } catch (err) {
       console.error('[Projects] Failed to fetch active project:', err);
-      set({ showPicker: true });
     }
   },
 
@@ -151,11 +161,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const projectId = data.project_id as number;
     const projectName = data.project_name as string;
     if (projectId && get().activeProject?.id !== projectId) {
+      const current = get().activeProject;
       set({
         activeProject: {
-          ...get().activeProject!,
           id: projectId,
-          name: projectName || get().activeProject?.name || '',
+          name: projectName || current?.name || '',
+          description: current?.description,
+          status: current?.status || 'active',
+          created_at: current?.created_at || new Date().toISOString(),
+          updated_at: current?.updated_at || new Date().toISOString(),
         },
       });
       reloadProjectScopedStores();

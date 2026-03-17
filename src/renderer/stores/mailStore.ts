@@ -264,7 +264,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
         method: 'POST',
         body: {
           from_agent: from,
-          to_agent: to,
+          to: [to],
           subject,
           body,
         },

@@ -54,7 +54,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!useAppStore.getState().backendAvailable) return;
     set({ loading: true });
     try {
-      const res = await chatRequest('/conversations');
+      const activeAgent = useAppStore.getState().agents.find(a => a.id === useAppStore.getState().activeAgentId);
+      const agentName = activeAgent?.name || 'BAPert';
+      const res = await chatRequest(`/conversations?agent=${encodeURIComponent(agentName)}`);
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
       set({ conversations: data.data || data.conversations || [], loading: false });

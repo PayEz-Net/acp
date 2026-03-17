@@ -20,6 +20,16 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
     if (isOpen) fetchProjects();
   }, [isOpen, fetchProjects]);
 
+  // Escape key closes picker (only if there's an active project to fall back to)
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && activeProject) onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, activeProject, onClose]);
+
   if (!isOpen) return null;
 
   const handleSwitch = async (projectId: number) => {

@@ -63,7 +63,7 @@ export const useAutonomyStore = create<AutonomyStore>((set) => ({
       const res = await autonomyRequest(`/standup${qs ? '?' + qs : ''}`);
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      const entries: StandupEntry[] = data.data?.entries || data.entries || [];
+      const entries: StandupEntry[] = Array.isArray(data.data) ? data.data : (data.data?.entries || data.entries || []);
       const escalations = entries.filter(e =>
         e.event_type === 'blocked' || e.event_type === 'review_failed'
       );

@@ -88,6 +88,18 @@ async function contractRequest(endpoint: string, options: { method?: string; bod
   });
 }
 
+// --- Debounced refresh for SSE handlers ---
+// Multiple SSE events can fire in rapid succession (e.g., queued → session-started).
+// Without debounce, each triggers a separate fetchActive() API call.
+let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+function debouncedRefresh(fetchActive: () => Promise<void>, delay = 300) {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(() => {
+    _refreshTimer = null;
+    fetchActive();
+  }, delay);
+}
+
 // --- Store ---
 
 interface ContractorStore {
@@ -219,34 +231,34 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     }
   },
 
-  // SSE: new contractor hired — refresh list
+  // SSE: new contractor hired — debounced refresh
   handleContractorHired: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
-  // SSE: contract completed — refresh list
+  // SSE: contract completed — debounced refresh
   handleContractorCompleted: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
-  // SSE: contract expired — refresh list
+  // SSE: contract expired — debounced refresh
   handleContractorExpired: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
-  // SSE: contract cancelled — refresh list
+  // SSE: contract cancelled — debounced refresh
   handleContractorCancelled: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
-  // SSE: contract queued (at capacity) — refresh list
+  // SSE: contract queued (at capacity) — debounced refresh
   handleContractorQueued: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
-  // SSE: session spawned — refresh list
+  // SSE: session spawned — debounced refresh
   handleSessionStarted: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 
   // SSE: session output line — no refresh, handled by component
@@ -254,8 +266,8 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     // Handled directly by SessionOutputLog component via event bus
   },
 
-  // SSE: session exited — refresh list
+  // SSE: session exited — debounced refresh
   handleSessionExited: (_data) => {
-    get().fetchActive();
+    debouncedRefresh(get().fetchActive);
   },
 }));
