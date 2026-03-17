@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Zap, X } from 'lucide-react';
 import { useAutonomyStore, UnattendedConfig } from '../../stores/autonomyStore';
 
@@ -30,6 +30,15 @@ export function UnattendedConfigModal({ onClose }: UnattendedConfigModalProps) {
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
 
+  // Escape key closes modal
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
   const handleStart = async () => {
     setStarting(true);
     setError('');
@@ -50,10 +59,10 @@ export function UnattendedConfigModal({ onClose }: UnattendedConfigModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
         className="w-[440px] max-h-[80vh] bg-slate-900 border border-slate-700 rounded-lg shadow-2xl flex flex-col overflow-hidden"
-        onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="px-5 py-4 border-b border-slate-700">
