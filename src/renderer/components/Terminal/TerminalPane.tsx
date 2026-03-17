@@ -18,6 +18,10 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  // Scroll-pause: when user scrolls up, pause auto-scroll for SCROLL_PAUSE_MS then snap back
+  const scrollPauseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isScrollPaused = useRef(false);
+  const SCROLL_PAUSE_MS = 20000;
   const { updateAgentStatus, setAgentTerminalId, registerTerminal, unregisterTerminal, backendAvailable } = useAppStore();
 
   // Initialize terminal
@@ -79,6 +83,27 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
+
+    // Detect user scrolling up — pause auto-scroll, then auto-return after timeout
+    terminal.onScroll(() => {
+      const atBottom = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
+      if (!atBottom) {
+        // User scrolled up — pause auto-scroll
+        isScrollPaused.current = true;
+        if (scrollPauseTimer.current) clearTimeout(scrollPauseTimer.current);
+        scrollPauseTimer.current = setTimeout(() => {
+          isScrollPaused.current = false;
+          terminal.scrollToBottom();
+        }, SCROLL_PAUSE_MS);
+      } else {
+        // User scrolled back to bottom manually — cancel pause
+        isScrollPaused.current = false;
+        if (scrollPauseTimer.current) {
+          clearTimeout(scrollPauseTimer.current);
+          scrollPauseTimer.current = null;
+        }
+      }
+    });
 
     // Register terminal for mail push message injection
     registerTerminal(agent.name, terminal);
@@ -151,7 +176,10 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         if (tid) {
           window.electronAPI.resizeTerminal(tid, terminal.cols, terminal.rows);
         }
-        terminal.scrollToBottom();
+        // After resize, snap to bottom unless user is reading scrollback
+        if (!isScrollPaused.current) {
+          terminal.scrollToBottom();
+        }
       }, 100);
     });
     resizeObserver.observe(terminalRef.current);
@@ -159,6 +187,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     return () => {
       resizeObserver.disconnect();
       unregisterTerminal(agent.name);
+      if (scrollPauseTimer.current) clearTimeout(scrollPauseTimer.current);
       terminal.dispose();
       xtermRef.current = null;
     };
@@ -189,11 +218,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     const unsubscribe = window.electronAPI.onTerminalData((data) => {
       if (data.terminalId === agent.terminalId && xtermRef.current) {
         const term = xtermRef.current;
-        // Check if user is at bottom before write (don't steal scroll from scrollback reading)
-        const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
         term.write(data.data);
-        // Snap to bottom if user was already there
-        if (wasAtBottom) {
+        // Always snap to bottom unless user has manually scrolled up (pause active)
+        if (!isScrollPaused.current) {
           term.scrollToBottom();
         }
 
