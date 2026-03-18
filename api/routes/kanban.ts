@@ -20,6 +20,10 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
           return;
         }
       }
+      // AC-6: set createdBy from auth context if not explicitly provided
+      if (!req.body.createdBy && (req as any).agentName) {
+        req.body.createdBy = (req as any).agentName;
+      }
       const id = await createTask(storage, req.body);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       localEventBus?.emit({

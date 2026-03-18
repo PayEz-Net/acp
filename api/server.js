@@ -51,19 +51,19 @@ export async function createApp(cfg) {
   app.use(timing);
   app.use(requestLogger());
 
-  // Local auth — validates ACP_LOCAL_SECRET on all routes except /health
-  if (appConfig.acpLocalSecret) {
-    app.use(localAuth(appConfig.acpLocalSecret));
-  } else if (appConfig.nodeEnv === 'production') {
-    console.error('[ACP] FATAL: ACP_LOCAL_SECRET not set in production mode');
-    process.exit(1);
-  } else {
-    console.warn('[ACP] WARNING: ACP_LOCAL_SECRET not set — auth disabled (dev mode only)');
-  }
-
   const sessionManager = new SessionManager(appConfig);
   await sessionManager.init();
   const storage = sessionManager.storage;
+
+  // Local auth — accepts Bearer (renderer) and/or X-ACP-Agent (agents)
+  if (appConfig.nodeEnv === 'production' && !appConfig.acpLocalSecret) {
+    console.error('[ACP] FATAL: ACP_LOCAL_SECRET not set in production mode');
+    process.exit(1);
+  }
+  if (!appConfig.acpLocalSecret) {
+    console.warn('[ACP] WARNING: ACP_LOCAL_SECRET not set — Bearer auth disabled, agent identity auth only');
+  }
+  app.use(localAuth(appConfig.acpLocalSecret || null, storage));
 
   // Health endpoint — unauthenticated, must respond within 1s
   // Storage probe has 500ms timeout to stay within budget
