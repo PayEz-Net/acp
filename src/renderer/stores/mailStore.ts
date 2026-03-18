@@ -200,9 +200,15 @@ export const useMailStore = create<MailStore>((set, get) => ({
     }
 
     try {
-      // Call the new ActionPanel-formatted endpoint
-      const unreadParam = get().showUnreadOnly ? '?unread=true' : '';
-      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${unreadParam}`);
+      // When filtering unread, fetch all pages so we don't miss unreads beyond page 1
+      const showUnread = get().showUnreadOnly;
+      const params = new URLSearchParams();
+      if (showUnread) {
+        params.set('unread', 'true');
+        params.set('page_size', '200');
+      }
+      const qs = params.toString() ? `?${params.toString()}` : '';
+      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${qs}`);
 
       if (!res.ok) {
         throw new Error(`Failed to fetch: ${res.status}`);
