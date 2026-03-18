@@ -218,15 +218,20 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
       // Map API fields to our MailMessage shape (API uses read_at instead of is_read, no to_agent)
       const rawMessages = response.data?.messages || [];
-      const messages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
+      const allMessages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
         ...m,
         to_agent: (m.to_agent as string) || agent,
         is_read: !!m.read_at,
       }));
 
+      // Client-side filter: the cloud API ignores ?unread=true, so filter here
+      const messages = get().showUnreadOnly
+        ? allMessages.filter((m) => !m.is_read)
+        : allMessages;
+
       setMailbox(agent, {
         messages,
-        unreadCount: response.data?.unread_count ?? messages.filter((m) => !m.is_read).length,
+        unreadCount: response.data?.unread_count ?? allMessages.filter((m) => !m.is_read).length,
         loading: false,
         actions: response.actions,
         suggested: response.suggested,
