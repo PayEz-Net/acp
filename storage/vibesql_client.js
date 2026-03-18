@@ -1019,6 +1019,51 @@ export class VibeSqlClient {
     return result.rows.map(rowToCamel);
   }
 
+  async listDocuments() {
+    const result = await this._query(
+      `SELECT document_id, data FROM vibe.documents
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'agent_documents'
+       ORDER BY (data->>'created_at') DESC`
+    );
+    return result.rows.map(r => {
+      const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+      return {
+        id: d.document_id || r.document_id,
+        title: d.title || d.filename || 'Untitled',
+        content_md: d.content_md || '',
+        type: d.document_type || 'attachment',
+        author_agent: d.created_by ? String(d.created_by) : undefined,
+        version: d.version || 1,
+        parent_document_id: d.parent_document_id || undefined,
+        created_at: d.created_at,
+        updated_at: d.updated_at || undefined,
+      };
+    });
+  }
+
+  async getDocument(documentId) {
+    const result = await this._query(
+      `SELECT document_id, data FROM vibe.documents
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'agent_documents'
+       AND (data->>'document_id')::int = ${escapeSql(documentId)}
+       LIMIT 1`
+    );
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0];
+    const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+    return {
+      id: d.document_id || r.document_id,
+      title: d.title || d.filename || 'Untitled',
+      content_md: d.content_md || '',
+      type: d.document_type || 'attachment',
+      author_agent: d.created_by ? String(d.created_by) : undefined,
+      version: d.version || 1,
+      parent_document_id: d.parent_document_id || undefined,
+      created_at: d.created_at,
+      updated_at: d.updated_at || undefined,
+    };
+  }
+
   async listPoolProfiles() {
     const result = await this._query(
       `SELECT data FROM vibe.documents

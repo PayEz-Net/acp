@@ -33,6 +33,7 @@ import { SessionManager as ContractorSessionManager } from './contractors/sessio
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
+import documentRoutes from './routes/documents.js';
 import { validateConfig } from './lifecycle/configValidator.js';
 
 const startTime = Date.now();
@@ -187,6 +188,7 @@ export async function createApp(cfg) {
   app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
   app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
   app.use('/v1/projects', projectRoutes(storage, localEventBus));
+  app.use('/v1/documents', documentRoutes(storage));
 
   // Autonomy supervisor — single instance shared with routes and lifecycle hooks
   const supervisor = new Supervisor(storage, appConfig);
