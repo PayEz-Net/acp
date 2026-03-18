@@ -200,48 +200,71 @@ export const useMailStore = create<MailStore>((set, get) => ({
     }
 
     try {
-      // When filtering unread, fetch all pages so we don't miss unreads beyond page 1
       const showUnread = get().showUnreadOnly;
-      const params = new URLSearchParams();
+
       if (showUnread) {
-        params.set('unread', 'true');
-        params.set('pageSize', '100'); // API uses camelCase, caps at 100
+        // Cloud API ignores ?unread=true, so we paginate client-side to find unreads.
+        // Fetch pages until we've collected all unread messages or exhausted pages.
+        const unreadMessages: MailMessage[] = [];
+        let page = 1;
+        let totalPages = 1;
+        let serverUnreadCount = 0;
+
+        while (page <= totalPages && page <= 20) { // safety cap at 20 pages
+          const qs = `?page=${page}&page_size=50`;
+          const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${qs}`);
+          if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+          const response = await res.json();
+          if (!response.success) throw new Error(response.error || 'Request failed');
+
+          totalPages = response.pagination?.total_pages || 1;
+          if (page === 1) {
+            serverUnreadCount = response.data?.unread_count ?? 0;
+          }
+
+          const rawMessages = response.data?.messages || [];
+          for (const m of rawMessages) {
+            if (!m.read_at) {
+              unreadMessages.push({
+                ...m,
+                to_agent: (m.to_agent as string) || agent,
+                is_read: false,
+              });
+            }
+          }
+
+          // Stop early if we've found all unreads
+          if (serverUnreadCount > 0 && unreadMessages.length >= serverUnreadCount) break;
+          page++;
+        }
+
+        setMailbox(agent, {
+          messages: unreadMessages,
+          unreadCount: serverUnreadCount || unreadMessages.length,
+          loading: false,
+        });
+      } else {
+        // Normal fetch: single page
+        const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}`);
+        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+        const response = await res.json();
+        if (!response.success) throw new Error(response.error || 'Request failed');
+
+        const rawMessages = response.data?.messages || [];
+        const allMessages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
+          ...m,
+          to_agent: (m.to_agent as string) || agent,
+          is_read: !!m.read_at,
+        }));
+
+        setMailbox(agent, {
+          messages: allMessages,
+          unreadCount: response.data?.unread_count ?? allMessages.filter((m) => !m.is_read).length,
+          loading: false,
+          actions: response.actions,
+          suggested: response.suggested,
+        });
       }
-      const qs = params.toString() ? `?${params.toString()}` : '';
-      const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${qs}`);
-
-      if (!res.ok) {
-        throw new Error(`Failed to fetch: ${res.status}`);
-      }
-
-      const response = await res.json();
-
-      // Parse ActionPanel response format
-      // { success, data: { agent, messages }, pagination, actions, suggested }
-      if (!response.success) {
-        throw new Error(response.error || 'Request failed');
-      }
-
-      // Map API fields to our MailMessage shape (API uses read_at instead of is_read, no to_agent)
-      const rawMessages = response.data?.messages || [];
-      const allMessages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
-        ...m,
-        to_agent: (m.to_agent as string) || agent,
-        is_read: !!m.read_at,
-      }));
-
-      // Client-side filter: the cloud API ignores ?unread=true, so filter here
-      const messages = get().showUnreadOnly
-        ? allMessages.filter((m) => !m.is_read)
-        : allMessages;
-
-      setMailbox(agent, {
-        messages,
-        unreadCount: response.data?.unread_count ?? allMessages.filter((m) => !m.is_read).length,
-        loading: false,
-        actions: response.actions,
-        suggested: response.suggested,
-      });
     } catch (err) {
       console.error(`[Mail] Failed to fetch inbox for ${agent}:`, err);
       setMailbox(agent, {
