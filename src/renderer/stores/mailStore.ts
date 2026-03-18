@@ -205,7 +205,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
       const params = new URLSearchParams();
       if (showUnread) {
         params.set('unread', 'true');
-        params.set('page_size', '200');
+        params.set('pageSize', '100'); // API uses camelCase, caps at 100
       }
       const qs = params.toString() ? `?${params.toString()}` : '';
       const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${qs}`);
