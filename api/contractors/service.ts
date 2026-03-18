@@ -1,17 +1,5 @@
-import { readFile, readdir, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import type { LocalEventBus } from '../sse/localEventBus.js';
-
-// Contractor pool directories (custom takes precedence)
-const CUSTOM_POOL_DIR = process.env.ACP_CONTRACTOR_POOL_DIR || 'E:/Repos/Agents/contractors';
-const BUILTIN_POOL_DIR = process.env.ACP_BUILTIN_POOL_DIR || 'E:/Repos/everything-claude-code/agents';
-
-interface ProfileFrontmatter {
-  name: string;
-  description?: string;
-  tools?: string[];
-  model?: string;
-}
 
 interface PoolProfile {
   name: string;
@@ -27,51 +15,6 @@ interface ResolveResult {
   agent?: any;
   contract?: any;
   error?: string;
-}
-
-/**
- * Parse YAML-like frontmatter from a markdown profile file.
- * Handles the --- delimited block at the top of .md files.
- */
-function parseFrontmatter(content: string): ProfileFrontmatter | null {
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return null;
-
-  const block = match[1];
-  const result: Record<string, any> = {};
-
-  for (const line of block.split('\n')) {
-    const kv = line.match(/^(\w+)\s*:\s*(.+)$/);
-    if (!kv) continue;
-    const [, key, rawVal] = kv;
-    let val: any = rawVal.trim();
-
-    // Parse array values like ["Read", "Write"]
-    if (val.startsWith('[') && val.endsWith(']')) {
-      try {
-        val = JSON.parse(val);
-      } catch {
-        val = val.slice(1, -1).split(',').map((s: string) => s.trim().replace(/^["']|["']$/g, ''));
-      }
-    }
-    // Strip surrounding quotes
-    if (typeof val === 'string' && val.startsWith('"') && val.endsWith('"')) {
-      val = val.slice(1, -1);
-    }
-
-    result[key] = val;
-  }
-
-  return result.name ? (result as ProfileFrontmatter) : null;
-}
-
-async function dirExists(dir: string): Promise<boolean> {
-  try {
-    await access(dir);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function parseJsonb(val: any): any {
@@ -130,36 +73,6 @@ function transformContractRow(row: any): { agent: any; contract: any } {
   };
 }
 
-/**
- * Scan a pool directory for .md profiles with valid frontmatter.
- */
-async function scanPoolDir(dir: string, source: 'custom' | 'builtin'): Promise<PoolProfile[]> {
-  if (!(await dirExists(dir))) return [];
-  const files = await readdir(dir);
-  const profiles: PoolProfile[] = [];
-
-  for (const file of files) {
-    if (!file.endsWith('.md')) continue;
-    try {
-      const content = await readFile(join(dir, file), 'utf-8');
-      const fm = parseFrontmatter(content);
-      if (!fm) continue;
-      profiles.push({
-        name: fm.name,
-        description: fm.description || '',
-        model: fm.model || 'sonnet',
-        tools: fm.tools || [],
-        source,
-        sourcePath: join(dir, file),
-      });
-    } catch {
-      // skip unreadable files
-    }
-  }
-
-  return profiles;
-}
-
 export class ContractorService {
   private storage: any;
   private eventBus: LocalEventBus;
@@ -174,71 +87,35 @@ export class ContractorService {
    * Custom pool takes precedence (overrides built-in with same name).
    */
   async listPool(): Promise<PoolProfile[]> {
-    const [customProfiles, builtinProfiles] = await Promise.all([
-      scanPoolDir(CUSTOM_POOL_DIR, 'custom'),
-      scanPoolDir(BUILTIN_POOL_DIR, 'builtin'),
-    ]);
-
-    // Custom overrides built-in by name
-    const seen = new Set<string>();
-    const merged: PoolProfile[] = [];
-    for (const p of customProfiles) {
-      seen.add(p.name);
-      merged.push(p);
-    }
-    for (const p of builtinProfiles) {
-      if (!seen.has(p.name)) {
-        merged.push(p);
-      }
-    }
-    return merged.sort((a, b) => a.name.localeCompare(b.name));
+    // Query contractor pool from VibeSQL
+    const rows = await this.storage.listPoolProfiles();
+    return rows.map((r: any) => ({
+      name: r.name,
+      description: r.description || '',
+      model: r.model || 'sonnet',
+      tools: Array.isArray(r.tools) ? r.tools : [],
+      source: 'database' as const,
+      sourcePath: r.sourcePath || '',
+    }));
   }
 
   /**
    * Find a profile by name from the pool directories.
    */
   async findPoolProfile(name: string): Promise<{ profile: PoolProfile; content: string } | null> {
-    // Custom first
-    const customPath = join(CUSTOM_POOL_DIR, `${name}.md`);
-    try {
-      const content = await readFile(customPath, 'utf-8');
-      const fm = parseFrontmatter(content);
-      if (fm) {
-        return {
-          profile: {
-            name: fm.name,
-            description: fm.description || '',
-            model: fm.model || 'sonnet',
-            tools: fm.tools || [],
-            source: 'custom',
-            sourcePath: customPath,
-          },
-          content,
-        };
-      }
-    } catch { /* not found in custom pool */ }
+    const pool = await this.listPool();
+    const match = pool.find(p => p.name === name);
+    if (!match) return null;
 
-    // Built-in fallback
-    const builtinPath = join(BUILTIN_POOL_DIR, `${name}.md`);
-    try {
-      const content = await readFile(builtinPath, 'utf-8');
-      const fm = parseFrontmatter(content);
-      if (fm) {
-        return {
-          profile: {
-            name: fm.name,
-            description: fm.description || '',
-            model: fm.model || 'sonnet',
-            tools: fm.tools || [],
-            source: 'builtin',
-            sourcePath: builtinPath,
-          },
-          content,
-        };
-      }
-    } catch { /* not found in built-in pool */ }
+    // If source_path exists on disk, read the full .md content for profile snapshot
+    let content = `# ${match.name}\n\n${match.description}`;
+    if (match.sourcePath) {
+      try {
+        content = await readFile(match.sourcePath, 'utf-8');
+      } catch { /* file not available, use description */ }
+    }
 
-    return null;
+    return { profile: match, content };
   }
 
   /**

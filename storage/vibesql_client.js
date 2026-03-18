@@ -1019,6 +1019,26 @@ export class VibeSqlClient {
     return result.rows.map(rowToCamel);
   }
 
+  async listPoolProfiles() {
+    const result = await this._query(
+      `SELECT data FROM vibe.documents
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'contractor_pool'
+       ORDER BY data->>'name'`
+    );
+    return result.rows.map(r => {
+      const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+      return {
+        name: d.name,
+        displayName: d.display_name,
+        description: d.description,
+        model: d.model,
+        tools: d.tools_json || [],
+        sourcePath: d.source_path || '',
+        isActive: d.is_active !== false,
+      };
+    });
+  }
+
   async updateContractMessageId(contractId, messageId) {
     await this._query(
       `UPDATE agent_contracts SET contract_message_id = ${escapeSql(messageId)}
