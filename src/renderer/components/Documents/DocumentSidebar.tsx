@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { FileText, RefreshCw, X } from 'lucide-react';
 import { useDocumentStore } from '../../stores/documentStore';
+import { useAppStore } from '../../stores/appStore';
 import { DocumentList } from './DocumentList';
 import type { AgentDocument } from '@shared/types';
 
@@ -12,31 +14,33 @@ export function DocumentSidebar({ isOpen, onClose }: DocumentSidebarProps) {
   const {
     documents,
     loading,
+    error,
+    fetchDocuments,
     openViewer,
   } = useDocumentStore();
+  const { backendAvailable } = useAppStore();
+
+  useEffect(() => {
+    if (!isOpen || !backendAvailable) return;
+    fetchDocuments();
+  }, [isOpen, backendAvailable, fetchDocuments]);
 
   const handleSelect = (document: AgentDocument) => {
     openViewer(document);
   };
 
   const handleDownload = (docs: AgentDocument[]) => {
-    // Download as markdown files
     docs.forEach((doc) => {
       const blob = new Blob([doc.content_md], { type: 'text/markdown' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = window.document.createElement('a');
       a.href = url;
       a.download = `${doc.title.replace(/[^a-z0-9]/gi, '_')}.md`;
-      document.body.appendChild(a);
+      window.document.body.appendChild(a);
       a.click();
-      document.body.removeChild(a);
+      window.document.body.removeChild(a);
       URL.revokeObjectURL(url);
     });
-  };
-
-  const handleRefresh = () => {
-    // TODO: Fetch from backend when ready
-    console.log('Refresh documents - backend not ready');
   };
 
   if (!isOpen) return null;
@@ -54,7 +58,7 @@ export function DocumentSidebar({ isOpen, onClose }: DocumentSidebarProps) {
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={handleRefresh}
+            onClick={fetchDocuments}
             disabled={loading}
             className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors disabled:opacity-50"
             title="Refresh"
@@ -73,17 +77,29 @@ export function DocumentSidebar({ isOpen, onClose }: DocumentSidebarProps) {
         </div>
       </div>
 
-      {/* Document List */}
+      {/* Content */}
       <div className="flex-1 overflow-hidden">
-        <DocumentList
-          documents={documents}
-          onSelect={handleSelect}
-          onDownload={handleDownload}
-          showSearch={true}
-          showFilters={true}
-          showBulkActions={false}
-          className="h-full"
-        />
+        {!backendAvailable ? (
+          <div className="p-4 text-sm text-slate-500">Backend required for documents</div>
+        ) : error ? (
+          <div className="p-4 text-sm text-red-400">{error}</div>
+        ) : documents.length === 0 && !loading ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+            <FileText className="w-8 h-8 text-slate-600 mb-3" />
+            <p className="text-sm text-slate-400">No documents</p>
+            <p className="text-xs text-slate-500 mt-1">Agent documents will appear here</p>
+          </div>
+        ) : (
+          <DocumentList
+            documents={documents}
+            onSelect={handleSelect}
+            onDownload={handleDownload}
+            showSearch={true}
+            showFilters={true}
+            showBulkActions={false}
+            className="h-full"
+          />
+        )}
       </div>
     </div>
   );
