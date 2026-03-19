@@ -28,7 +28,7 @@ export interface AgentContract {
   hired_by_name?: string;
   contractor_name?: string;
   contract_subject: string;
-  status: 'active' | 'completed' | 'cancelled' | 'expired' | 'queued';
+  status: 'active' | 'completed' | 'cancelled' | 'expired' | 'queued' | 'promoted';
   profile_source?: string;
   profile_snapshot?: ContractorProfile;
   timeout_hours: number;
@@ -39,6 +39,8 @@ export interface AgentContract {
   exit_code?: number;
   created_at: string;
   completed_at?: string;
+  mailbox_slot?: string;
+  conversation_id?: string;
 }
 
 export interface ActiveContractor {
@@ -119,6 +121,9 @@ interface ContractorStore {
   // API
   fetchActive: () => Promise<void>;
   fetchPool: () => Promise<void>;
+  hire: (profileName: string, assignment: string, assigner: string, timeoutHours?: number) => Promise<{ success: boolean; data?: any; error?: string }>;
+  assignMailbox: (contractorName: string, slot: string, contractId?: number) => Promise<boolean>;
+  promote: (contractorName: string, promotedBy: string) => Promise<boolean>;
   completeContract: (contractId: number) => Promise<boolean>;
   cancelContract: (contractId: number, reason?: string) => Promise<boolean>;
   fetchContractMail: (agentName: string, contractId: number) => Promise<ContractMailMessage[]>;
@@ -130,6 +135,8 @@ interface ContractorStore {
   handleContractorExpired: (data: Record<string, unknown>) => void;
   handleContractorCancelled: (data: Record<string, unknown>) => void;
   handleContractorQueued: (data: Record<string, unknown>) => void;
+  handleContractorMailboxAssigned: (data: Record<string, unknown>) => void;
+  handleContractorPromoted: (data: Record<string, unknown>) => void;
   handleSessionStarted: (data: Record<string, unknown>) => void;
   handleSessionOutput: (data: Record<string, unknown>) => void;
   handleSessionExited: (data: Record<string, unknown>) => void;
@@ -173,6 +180,61 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
     } catch (err) {
       console.error('[Contractors] Failed to fetch pool:', err);
       set({ poolLoading: false });
+    }
+  },
+
+  hire: async (profileName, assignment, assigner, timeoutHours) => {
+    if (!useAppStore.getState().backendAvailable) return { success: false, error: 'Backend unavailable' };
+    try {
+      const res = await contractorRequest('/hire', {
+        method: 'POST',
+        body: {
+          profile_name: profileName,
+          assignment,
+          assigner,
+          timeout_hours: timeoutHours ?? 72,
+          auto_spawn: true,
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) return { success: false, error: data?.message || `${res.status}` };
+      await get().fetchActive();
+      return { success: true, data: data.data };
+    } catch (err) {
+      console.error('[Contractors] Failed to hire:', err);
+      return { success: false, error: 'Hire request failed' };
+    }
+  },
+
+  assignMailbox: async (contractorName, slot, contractId) => {
+    if (!useAppStore.getState().backendAvailable) return false;
+    try {
+      const res = await contractorRequest(`/${encodeURIComponent(contractorName)}/assign-mailbox`, {
+        method: 'POST',
+        body: { slot, ...(contractId ? { contract_id: contractId } : {}) },
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await get().fetchActive();
+      return true;
+    } catch (err) {
+      console.error('[Contractors] Failed to assign mailbox:', err);
+      return false;
+    }
+  },
+
+  promote: async (contractorName, promotedBy) => {
+    if (!useAppStore.getState().backendAvailable) return false;
+    try {
+      const res = await contractorRequest(`/${encodeURIComponent(contractorName)}/promote`, {
+        method: 'POST',
+        body: { promoted_by: promotedBy },
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await get().fetchActive();
+      return true;
+    } catch (err) {
+      console.error('[Contractors] Failed to promote:', err);
+      return false;
     }
   },
 
@@ -253,6 +315,16 @@ export const useContractorStore = create<ContractorStore>((set, get) => ({
 
   // SSE: contract queued (at capacity) — debounced refresh
   handleContractorQueued: (_data) => {
+    debouncedRefresh(get().fetchActive);
+  },
+
+  // SSE: mailbox slot assigned — debounced refresh
+  handleContractorMailboxAssigned: (_data) => {
+    debouncedRefresh(get().fetchActive);
+  },
+
+  // SSE: contractor promoted to team — debounced refresh
+  handleContractorPromoted: (_data) => {
     debouncedRefresh(get().fetchActive);
   },
 

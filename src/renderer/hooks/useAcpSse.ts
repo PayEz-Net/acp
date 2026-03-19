@@ -233,6 +233,22 @@ export function useAcpSse() {
               }
             }
 
+            if (eventType === 'contractor-mailbox-assigned' && data) {
+              try {
+                useContractorStore.getState().handleContractorMailboxAssigned(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-mailbox-assigned event:', err);
+              }
+            }
+
+            if (eventType === 'contractor-promoted' && data) {
+              try {
+                useContractorStore.getState().handleContractorPromoted(JSON.parse(data));
+              } catch (err) {
+                console.error('[AcpSse] Failed to parse contractor-promoted event:', err);
+              }
+            }
+
             if (eventType === 'session-started' && data) {
               try {
                 useContractorStore.getState().handleSessionStarted(JSON.parse(data));
