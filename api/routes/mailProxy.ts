@@ -109,29 +109,20 @@ export default function mailProxyRoutes(
   });
 
   // POST /v1/mail/send -> idealvibe.online/v1/agentmail/send
-  // With contractor resolution: checks if recipients are contractors, creates contracts
+  // v2: Validates recipients (no more hiring side-effect — use POST /v1/contractors/hire)
   router.post('/send', async (req: Request, res: Response) => {
     try {
       const { from_agent, to, subject } = req.body || {};
 
-      // Run contractor resolution for each recipient (if service available)
-      const contracts: { contract: any; agentName: string }[] = [];
-      if (contractorService && from_agent && Array.isArray(to) && subject) {
+      // v2: validate recipients — reject unknown names (AC-11), pass existing agents (AC-12)
+      if (contractorService && from_agent && Array.isArray(to)) {
         for (const recipientName of to) {
-          const result = await contractorService.resolveRecipient(
-            from_agent,
-            recipientName,
-            subject,
-            req.body.timeout_hours,
-          );
+          const result = await contractorService.resolveRecipient(from_agent, recipientName);
           if (result.action === 'rejected') {
-            res.status(409).json(
-              error('MAX_CONTRACTS_REACHED', result.error!, 'mail_send', (req as any).requestId)
+            res.status(404).json(
+              error('UNKNOWN_RECIPIENT', result.error!, 'mail_send', (req as any).requestId)
             );
             return;
-          }
-          if (result.action === 'new_contract' && result.contract) {
-            contracts.push({ contract: result.contract, agentName: recipientName });
           }
         }
       }
@@ -140,36 +131,13 @@ export default function mailProxyRoutes(
       const cloudResult = await proxyToCloud(cfg, '/send', 'POST', undefined, req.body);
       res.status(cloudResult.status).json(cloudResult.data);
 
-      // Post-send: update contract with cloud message ID + fire hooks
+      // Post-send hooks
       if ((cloudResult.data as any)?.success) {
-        const cloudMessageId = (cloudResult.data as any)?.data?.message_id;
-        if (cloudMessageId && contracts.length > 0 && contractorService) {
-          for (const { contract } of contracts) {
-            try {
-              await (contractorService as any).storage.updateContractMessageId(contract.id, cloudMessageId);
-            } catch { /* non-fatal */ }
-          }
-        }
         // DONE: auto-completion — check if sender is a contractor completing work
         if (contractorService && from_agent && subject && Array.isArray(to)) {
           try {
             await contractorService.checkDoneAutoComplete(from_agent, subject, to);
           } catch { /* non-fatal — don't break mail delivery */ }
-        }
-        // Phase 2b: trigger auto-spawn for new contractor contracts
-        if (sessionManager && contracts.length > 0) {
-          for (const { contract, agentName } of contracts) {
-            try {
-              await sessionManager.trySpawnOrQueue({
-                contractId: contract.id,
-                agentName,
-                hiredByName: from_agent,
-                contractSubject: subject,
-                mailBody: req.body.body || '',
-                profilePath: contract.profileSource || null,
-              });
-            } catch { /* non-fatal — contract exists, spawn failure is recoverable */ }
-          }
         }
         if (onMailSent && from_agent && subject) {
           try { onMailSent(from_agent, subject, to || []); } catch { /* non-fatal */ }

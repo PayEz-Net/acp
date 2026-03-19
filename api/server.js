@@ -93,8 +93,8 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
-  // Contractor service — resolution logic, pool scanning, timeout
-  const contractorService = new ContractorService(storage, localEventBus);
+  // Contractor service — resolution logic, pool scanning, timeout, chat integration (v2)
+  const contractorService = new ContractorService(storage, localEventBus, appConfig);
 
   // Session manager — auto-spawn contractor sessions (Phase 2b)
   const contractorSessionManager = new ContractorSessionManager(storage, localEventBus, appConfig);

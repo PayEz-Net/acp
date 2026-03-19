@@ -12,8 +12,8 @@ interface SpawnRequest {
   contractId: number;
   agentName: string;
   hiredByName: string;
-  contractSubject: string;
-  mailBody: string;
+  assignment: string;
+  conversationId: string;
   profilePath: string | null;
 }
 
@@ -94,7 +94,7 @@ export class SessionManager {
    * Spawn a Claude CLI session for a contract.
    */
   private async spawnSession(request: SpawnRequest): Promise<void> {
-    const { contractId, agentName, hiredByName, contractSubject, mailBody, profilePath } = request;
+    const { contractId, agentName, hiredByName, assignment, conversationId, profilePath } = request;
 
     // Create isolated temp workspace
     const workDir = join(tmpdir(), `acp-contractor-${contractId}`);
@@ -112,12 +112,10 @@ export class SessionManager {
       profileContent = `You are contractor agent "${agentName}".`;
     }
 
-    // Build task prompt (Option B: task-in-prompt)
+    // Build task prompt
     const taskPrompt = `You are contractor agent "${agentName}", hired by ${hiredByName}.
 
-Your task: ${contractSubject}
-
-${mailBody}
+Your task: ${assignment}
 
 Do the work requested. Write your findings and results to stdout. When done, output a clear summary of what you did and found.`;
 
@@ -133,6 +131,10 @@ Do the work requested. Write your findings and results to stdout. When done, out
     const child = spawn(this.contractorCmd, args, {
       cwd: workDir,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ACP_CONVERSATION_ID: conversationId,
+      },
       windowsHide: true,
     });
 
@@ -147,7 +149,7 @@ Do the work requested. Write your findings and results to stdout. When done, out
     );
 
     // Register with process monitor for exit/output tracking
-    this.processMonitor.register(contractId, agentName, hiredByName, contractSubject, child);
+    this.processMonitor.register(contractId, agentName, hiredByName, assignment, conversationId, child);
 
     console.log(`[SessionManager] Spawned session for contract ${contractId} (${agentName}), PID: ${pid}`);
   }
@@ -170,7 +172,7 @@ Do the work requested. Write your findings and results to stdout. When done, out
     // Find oldest queued contract
     const result = await this.storage._query(
       `SELECT c.id, c.contractor_agent_id, c.hired_by_agent_id, c.contract_subject,
-              c.profile_source, a.name AS contractor_name, h.name AS hired_by_name
+              c.profile_source, c.conversation_id, a.name AS contractor_name, h.name AS hired_by_name
        FROM agent_contracts c
        JOIN agents a ON a.id = c.contractor_agent_id
        JOIN agents h ON h.id = c.hired_by_agent_id
@@ -194,8 +196,8 @@ Do the work requested. Write your findings and results to stdout. When done, out
       contractId: row.id,
       agentName: row.contractor_name,
       hiredByName: row.hired_by_name,
-      contractSubject: row.contract_subject,
-      mailBody: '', // Original mail body not stored — task is in contract_subject
+      assignment: row.contract_subject,
+      conversationId: row.conversation_id || '',
       profilePath: row.profile_source || null,
     });
   }

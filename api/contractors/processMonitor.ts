@@ -12,7 +12,9 @@ interface TrackedProcess {
   contractId: number;
   agentName: string;
   hiredByName: string;
-  contractSubject: string;
+  assignment: string;
+  conversationId: string;
+  mailboxSlot?: string;
   child: ChildProcess;
   outputLines: string[];
   lastSseEmit: number;
@@ -45,14 +47,16 @@ export class ProcessMonitor {
     contractId: number,
     agentName: string,
     hiredByName: string,
-    contractSubject: string,
+    assignment: string,
+    conversationId: string,
     child: ChildProcess,
   ): void {
     const tracked: TrackedProcess = {
       contractId,
       agentName,
       hiredByName,
-      contractSubject,
+      assignment,
+      conversationId,
       child,
       outputLines: [],
       lastSseEmit: 0,
@@ -177,29 +181,51 @@ export class ProcessMonitor {
   }
 
   /**
-   * Send DONE: reply on behalf of contractor using last 50 lines of stdout.
+   * Send DONE: reply to chat conversation. Mail DONE only if contractor has a mailbox slot. (AC-16)
    */
   private async sendDoneReply(tracked: TrackedProcess): Promise<void> {
     const last50 = tracked.outputLines.slice(-50).join('\n');
-    const url = `${this.cfg.vibeApiUrl}/v1/agentmail/send`;
-    try {
-      await fetch(url, {
-        method: 'POST',
-        headers: {
-          'X-Vibe-Client-Id': this.cfg.vibeClientId,
-          'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
-          'X-Vibe-User-Id': this.cfg.vibeUserId,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from_agent: tracked.agentName,
-          to: [tracked.hiredByName],
-          subject: `DONE: ${tracked.contractSubject}`,
-          body: last50 || '(no output captured)',
-        }),
-      });
-    } catch (err) {
-      console.error(`[ProcessMonitor] Failed to send DONE reply for contract ${tracked.contractId}:`, err);
+
+    // Primary: POST DONE to chat conversation
+    if (tracked.conversationId) {
+      try {
+        const url = `http://localhost:${this.cfg.port}/v1/chat/conversations/${tracked.conversationId}/messages`;
+        await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-ACP-Agent': tracked.agentName,
+          },
+          body: JSON.stringify({
+            text: `DONE: ${tracked.assignment}\n\n${last50 || '(no output captured)'}`,
+            flags: ['fyi'],
+          }),
+        });
+      } catch (err) {
+        console.error(`[ProcessMonitor] Failed to send DONE to chat for contract ${tracked.contractId}:`, err);
+      }
+    }
+
+    // Secondary: send via cloud mail only if mailbox slot is assigned
+    if (tracked.mailboxSlot) {
+      try {
+        const url = `${this.cfg.vibeApiUrl}/v1/agentmail/send`;
+        await fetch(url, {
+          method: 'POST',
+          headers: {
+            'X-Vibe-Client-Id': this.cfg.vibeClientId,
+            'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
+            'X-Vibe-User-Id': this.cfg.vibeUserId,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from_agent: tracked.mailboxSlot,
+            to: [tracked.hiredByName],
+            subject: `DONE: ${tracked.assignment}`,
+            body: last50 || '(no output captured)',
+          }),
+        });
+      } catch { /* non-fatal — chat is primary */ }
     }
   }
 

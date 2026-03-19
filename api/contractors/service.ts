@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import type { LocalEventBus } from '../sse/localEventBus.js';
+import { ChatPersistence, VibeQueryClient } from '../../chat/persistence.js';
+import type { Config } from '../../config.js';
 
 interface PoolProfile {
   name: string;
@@ -11,10 +13,36 @@ interface PoolProfile {
 }
 
 interface ResolveResult {
-  action: 'passthrough' | 'new_contract' | 'rejected';
+  action: 'passthrough' | 'rejected';
   agent?: any;
-  contract?: any;
   error?: string;
+}
+
+interface HireRequest {
+  profileName: string;
+  assignment: string;
+  assigner: string;
+  timeoutHours?: number;
+  autoSpawn?: boolean;
+}
+
+interface HireResult {
+  agent: any;
+  contract: any;
+  conversationId: string;
+  sessionStatus: 'spawned' | 'queued' | 'pending';
+}
+
+interface AssignMailboxResult {
+  contractor: string;
+  mailboxSlot: string;
+  displayName: string;
+  mailAddress: string;
+}
+
+interface PromoteResult {
+  agent: any;
+  closedContracts: any[];
 }
 
 function parseJsonb(val: any): any {
@@ -76,10 +104,15 @@ function transformContractRow(row: any): { agent: any; contract: any } {
 export class ContractorService {
   private storage: any;
   private eventBus: LocalEventBus;
+  private chat: ChatPersistence;
+  private cfg: Config;
 
-  constructor(storage: any, eventBus: LocalEventBus) {
+  constructor(storage: any, eventBus: LocalEventBus, cfg: Config) {
     this.storage = storage;
     this.eventBus = eventBus;
+    this.cfg = cfg;
+    const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl, vibesqlContainerSecret: cfg.vibesqlContainerSecret });
+    this.chat = new ChatPersistence(db);
   }
 
   /**
@@ -119,143 +152,321 @@ export class ContractorService {
   }
 
   /**
-   * Resolve a mail recipient for contractor logic.
-   * Called before proxying mail send to cloud.
-   *
-   * Returns:
-   *  - passthrough: recipient is a team agent, normal delivery
-   *  - new_contract: contractor resolved, contract created
-   *  - rejected: max contracts exceeded
+   * Resolve a mail recipient — validates the name exists as a team or contractor agent.
+   * v2: No longer creates contracts. Unknown names return a rejected result directing
+   * callers to use POST /v1/contractors/hire. (AC-11, AC-12)
    */
   async resolveRecipient(
     fromAgentName: string,
     toAgentName: string,
-    subject: string,
-    timeoutHours?: number,
   ): Promise<ResolveResult> {
     // Ensure from_agent exists in local agents table
-    const fromAgent = await this.storage.upsertAgent({
-      name: fromAgentName,
-      agentType: 'team',
-    });
+    await this.storage.upsertAgent({ name: fromAgentName, agentType: 'team' });
 
-    // Look up recipient
     const existingAgent = await this.storage.getAgentByName(toAgentName);
 
-    if (existingAgent && existingAgent.agentType === 'team') {
-      // Team agent — normal mail delivery, no contract
-      return { action: 'passthrough' };
+    if (existingAgent) {
+      // Known agent (team or contractor) — normal mail delivery
+      return { action: 'passthrough', agent: existingAgent };
     }
 
-    // Check max 3 active contracts for hiring agent
-    const activeCount = await this.storage.countActiveContractsByHirer(fromAgent.id);
+    // Unknown name — no longer creates contracts
+    return {
+      action: 'rejected',
+      error: `Unknown recipient "${toAgentName}". Use POST /v1/contractors/hire to activate a contractor.`,
+    };
+  }
+
+  /**
+   * Hire a contractor from the pool. Creates agent, contract, and chat conversation.
+   * (AC-1, AC-2, AC-3, AC-13)
+   */
+  async hire(request: HireRequest): Promise<HireResult> {
+    const { profileName, assignment, assigner, timeoutHours, autoSpawn } = request;
+
+    // Look up pool profile (AC-2: 404 if not found)
+    const poolResult = await this.findPoolProfile(profileName);
+    if (!poolResult) {
+      const pool = await this.listPool();
+      const available = pool.map(p => p.name);
+      const err: any = new Error(`Profile "${profileName}" not found in contractor pool`);
+      err.statusCode = 404;
+      err.availableProfiles = available;
+      throw err;
+    }
+
+    // Ensure assigner exists
+    const assignerAgent = await this.storage.upsertAgent({ name: assigner, agentType: 'team' });
+
+    // Check max 3 active contracts per assigner (AC-3 variant)
+    const activeCount = await this.storage.countActiveContractsByHirer(assignerAgent.id);
     if (activeCount >= 3) {
-      return {
-        action: 'rejected',
-        error: `Max 3 active contracts per agent. Complete or cancel an existing contract first. Active: ${activeCount}`,
-      };
+      const err: any = new Error(`Max 3 active contracts per agent. Active: ${activeCount}`);
+      err.statusCode = 409;
+      throw err;
     }
 
-    let contractorAgent = existingAgent;
+    // Upsert contractor agent
+    const contractorAgent = await this.storage.upsertAgent({
+      name: profileName,
+      displayName: poolResult.profile.name,
+      role: poolResult.profile.description,
+      model: poolResult.profile.model,
+      expertiseJson: { tools: poolResult.profile.tools },
+      agentType: 'contractor',
+    });
 
-    if (!contractorAgent) {
-      // New contractor — check pool for profile
-      const poolResult = await this.findPoolProfile(toAgentName);
-
-      if (poolResult) {
-        // Pool profile found — create agent with profile data
-        contractorAgent = await this.storage.upsertAgent({
-          name: toAgentName,
-          displayName: poolResult.profile.name,
-          role: poolResult.profile.description,
-          model: poolResult.profile.model,
-          expertiseJson: { tools: poolResult.profile.tools },
-          agentType: 'contractor',
-        });
-
-        // Create contract with profile snapshot
-        const contract = await this.storage.createContract({
-          contractorAgentId: contractorAgent.id,
-          hiredByAgentId: fromAgent.id,
-          contractSubject: subject,
-          profileSource: poolResult.profile.sourcePath,
-          profileSnapshot: {
-            name: poolResult.profile.name,
-            description: poolResult.profile.description,
-            model: poolResult.profile.model,
-            tools: poolResult.profile.tools,
-            source: poolResult.profile.source,
-          },
-          timeoutHours: timeoutHours ?? 72,
-        });
-
-        this.eventBus.emit({
-          event: 'contractor-hired',
-          data: {
-            agent: { id: contractorAgent.id, name: toAgentName },
-            contract_id: contract.id,
-            hired_by: fromAgentName,
-            has_profile: true,
-          },
-        });
-
-        return { action: 'new_contract', agent: contractorAgent, contract };
-      } else {
-        // No pool profile — ad-hoc contractor (name only)
-        contractorAgent = await this.storage.upsertAgent({
-          name: toAgentName,
-          agentType: 'contractor',
-        });
-
-        const contract = await this.storage.createContract({
-          contractorAgentId: contractorAgent.id,
-          hiredByAgentId: fromAgent.id,
-          contractSubject: subject,
-          timeoutHours: timeoutHours ?? 72,
-        });
-
-        this.eventBus.emit({
-          event: 'contractor-hired',
-          data: {
-            agent: { id: contractorAgent.id, name: toAgentName },
-            contract_id: contract.id,
-            hired_by: fromAgentName,
-            has_profile: false,
-          },
-        });
-
-        return { action: 'new_contract', agent: contractorAgent, contract };
-      }
+    // Check duplicate active contract for same assigner+contractor (AC-3)
+    const existing = await this.storage.findActiveContractByContractorAndHirer(contractorAgent.id, assignerAgent.id);
+    if (existing) {
+      const err: any = new Error(`Contractor "${profileName}" already has an active contract with ${assigner}`);
+      err.statusCode = 409;
+      throw err;
     }
 
-    // Existing contractor — create new contract
-    const poolResult = await this.findPoolProfile(toAgentName);
+    // Create chat conversation + participants + thread + subscriptions (AC-13)
+    const displayName = poolResult.profile.name.replace(/-/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+    const titleShort = assignment.length > 60 ? assignment.slice(0, 57) + '...' : assignment;
+
+    const conversation = await this.chat.createConversation({
+      title: `${displayName} — ${titleShort}`,
+      type: 'direct',
+      state: 'active',
+      metadata: { assigner, contractor: profileName },
+    });
+
+    await this.chat.addParticipant(conversation.id, {
+      participantId: assigner,
+      participantType: 'agent',
+      displayName: assigner,
+    });
+    await this.chat.addParticipant(conversation.id, {
+      participantId: profileName,
+      participantType: 'agent',
+      displayName,
+    });
+
+    const thread = await this.chat.createThread({
+      conversationId: conversation.id,
+      slug: 'main',
+      subject: 'main',
+    });
+
+    await this.chat.setSubscription(thread.id, assigner, 'subscribed');
+    await this.chat.setSubscription(thread.id, profileName, 'subscribed');
+
+    // Create contract with conversation_id
     const contract = await this.storage.createContract({
       contractorAgentId: contractorAgent.id,
-      hiredByAgentId: fromAgent.id,
-      contractSubject: subject,
-      profileSource: poolResult?.profile.sourcePath || null,
-      profileSnapshot: poolResult ? {
+      hiredByAgentId: assignerAgent.id,
+      contractSubject: assignment,
+      profileSource: poolResult.profile.sourcePath,
+      profileSnapshot: {
         name: poolResult.profile.name,
         description: poolResult.profile.description,
         model: poolResult.profile.model,
         tools: poolResult.profile.tools,
         source: poolResult.profile.source,
-      } : contractorAgent.expertiseJson || null,
+      },
       timeoutHours: timeoutHours ?? 72,
+      conversationId: conversation.id,
     });
 
     this.eventBus.emit({
       event: 'contractor-hired',
       data: {
-        agent: { id: contractorAgent.id, name: toAgentName },
+        agent: { id: contractorAgent.id, name: profileName },
         contract_id: contract.id,
-        hired_by: fromAgentName,
-        has_profile: !!poolResult,
+        hired_by: assigner,
+        has_profile: true,
+        conversation_id: conversation.id,
       },
     });
 
-    return { action: 'new_contract', agent: contractorAgent, contract };
+    return {
+      agent: {
+        id: contractorAgent.id,
+        name: profileName,
+        agent_type: 'contractor',
+        display_name: displayName,
+      },
+      contract: {
+        id: contract.id,
+        status: contract.status,
+        assignment,
+        assigner,
+        conversation_id: conversation.id,
+      },
+      conversationId: conversation.id,
+      sessionStatus: autoSpawn !== false ? 'pending' : 'pending',
+    };
+  }
+
+  /**
+   * Assign a shared mailbox slot to a contractor. (AC-4, AC-5)
+   */
+  async assignMailbox(
+    contractorName: string,
+    slot: string,
+    contractId?: number,
+  ): Promise<AssignMailboxResult> {
+    const agent = await this.storage.getAgentByName(contractorName);
+    if (!agent || agent.agentType !== 'contractor') {
+      const err: any = new Error(`Contractor "${contractorName}" not found`);
+      err.statusCode = 404;
+      throw err;
+    }
+
+    // Resolve which contract to assign the slot to
+    let targetContractId = contractId;
+    if (!targetContractId) {
+      const activeContracts = await this.storage.listActiveContractsByContractor(agent.id);
+      if (activeContracts.length === 0) {
+        const err: any = new Error(`No active contract for "${contractorName}"`);
+        err.statusCode = 404;
+        throw err;
+      }
+      if (activeContracts.length > 1) {
+        const err: any = new Error(`Multiple active contracts for "${contractorName}". Provide contract_id to disambiguate.`);
+        err.statusCode = 409;
+        err.activeContracts = activeContracts.map((c: any) => ({ id: c.id, subject: c.contractSubject }));
+        throw err;
+      }
+      targetContractId = activeContracts[0].id;
+    }
+
+    // Check slot not occupied (AC-5)
+    const occupant = await this.storage.isMailboxSlotOccupied(slot);
+    if (occupant) {
+      const err: any = new Error(`Slot "${slot}" already assigned to ${occupant.contractorName}`);
+      err.statusCode = 409;
+      err.currentOccupant = occupant;
+      throw err;
+    }
+
+    // Assign slot
+    await this.storage.assignMailboxSlot(targetContractId, slot);
+
+    // Update cloud agent_mail_agents display_name for the slot (AC-4)
+    const displayName = agent.displayName || contractorName;
+    await this.updateCloudSlotDisplayName(slot, displayName);
+
+    this.eventBus.emit({
+      event: 'contractor-mailbox-assigned',
+      data: { contract_id: targetContractId, agent_name: contractorName, slot },
+    });
+
+    return {
+      contractor: contractorName,
+      mailboxSlot: slot,
+      displayName,
+      mailAddress: slot,
+    };
+  }
+
+  /**
+   * Promote a contractor to permanent team agent. (AC-7 through AC-10)
+   */
+  async promote(contractorName: string, promotedBy: string): Promise<PromoteResult> {
+    const agent = await this.storage.getAgentByName(contractorName);
+    if (!agent) {
+      const err: any = new Error(`Agent "${contractorName}" not found`);
+      err.statusCode = 404;
+      throw err;
+    }
+    if (agent.agentType === 'team') {
+      const err: any = new Error(`Agent "${contractorName}" is already a team agent`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // Close all active contracts with status 'promoted', free mailbox slots (AC-9, AC-10)
+    const closedContracts = await this.storage.promoteAgent(agent.id);
+
+    // Free cloud display_name for any mailbox slots
+    for (const c of closedContracts) {
+      if (c.mailboxSlot) {
+        const slotNum = c.mailboxSlot.replace('contractor-', '');
+        await this.updateCloudSlotDisplayName(c.mailboxSlot, `Contractor Slot ${slotNum}`);
+      }
+      // Resolve conversation if exists
+      if (c.conversationId) {
+        try { await this.resolveConversation(c.conversationId); } catch { /* non-fatal */ }
+      }
+    }
+
+    // Refresh agent after promotion
+    const updatedAgent = await this.storage.getAgentByName(contractorName);
+
+    this.eventBus.emit({
+      event: 'contractor-promoted',
+      data: {
+        agent_id: agent.id,
+        agent_name: contractorName,
+        closed_contract_ids: closedContracts.map((c: any) => c.id),
+      },
+    });
+
+    return {
+      agent: {
+        id: updatedAgent.id,
+        name: contractorName,
+        agent_type: 'team',
+      },
+      closedContracts: closedContracts.map((c: any) => ({ id: c.id, status: 'promoted' })),
+    };
+  }
+
+  /**
+   * Update display_name on a cloud agent_mail_agents slot.
+   */
+  private async updateCloudSlotDisplayName(slot: string, displayName: string): Promise<void> {
+    try {
+      const url = `${this.cfg.vibeApiUrl}/v1/agentmail/agents/${encodeURIComponent(slot)}`;
+      await fetch(url, {
+        method: 'PATCH',
+        headers: {
+          'X-Vibe-Client-Id': this.cfg.vibeClientId,
+          'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
+          'X-Vibe-User-Id': this.cfg.vibeUserId,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ display_name: displayName }),
+      });
+    } catch { /* non-fatal — cloud update is best-effort */ }
+  }
+
+  /**
+   * Get contract with conversation_id for completion side-effects.
+   */
+  async getContract(contractId: number): Promise<any> {
+    return this.storage.getContract(contractId);
+  }
+
+  /**
+   * Free a mailbox slot and reset cloud display_name (AC-6, AC-15).
+   */
+  async freeMailboxSlot(contractId: number): Promise<void> {
+    const contract = await this.storage.getContract(contractId);
+    if (!contract?.mailboxSlot) return;
+
+    await this.storage.freeMailboxSlot(contractId);
+    const slotNum = contract.mailboxSlot.replace('contractor-', '');
+    await this.updateCloudSlotDisplayName(contract.mailboxSlot, `Contractor Slot ${slotNum}`);
+  }
+
+  /**
+   * Resolve a conversation state to 'resolved' (AC-15).
+   */
+  async resolveConversation(conversationId: string): Promise<void> {
+    if (!conversationId) return;
+    try {
+      await this.storage._query(
+        `UPDATE acp_conversations SET state = 'resolved', updated_at = NOW()
+         WHERE id = '${conversationId.replace(/'/g, "''")}'`
+      );
+    } catch { /* non-fatal */ }
   }
 
   /**

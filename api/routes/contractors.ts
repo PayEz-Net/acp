@@ -44,6 +44,90 @@ export default function contractorRoutes(contractorService: ContractorService, c
     }
   });
 
+  // POST /v1/contractors/hire — activate a contractor from the pool (AC-1, AC-2, AC-3)
+  router.post('/hire', async (req: Request, res: Response) => {
+    try {
+      const { profile_name, assignment, assigner, timeout_hours, auto_spawn } = req.body || {};
+      if (!profile_name || !assignment || !assigner) {
+        res.status(400).json(error('INVALID_REQUEST', 'profile_name, assignment, and assigner are required', 'contractor_hire', (req as any).requestId));
+        return;
+      }
+
+      const result = await contractorService.hire({
+        profileName: profile_name,
+        assignment,
+        assigner,
+        timeoutHours: timeout_hours,
+        autoSpawn: auto_spawn,
+      });
+
+      // Auto-spawn if requested (default true)
+      if (auto_spawn !== false && sessionManager) {
+        try {
+          const spawnStatus = await sessionManager.trySpawnOrQueue({
+            contractId: result.contract.id,
+            agentName: profile_name,
+            hiredByName: assigner,
+            assignment,
+            conversationId: result.conversationId,
+            profilePath: null,
+          });
+          result.sessionStatus = spawnStatus;
+        } catch { /* non-fatal — contract exists, spawn failure is recoverable */ }
+      }
+
+      res.status(201).json(success(result, 'contractor_hire', (req as any).requestId));
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      const code = status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+      const response: any = error(code, err.message, 'contractor_hire', (req as any).requestId);
+      if (err.availableProfiles) response.data = { available_profiles: err.availableProfiles };
+      if (err.activeContracts) response.data = { active_contracts: err.activeContracts };
+      res.status(status).json(response);
+    }
+  });
+
+  // POST /v1/contractors/:name/assign-mailbox — assign a shared mailbox slot (AC-4, AC-5)
+  router.post('/:name/assign-mailbox', async (req: Request, res: Response) => {
+    try {
+      const contractorName = req.params.name as string;
+      const { slot, contract_id } = req.body || {};
+      if (!slot) {
+        res.status(400).json(error('INVALID_REQUEST', 'slot is required (e.g., "contractor-1")', 'contractor_assign_mailbox', (req as any).requestId));
+        return;
+      }
+
+      const result = await contractorService.assignMailbox(contractorName, slot, contract_id);
+      res.json(success(result, 'contractor_assign_mailbox', (req as any).requestId));
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      const code = status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+      const response: any = error(code, err.message, 'contractor_assign_mailbox', (req as any).requestId);
+      if (err.currentOccupant) response.data = { current_occupant: err.currentOccupant };
+      if (err.activeContracts) response.data = { active_contracts: err.activeContracts };
+      res.status(status).json(response);
+    }
+  });
+
+  // POST /v1/contractors/:name/promote — promote contractor to team agent (AC-7 through AC-10)
+  router.post('/:name/promote', async (req: Request, res: Response) => {
+    try {
+      const contractorName = req.params.name as string;
+      const { promoted_by } = req.body || {};
+      if (!promoted_by) {
+        res.status(400).json(error('INVALID_REQUEST', 'promoted_by is required', 'contractor_promote', (req as any).requestId));
+        return;
+      }
+
+      const result = await contractorService.promote(contractorName, promoted_by);
+      res.json(success(result, 'contractor_promote', (req as any).requestId));
+    } catch (err: any) {
+      const status = err.statusCode || 500;
+      const code = status === 404 ? 'NOT_FOUND' : status === 409 ? 'CONFLICT' : 'INTERNAL_ERROR';
+      res.status(status).json(error(code, err.message, 'contractor_promote', (req as any).requestId));
+    }
+  });
+
   // GET /v1/contractors/active — list contracts with agent profile data
   // ?status=active (default) | completed | all
   router.get('/active', async (req: Request, res: Response) => {
@@ -69,7 +153,7 @@ export default function contractorRoutes(contractorService: ContractorService, c
       return;
     }
     try {
-      const agentName = req.params.agent_name;
+      const agentName = req.params.agent_name as string;
       const contractId = parseInt(req.query.contract_id as string, 10);
       if (isNaN(contractId)) {
         res.status(400).json(error('VALIDATION_ERROR', 'contract_id query param required (integer)', 'contractor_mail', (req as any).requestId));

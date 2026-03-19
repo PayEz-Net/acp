@@ -7,6 +7,7 @@ export default function contractRoutes(contractorService: ContractorService, ses
   const router = Router();
 
   // POST /v1/contracts/:contract_id/complete — mark contract complete
+  // v2: side-effects — free mailbox slot, resolve conversation (AC-6, AC-15)
   router.post('/:contract_id/complete', async (req: Request, res: Response) => {
     try {
       const contractId = parseInt(req.params.contract_id as string, 10);
@@ -15,10 +16,21 @@ export default function contractRoutes(contractorService: ContractorService, ses
         return;
       }
 
+      // Get contract before completing (for side-effect data)
+      const preContract = await contractorService.getContract(contractId);
+
       const contract = await contractorService.completeContract(contractId);
       if (!contract) {
         res.status(404).json(error('NOT_FOUND', 'Contract not found or not active', 'contract_complete', (req as any).requestId));
         return;
+      }
+
+      // v2 side-effects: free mailbox slot (AC-6) and resolve conversation (AC-15)
+      if (preContract?.mailboxSlot) {
+        try { await contractorService.freeMailboxSlot(contractId); } catch { /* non-fatal */ }
+      }
+      if (preContract?.conversationId) {
+        try { await contractorService.resolveConversation(preContract.conversationId); } catch { /* non-fatal */ }
       }
 
       res.json(success(contract, 'contract_complete', (req as any).requestId));
