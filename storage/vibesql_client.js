@@ -303,6 +303,18 @@ const UNATTENDED_MIGRATION = [
   `ALTER TABLE autonomy_state ADD COLUMN IF NOT EXISTS escalation_level INTEGER DEFAULT 2`,
 ];
 
+// Contractor Lifecycle v2 migration: mailbox_slot, conversation_id, promoted status
+const CONTRACTOR_V2_MIGRATION = [
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS mailbox_slot VARCHAR(20)`,
+  `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS conversation_id TEXT`,
+  `DO $$ BEGIN
+     ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check;
+     ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
+       CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired', 'promoted'));
+   EXCEPTION WHEN OTHERS THEN NULL;
+   END $$`,
+];
+
 // Chat schema migration — creates acp_* tables (from chat/schema.sql)
 // Must be ordered: conversations → participants → threads → subscriptions → messages → attachments/reactions/delivery
 const CHAT_SCHEMA_MIGRATION = [
@@ -442,6 +454,12 @@ export class VibeSqlClient {
     for (const stmt of UNATTENDED_MIGRATION) {
       try { await this._query(stmt); } catch (e) {
         console.warn('[VibeSqlClient] Unattended migration step skipped:', e.message || e);
+      }
+    }
+    // Contractor Lifecycle v2 migration (mailbox_slot, conversation_id, promoted status)
+    for (const stmt of CONTRACTOR_V2_MIGRATION) {
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Contractor v2 migration step skipped:', e.message || e);
       }
     }
     // Chat schema migration (acp_* tables)
@@ -947,7 +965,7 @@ export class VibeSqlClient {
     const projectId = contract.projectId || (await this.getActiveProjectId());
     const result = await this._query(
       `INSERT INTO agent_contracts
-        (contractor_agent_id, hired_by_agent_id, contract_subject, contract_message_id, profile_source, profile_snapshot, timeout_hours, project_id)
+        (contractor_agent_id, hired_by_agent_id, contract_subject, contract_message_id, profile_source, profile_snapshot, timeout_hours, project_id, conversation_id)
        VALUES (
          ${escapeSql(contract.contractorAgentId)},
          ${escapeSql(contract.hiredByAgentId)},
@@ -956,7 +974,8 @@ export class VibeSqlClient {
          ${escapeSql(contract.profileSource || null)},
          ${escapeJsonb(contract.profileSnapshot || null)},
          ${escapeSql(contract.timeoutHours ?? 72)},
-         ${escapeSql(projectId)}
+         ${escapeSql(projectId)},
+         ${escapeSql(contract.conversationId || null)}
        ) RETURNING *`
     );
     return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
@@ -978,7 +997,8 @@ export class VibeSqlClient {
     if (pid) conditions.push(`c.project_id = ${escapeSql(pid)}`);
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const result = await this._query(
-      `SELECT c.*, a.name AS contractor_name, a.display_name AS contractor_display_name,
+      `SELECT c.*, c.mailbox_slot, c.conversation_id,
+              a.name AS contractor_name, a.display_name AS contractor_display_name,
               a.role AS contractor_role, a.model AS contractor_model, a.expertise_json AS contractor_expertise,
               h.name AS hired_by_name
        FROM agent_contracts c
@@ -1112,6 +1132,62 @@ export class VibeSqlClient {
        ORDER BY created_at DESC LIMIT 1`
     );
     return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  // --- Contractor v2: mailbox slots, promotion ---
+
+  async assignMailboxSlot(contractId, slot) {
+    const result = await this._query(
+      `UPDATE agent_contracts SET mailbox_slot = ${escapeSql(slot)}
+       WHERE id = ${escapeSql(contractId)} AND status = 'active'
+       RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async freeMailboxSlot(contractId) {
+    const result = await this._query(
+      `UPDATE agent_contracts SET mailbox_slot = NULL
+       WHERE id = ${escapeSql(contractId)}
+       RETURNING *`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async isMailboxSlotOccupied(slot) {
+    const result = await this._query(
+      `SELECT c.id, a.name AS contractor_name FROM agent_contracts c
+       JOIN agents a ON a.id = c.contractor_agent_id
+       WHERE c.mailbox_slot = ${escapeSql(slot)} AND c.status = 'active'
+       LIMIT 1`
+    );
+    return result.rows.length > 0 ? rowToCamel(result.rows[0]) : null;
+  }
+
+  async listActiveContractsByContractor(contractorAgentId) {
+    const result = await this._query(
+      `SELECT * FROM agent_contracts
+       WHERE contractor_agent_id = ${escapeSql(contractorAgentId)}
+         AND status = 'active'
+       ORDER BY created_at DESC`
+    );
+    return result.rows.map(rowToCamel);
+  }
+
+  async promoteAgent(agentId) {
+    // Change agent_type to 'team'
+    await this._query(
+      `UPDATE agents SET agent_type = 'team', updated_at = NOW()
+       WHERE id = ${escapeSql(agentId)}`
+    );
+    // Close all active contracts with status 'promoted'
+    const result = await this._query(
+      `UPDATE agent_contracts
+       SET status = 'promoted', completed_at = NOW(), mailbox_slot = NULL
+       WHERE contractor_agent_id = ${escapeSql(agentId)} AND status IN ('active', 'queued')
+       RETURNING *`
+    );
+    return result.rows.map(rowToCamel);
   }
 
   // ── Projects + App Config ─────────────────────────────────
