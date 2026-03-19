@@ -29,20 +29,20 @@ interface HireRequest {
 interface HireResult {
   agent: any;
   contract: any;
-  conversationId: string;
-  sessionStatus: 'spawned' | 'queued' | 'pending';
+  conversation_id: string;
+  session_status: 'spawned' | 'queued' | 'pending';
 }
 
 interface AssignMailboxResult {
   contractor: string;
-  mailboxSlot: string;
-  displayName: string;
-  mailAddress: string;
+  mailbox_slot: string;
+  display_name: string;
+  mail_address: string;
 }
 
 interface PromoteResult {
   agent: any;
-  closedContracts: any[];
+  closed_contracts: any[];
 }
 
 function parseJsonb(val: any): any {
@@ -298,8 +298,8 @@ export class ContractorService {
         assigner,
         conversation_id: conversation.id,
       },
-      conversationId: conversation.id,
-      sessionStatus: autoSpawn !== false ? 'pending' : 'pending',
+      conversation_id: conversation.id,
+      session_status: 'pending' as const,
     };
   }
 
@@ -359,9 +359,9 @@ export class ContractorService {
 
     return {
       contractor: contractorName,
-      mailboxSlot: slot,
-      displayName,
-      mailAddress: slot,
+      mailbox_slot: slot,
+      display_name: displayName,
+      mail_address: slot,
     };
   }
 
@@ -414,7 +414,7 @@ export class ContractorService {
         name: contractorName,
         agent_type: 'team',
       },
-      closedContracts: closedContracts.map((c: any) => ({ id: c.id, status: 'promoted' })),
+      closed_contracts: closedContracts.map((c: any) => ({ id: c.id, status: 'promoted' })),
     };
   }
 

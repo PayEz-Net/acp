@@ -14,7 +14,6 @@ interface TrackedProcess {
   hiredByName: string;
   assignment: string;
   conversationId: string;
-  mailboxSlot?: string;
   child: ChildProcess;
   outputLines: string[];
   lastSseEmit: number;
@@ -182,6 +181,7 @@ export class ProcessMonitor {
 
   /**
    * Send DONE: reply to chat conversation. Mail DONE only if contractor has a mailbox slot. (AC-16)
+   * F-1 fix: query contract at exit time to get current mailbox_slot (not from TrackedProcess).
    */
   private async sendDoneReply(tracked: TrackedProcess): Promise<void> {
     const last50 = tracked.outputLines.slice(-50).join('\n');
@@ -207,8 +207,13 @@ export class ProcessMonitor {
     }
 
     // Secondary: send via cloud mail only if mailbox slot is assigned
-    if (tracked.mailboxSlot) {
-      try {
+    // Query the contract to get current mailbox_slot (may have been assigned after spawn)
+    try {
+      const result = await this.storage._query(
+        `SELECT mailbox_slot FROM agent_contracts WHERE id = ${tracked.contractId}`
+      );
+      const mailboxSlot = result.rows?.[0]?.mailbox_slot;
+      if (mailboxSlot) {
         const url = `${this.cfg.vibeApiUrl}/v1/agentmail/send`;
         await fetch(url, {
           method: 'POST',
@@ -219,14 +224,14 @@ export class ProcessMonitor {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            from_agent: tracked.mailboxSlot,
+            from_agent: mailboxSlot,
             to: [tracked.hiredByName],
             subject: `DONE: ${tracked.assignment}`,
             body: last50 || '(no output captured)',
           }),
         });
-      } catch { /* non-fatal — chat is primary */ }
-    }
+      }
+    } catch { /* non-fatal — chat is primary */ }
   }
 
   /**

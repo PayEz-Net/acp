@@ -69,10 +69,10 @@ export default function contractorRoutes(contractorService: ContractorService, c
             agentName: profile_name,
             hiredByName: assigner,
             assignment,
-            conversationId: result.conversationId,
+            conversationId: result.conversation_id,
             profilePath: null,
           });
-          result.sessionStatus = spawnStatus;
+          result.session_status = spawnStatus;
         } catch { /* non-fatal — contract exists, spawn failure is recoverable */ }
       }
 
