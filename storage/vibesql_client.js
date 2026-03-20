@@ -918,7 +918,7 @@ export class VibeSqlClient {
 
   async getAgentByName(name) {
     const result = await this._query(
-      `SELECT * FROM agents WHERE name = ${escapeSql(name)}`
+      `SELECT * FROM agents WHERE name = ${escapeSql(name)} AND deleted_at IS NULL`
     );
     if (result.rows.length === 0) return null;
     return rowToCamel(result.rows[0]);
@@ -926,7 +926,7 @@ export class VibeSqlClient {
 
   async getAgentById(id) {
     const result = await this._query(
-      `SELECT * FROM agents WHERE id = ${escapeSql(id)}`
+      `SELECT * FROM agents WHERE id = ${escapeSql(id)} AND deleted_at IS NULL`
     );
     if (result.rows.length === 0) return null;
     return rowToCamel(result.rows[0]);
@@ -984,12 +984,17 @@ export class VibeSqlClient {
   }
 
   async bulkUpdateStartupOrder(entries) {
-    for (const entry of entries) {
-      await this._query(
-        `UPDATE agents SET startup_order = ${escapeSql(parseInt(entry.startup_order, 10))}, updated_at = NOW()
-         WHERE id = ${escapeSql(parseInt(entry.agent_id, 10))}`
-      );
-    }
+    const updates = entries.map(entry =>
+      `UPDATE agents SET startup_order = ${escapeSql(parseInt(entry.startup_order, 10))}, updated_at = NOW() WHERE id = ${escapeSql(parseInt(entry.agent_id, 10))};`
+    ).join('\n');
+    await this._query(`DO $$ BEGIN\n${updates}\nEND $$`);
+  }
+
+  async listAllAgents() {
+    const result = await this._query(
+      `SELECT * FROM agents WHERE deleted_at IS NULL ORDER BY startup_order ASC, name ASC`
+    );
+    return result.rows.map(rowToCamel);
   }
 
   async listAgentsByType(agentType) {

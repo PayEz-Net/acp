@@ -46,9 +46,10 @@ export default function agentRoutes(storage: any): Router {
   router.get('/startup-config', async (req: Request, res: Response) => {
     try {
       const agents = await storage.listActiveAgents();
+      const allAgents = await storage.listAllAgents();
       res.json(success({
         agents,
-        total: agents.length,
+        total: allAgents.length,
         active_count: agents.length,
       }, 'agent_startup_config', (req as any).requestId));
     } catch (err: any) {
@@ -81,7 +82,7 @@ export default function agentRoutes(storage: any): Router {
   // POST /v1/agents/hire — create agent from template (pool profile)
   router.post('/hire', async (req: Request, res: Response) => {
     try {
-      const { template_id, name, display_name, is_active } = req.body || {};
+      const { template_name, name, display_name, is_active } = req.body || {};
 
       if (!name || typeof name !== 'string' || name.trim().length === 0) {
         res.status(400).json(error('VALIDATION_ERROR', 'name is required', 'agent_hire', (req as any).requestId));
@@ -90,24 +91,26 @@ export default function agentRoutes(storage: any): Router {
 
       // Check if agent name already exists
       const existingAgent = await storage.getAgentByName(name.trim());
-      if (existingAgent && !existingAgent.deletedAt) {
+      if (existingAgent) {
         res.status(409).json(error('CONFLICT', 'Agent with that name already exists', 'agent_hire', (req as any).requestId));
         return;
       }
 
-      // If template_id provided, look up pool profile to copy fields
+      // If template_name provided, look up pool profile to copy fields
       let templateData: any = {};
-      if (template_id) {
+      if (template_name) {
         const profiles = await storage.listPoolProfiles();
-        const profile = profiles.find((p: any) => p.name === template_id);
-        if (profile) {
-          templateData = {
-            displayName: profile.displayName || profile.name,
-            role: profile.description || null,
-            model: profile.model || null,
-            expertiseJson: profile.tools ? { tools: profile.tools } : {},
-          };
+        const profile = profiles.find((p: any) => p.name === template_name);
+        if (!profile) {
+          res.status(404).json(error('NOT_FOUND', `Template '${template_name}' not found in contractor pool`, 'agent_hire', (req as any).requestId));
+          return;
         }
+        templateData = {
+          displayName: profile.displayName || profile.name,
+          role: profile.description || null,
+          model: profile.model || null,
+          expertiseJson: profile.tools ? { tools: profile.tools } : {},
+        };
       }
 
       const agent = await storage.upsertAgent({
