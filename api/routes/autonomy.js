@@ -75,13 +75,15 @@ export default function autonomyRoutes(supervisor) {
   router.post('/unattended/start', async (req, res, next) => {
     try {
       req.operationCode = 'unattended_start';
-      const { stopCondition, maxRuntimeHours, escalationLevel, milestone, notifyWebhook } = req.body || {};
+      const { stopCondition, maxRuntimeHours, escalationLevel, milestone, notifyWebhook, leadAgent, pingIntervalMinutes } = req.body || {};
       const state = await supervisor.startUnattended({
         stopCondition,
         maxRuntimeHours,
         escalationLevel,
         milestone,
         notifyWebhook,
+        leadAgent,
+        pingIntervalMinutes,
       });
       const elapsed = Math.round(performance.now() - req.startTime);
       res.json(success(state, 'unattended_start', req.requestId, {

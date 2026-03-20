@@ -1,11 +1,15 @@
 export class Supervisor {
   constructor(storage, cfg = {}) {
     this._storage = storage;
+    this._cfg = cfg;
     this._maxRuntimeHours = cfg.autonomyMaxRuntimeHours || 4;
     this._notifyWebhook = cfg.notifyWebhook || null;
     this._partyEngine = null;
     this._eventBus = null;
     this.unattendedMode = false;
+    // Nightly Kanban ping timer
+    this._pingTimer = null;
+    this._pingConfig = null; // { leadAgent, pingIntervalMinutes }
   }
 
   /** Inject party engine and event bus for unattended mode wiring. */
@@ -124,10 +128,13 @@ export class Supervisor {
       escalationLevel: config.escalationLevel ?? 2,
     });
 
-    // Start party engine
-    if (this._partyEngine) {
-      this._partyEngine.start();
-    }
+    // Nightly Kanban: ping the lead agent on interval via agent mail.
+    // Party engine is NOT started for this profile (cocktail-only).
+    this._pingConfig = {
+      leadAgent: config.leadAgent || 'BAPert',
+      pingIntervalMinutes: config.pingIntervalMinutes || 10,
+    };
+    this._startPingTimer();
 
     // Start dead man's switch
     this.startDeadManSwitch();
@@ -138,12 +145,18 @@ export class Supervisor {
         event: 'unattended-started',
         data: {
           mode: 'unattended',
+          profile: 'nightly-kanban',
+          lead_agent: this._pingConfig.leadAgent,
+          ping_interval_minutes: this._pingConfig.pingIntervalMinutes,
           stop_condition: config.stopCondition || 'milestone',
           max_runtime_hours: config.maxRuntimeHours || this._maxRuntimeHours,
           escalation_level: config.escalationLevel ?? 2,
         },
       });
     }
+
+    // Fire first ping immediately so lead agent gets notified on start
+    this._sendPing().catch(() => {});
 
     return this.getState();
   }
@@ -155,10 +168,8 @@ export class Supervisor {
     const wasUnattended = this.unattendedMode;
     this.unattendedMode = false;
 
-    // Stop party engine
-    if (this._partyEngine) {
-      this._partyEngine.stop();
-    }
+    // Stop ping timer (Nightly Kanban)
+    this._stopPingTimer();
 
     // Stop dead man's switch
     this.stopDeadManSwitch();
@@ -210,11 +221,8 @@ export class Supervisor {
   async emergencyStop() {
     if (!this.unattendedMode) return { stopped: false, reason: 'not_running' };
     this.unattendedMode = false;
+    this._stopPingTimer();
     this.stopDeadManSwitch();
-
-    if (this._partyEngine) {
-      this._partyEngine.stop();
-    }
 
     await this._storage.updateAutonomyState({
       enabled: false,
@@ -302,6 +310,86 @@ export class Supervisor {
       });
     } catch {
       console.warn('[Supervisor] Webhook notification failed');
+    }
+  }
+
+  // ── Nightly Kanban Ping ─────────────────────────────────
+
+  _startPingTimer() {
+    this._stopPingTimer();
+    const intervalMs = (this._pingConfig?.pingIntervalMinutes || 10) * 60 * 1000;
+    this._pingTimer = setInterval(() => {
+      this._sendPing().catch(err => {
+        console.error('[Supervisor] Ping failed:', err.message || err);
+      });
+    }, intervalMs);
+    console.log(`[Supervisor] Nightly Kanban ping started: every ${this._pingConfig?.pingIntervalMinutes || 10}m to ${this._pingConfig?.leadAgent || 'BAPert'}`);
+  }
+
+  _stopPingTimer() {
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
+    this._pingConfig = null;
+  }
+
+  async _sendPing() {
+    if (!this.unattendedMode || !this._pingConfig) return;
+
+    const { leadAgent } = this._pingConfig;
+    const state = await this.getState();
+    const elapsedMin = state?.startedAt
+      ? Math.round((Date.now() - new Date(state.startedAt).getTime()) / 60000)
+      : 0;
+
+    // Gather kanban summary
+    let taskSummary = '';
+    try {
+      const tasks = await this._storage.listTasks();
+      const byStatus = {};
+      for (const t of tasks) {
+        byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+      }
+      const parts = Object.entries(byStatus).map(([s, n]) => `${s}: ${n}`);
+      taskSummary = parts.length > 0 ? parts.join(', ') : 'no tasks';
+
+      // Check stop conditions while we have tasks
+      const stopReason = await this.checkStopConditions(tasks);
+      if (stopReason) {
+        console.log(`[Supervisor] Stop condition met: ${stopReason}`);
+        await this.stopUnattended(stopReason);
+        return;
+      }
+    } catch {
+      taskSummary = '(could not fetch kanban)';
+    }
+
+    // Send ping via agent mail
+    const cfg = this._cfg;
+    const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
+    const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h\n\nCheck kanban, check mail, report status, keep working.`;
+
+    try {
+      await fetch(`${vibeApiUrl}/v1/agentmail/send`, {
+        method: 'POST',
+        headers: {
+          'X-Vibe-Client-Id': cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
+          'X-Vibe-Client-Secret': cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
+          'X-Vibe-User-Id': cfg.vibeUserId || '0',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from_agent: 'ACP-Supervisor',
+          to: [leadAgent],
+          subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
+          body,
+          importance: 'normal',
+        }),
+      });
+      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
+    } catch (err) {
+      console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
     }
   }
 }
