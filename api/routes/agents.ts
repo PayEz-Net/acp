@@ -56,5 +56,103 @@ export default function agentRoutes(storage: any): Router {
     }
   });
 
+  // DELETE /v1/agents/:id — soft-delete agent (set deleted_at, preserve mail history)
+  router.delete('/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_delete', (req as any).requestId));
+        return;
+      }
+
+      const existing = await storage.getAgentById(id);
+      if (!existing) {
+        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_delete', (req as any).requestId));
+        return;
+      }
+
+      await storage.softDeleteAgent(id);
+      res.json(success({ id, name: existing.name, deleted: true }, 'agent_delete', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_delete', (req as any).requestId));
+    }
+  });
+
+  // POST /v1/agents/hire — create agent from template (pool profile)
+  router.post('/hire', async (req: Request, res: Response) => {
+    try {
+      const { template_id, name, display_name, is_active } = req.body || {};
+
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        res.status(400).json(error('VALIDATION_ERROR', 'name is required', 'agent_hire', (req as any).requestId));
+        return;
+      }
+
+      // Check if agent name already exists
+      const existingAgent = await storage.getAgentByName(name.trim());
+      if (existingAgent && !existingAgent.deletedAt) {
+        res.status(409).json(error('CONFLICT', 'Agent with that name already exists', 'agent_hire', (req as any).requestId));
+        return;
+      }
+
+      // If template_id provided, look up pool profile to copy fields
+      let templateData: any = {};
+      if (template_id) {
+        const profiles = await storage.listPoolProfiles();
+        const profile = profiles.find((p: any) => p.name === template_id);
+        if (profile) {
+          templateData = {
+            displayName: profile.displayName || profile.name,
+            role: profile.description || null,
+            model: profile.model || null,
+            expertiseJson: profile.tools ? { tools: profile.tools } : {},
+          };
+        }
+      }
+
+      const agent = await storage.upsertAgent({
+        name: name.trim(),
+        displayName: display_name || templateData.displayName || name.trim(),
+        role: templateData.role || null,
+        model: templateData.model || null,
+        expertiseJson: templateData.expertiseJson || {},
+        agentType: is_active ? 'team' : 'contractor',
+        isActive: is_active !== undefined ? is_active : false,
+      });
+
+      res.status(201).json(success(agent, 'agent_hire', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_hire', (req as any).requestId));
+    }
+  });
+
+  // PUT /v1/agents/startup-order — bulk transactional update for drag-reorder
+  router.put('/startup-order', async (req: Request, res: Response) => {
+    try {
+      const { order } = req.body || {};
+      if (!Array.isArray(order) || order.length === 0) {
+        res.status(400).json(error('VALIDATION_ERROR', 'order must be a non-empty array of { agent_id, startup_order }', 'agent_startup_order', (req as any).requestId));
+        return;
+      }
+
+      // Validate all entries
+      for (const entry of order) {
+        if (!entry.agent_id || isNaN(parseInt(entry.agent_id, 10))) {
+          res.status(400).json(error('VALIDATION_ERROR', 'Each entry must have a valid agent_id', 'agent_startup_order', (req as any).requestId));
+          return;
+        }
+        if (entry.startup_order === undefined || isNaN(parseInt(entry.startup_order, 10)) || parseInt(entry.startup_order, 10) < 0) {
+          res.status(400).json(error('VALIDATION_ERROR', 'Each entry must have a non-negative startup_order', 'agent_startup_order', (req as any).requestId));
+          return;
+        }
+      }
+
+      await storage.bulkUpdateStartupOrder(order);
+      res.json(success({ updated: order.length }, 'agent_startup_order', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_startup_order', (req as any).requestId));
+    }
+  });
+
   return router;
 }

@@ -315,9 +315,10 @@ const CONTRACTOR_V2_MIGRATION = [
    END $$`,
 ];
 
-// Agent startup config migration: startup_order column
+// Agent startup config migration: startup_order + deleted_at columns
 const STARTUP_CONFIG_MIGRATION = [
   `ALTER TABLE agents ADD COLUMN IF NOT EXISTS startup_order INTEGER DEFAULT 0`,
+  `ALTER TABLE agents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
 ];
 
 // Chat schema migration — creates acp_* tables (from chat/schema.sql)
@@ -970,14 +971,30 @@ export class VibeSqlClient {
 
   async listActiveAgents() {
     const result = await this._query(
-      `SELECT * FROM agents WHERE is_active = true ORDER BY startup_order ASC, name ASC`
+      `SELECT * FROM agents WHERE is_active = true AND deleted_at IS NULL ORDER BY startup_order ASC, name ASC`
     );
     return result.rows.map(rowToCamel);
   }
 
+  async softDeleteAgent(id) {
+    await this._query(
+      `UPDATE agents SET is_active = false, deleted_at = NOW(), updated_at = NOW()
+       WHERE id = ${escapeSql(id)}`
+    );
+  }
+
+  async bulkUpdateStartupOrder(entries) {
+    for (const entry of entries) {
+      await this._query(
+        `UPDATE agents SET startup_order = ${escapeSql(parseInt(entry.startup_order, 10))}, updated_at = NOW()
+         WHERE id = ${escapeSql(parseInt(entry.agent_id, 10))}`
+      );
+    }
+  }
+
   async listAgentsByType(agentType) {
     const result = await this._query(
-      `SELECT * FROM agents WHERE agent_type = ${escapeSql(agentType)} ORDER BY name`
+      `SELECT * FROM agents WHERE agent_type = ${escapeSql(agentType)} AND deleted_at IS NULL ORDER BY name`
     );
     return result.rows.map(rowToCamel);
   }
