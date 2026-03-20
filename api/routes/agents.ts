@@ -82,7 +82,7 @@ export default function agentRoutes(storage: any): Router {
   // POST /v1/agents/hire — create agent from template (pool profile)
   router.post('/hire', async (req: Request, res: Response) => {
     try {
-      const { template_name, name, display_name, is_active } = req.body || {};
+      const { template_name, name, display_name, is_active, description, role } = req.body || {};
 
       if (!name || typeof name !== 'string' || name.trim().length === 0) {
         res.status(400).json(error('VALIDATION_ERROR', 'name is required', 'agent_hire', (req as any).requestId));
@@ -101,22 +101,22 @@ export default function agentRoutes(storage: any): Router {
       if (template_name) {
         const profiles = await storage.listPoolProfiles();
         const profile = profiles.find((p: any) => p.name === template_name);
-        if (!profile) {
-          res.status(404).json(error('NOT_FOUND', `Template '${template_name}' not found in contractor pool`, 'agent_hire', (req as any).requestId));
-          return;
+        if (profile) {
+          templateData = {
+            displayName: profile.displayName || profile.name,
+            role: profile.description || null,
+            model: profile.model || null,
+            expertiseJson: profile.tools ? { tools: profile.tools } : {},
+          };
         }
-        templateData = {
-          displayName: profile.displayName || profile.name,
-          role: profile.description || null,
-          model: profile.model || null,
-          expertiseJson: profile.tools ? { tools: profile.tools } : {},
-        };
+        // Pool profile not found is OK — frontend templates pass description/role directly
       }
 
+      // Priority: request body fields > pool profile fields > defaults
       const agent = await storage.upsertAgent({
         name: name.trim(),
         displayName: display_name || templateData.displayName || name.trim(),
-        role: templateData.role || null,
+        role: role || description || templateData.role || null,
         model: templateData.model || null,
         expertiseJson: templateData.expertiseJson || {},
         agentType: is_active ? 'team' : 'contractor',
