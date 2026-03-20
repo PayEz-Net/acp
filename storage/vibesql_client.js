@@ -315,6 +315,11 @@ const CONTRACTOR_V2_MIGRATION = [
    END $$`,
 ];
 
+// Agent startup config migration: startup_order column
+const STARTUP_CONFIG_MIGRATION = [
+  `ALTER TABLE agents ADD COLUMN IF NOT EXISTS startup_order INTEGER DEFAULT 0`,
+];
+
 // Chat schema migration — creates acp_* tables (from chat/schema.sql)
 // Must be ordered: conversations → participants → threads → subscriptions → messages → attachments/reactions/delivery
 const CHAT_SCHEMA_MIGRATION = [
@@ -460,6 +465,12 @@ export class VibeSqlClient {
     for (const stmt of CONTRACTOR_V2_MIGRATION) {
       try { await this._query(stmt); } catch (e) {
         console.warn('[VibeSqlClient] Contractor v2 migration step skipped:', e.message || e);
+      }
+    }
+    // Agent startup config migration
+    for (const stmt of STARTUP_CONFIG_MIGRATION) {
+      try { await this._query(stmt); } catch (e) {
+        console.warn('[VibeSqlClient] Startup config migration step skipped:', e.message || e);
       }
     }
     // Chat schema migration (acp_* tables)
@@ -948,8 +959,20 @@ export class VibeSqlClient {
     if (updates.expertiseJson !== undefined) sets.push(`expertise_json = ${escapeJsonb(updates.expertiseJson)}`);
     if (updates.agentType !== undefined) sets.push(`agent_type = ${escapeSql(updates.agentType)}`);
     if (updates.isActive !== undefined) sets.push(`is_active = ${escapeSql(updates.isActive)}`);
+    if (updates.startupOrder !== undefined) sets.push(`startup_order = ${escapeSql(updates.startupOrder)}`);
     sets.push(`updated_at = NOW()`);
-    await this._query(`UPDATE agents SET ${sets.join(', ')} WHERE id = ${escapeSql(id)}`);
+    const result = await this._query(
+      `UPDATE agents SET ${sets.join(', ')} WHERE id = ${escapeSql(id)} RETURNING *`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
+
+  async listActiveAgents() {
+    const result = await this._query(
+      `SELECT * FROM agents WHERE is_active = true ORDER BY startup_order ASC, name ASC`
+    );
+    return result.rows.map(rowToCamel);
   }
 
   async listAgentsByType(agentType) {
