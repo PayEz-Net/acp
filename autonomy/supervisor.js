@@ -131,9 +131,14 @@ export class Supervisor {
     // Nightly Kanban: ping the lead agent on interval via agent mail.
     // Party engine is NOT started for this profile (cocktail-only).
     this._pingConfig = {
-      leadAgent: config.leadAgent || 'BAPert',
       pingIntervalMinutes: config.pingIntervalMinutes || 10,
     };
+
+    // Write lead agent designation to DB (config modal is input, DB is source of truth)
+    if (config.leadAgent) {
+      await this._setLeadAgent(config.leadAgent);
+    }
+
     this._startPingTimer();
 
     // Start dead man's switch
@@ -146,7 +151,7 @@ export class Supervisor {
         data: {
           mode: 'unattended',
           profile: 'nightly-kanban',
-          lead_agent: this._pingConfig.leadAgent,
+          lead_agent: config.leadAgent || null,
           ping_interval_minutes: this._pingConfig.pingIntervalMinutes,
           stop_condition: config.stopCondition || 'milestone',
           max_runtime_hours: config.maxRuntimeHours || this._maxRuntimeHours,
@@ -323,7 +328,7 @@ export class Supervisor {
         console.error('[Supervisor] Ping failed:', err.message || err);
       });
     }, intervalMs);
-    console.log(`[Supervisor] Nightly Kanban ping started: every ${this._pingConfig?.pingIntervalMinutes || 10}m to ${this._pingConfig?.leadAgent}`);
+    console.log(`[Supervisor] Nightly Kanban ping started: every ${this._pingConfig?.pingIntervalMinutes || 10}m (lead from DB)`);
   }
 
   _stopPingTimer() {
@@ -337,11 +342,12 @@ export class Supervisor {
   async _sendPing() {
     if (!this.unattendedMode || !this._pingConfig) return;
 
-    // Lead agent comes from the UI config modal (user's explicit selection).
-    // Future: once Aurum decides on a DB designation (e.g. team_lead column
-    // on vibe.global_vibe_agents), this can query at runtime instead.
-    const leadAgent = this._pingConfig.leadAgent;
-    if (!leadAgent) return;
+    // Read lead agent from DB (source of truth — written by config modal on start)
+    const leadAgent = await this._getLeadAgent();
+    if (!leadAgent) {
+      console.warn('[Supervisor] No team-lead found in vibe.global_vibe_agents, skipping ping');
+      return;
+    }
 
     const state = await this.getState();
     const elapsedMin = state?.startedAt
@@ -395,6 +401,43 @@ export class Supervisor {
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
+    }
+  }
+
+  // ── Lead Agent DB Operations ─────────────────────────────
+
+  /**
+   * Write lead agent designation to DB.
+   * Clears previous team-lead, sets new one.
+   */
+  async _setLeadAgent(agentName) {
+    try {
+      // Clear previous lead
+      await this._storage._query(
+        `UPDATE vibe.global_vibe_agents SET role = NULL WHERE role = 'team-lead'`
+      );
+      // Set new lead
+      await this._storage._query(
+        `UPDATE vibe.global_vibe_agents SET role = 'team-lead' WHERE name = '${agentName.replace(/'/g, "''")}'`
+      );
+      console.log(`[Supervisor] Lead agent set to ${agentName} in vibe.global_vibe_agents`);
+    } catch (err) {
+      console.error(`[Supervisor] Failed to set lead agent in DB:`, err.message || err);
+    }
+  }
+
+  /**
+   * Read lead agent from DB (source of truth).
+   */
+  async _getLeadAgent() {
+    try {
+      const result = await this._storage._query(
+        `SELECT name FROM vibe.global_vibe_agents WHERE role = 'team-lead' AND is_active = TRUE LIMIT 1`
+      );
+      return result.rows?.[0]?.name || null;
+    } catch (err) {
+      console.error(`[Supervisor] Failed to query lead agent:`, err.message || err);
+      return null;
     }
   }
 }
