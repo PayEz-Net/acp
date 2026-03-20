@@ -146,7 +146,7 @@ export class Supervisor {
         data: {
           mode: 'unattended',
           profile: 'nightly-kanban',
-          lead_agent: this._pingConfig.leadAgent,
+          lead_agent: this._pingConfig.leadAgent || '(from DB)',
           ping_interval_minutes: this._pingConfig.pingIntervalMinutes,
           stop_condition: config.stopCondition || 'milestone',
           max_runtime_hours: config.maxRuntimeHours || this._maxRuntimeHours,
@@ -323,7 +323,7 @@ export class Supervisor {
         console.error('[Supervisor] Ping failed:', err.message || err);
       });
     }, intervalMs);
-    console.log(`[Supervisor] Nightly Kanban ping started: every ${this._pingConfig?.pingIntervalMinutes || 10}m to ${this._pingConfig?.leadAgent || 'BAPert'}`);
+    console.log(`[Supervisor] Nightly Kanban ping started: every ${this._pingConfig?.pingIntervalMinutes || 10}m (lead agent resolved from DB at runtime)`);
   }
 
   _stopPingTimer() {
@@ -337,7 +337,17 @@ export class Supervisor {
   async _sendPing() {
     if (!this.unattendedMode || !this._pingConfig) return;
 
-    const { leadAgent } = this._pingConfig;
+    // Query lead agent from database at runtime (data-driven, not config)
+    let leadAgent;
+    try {
+      const result = await this._storage._query(
+        `SELECT name FROM agents WHERE role ILIKE '%lead%' AND agent_type = 'team' AND is_active = TRUE ORDER BY id LIMIT 1`
+      );
+      leadAgent = result.rows?.[0]?.name;
+    } catch { /* fall through */ }
+    // Fallback: use config value, then BAPert
+    if (!leadAgent) leadAgent = this._pingConfig.leadAgent || 'BAPert';
+
     const state = await this.getState();
     const elapsedMin = state?.startedAt
       ? Math.round((Date.now() - new Date(state.startedAt).getTime()) / 60000)
