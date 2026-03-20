@@ -380,7 +380,7 @@ export class Supervisor {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from_agent: 'ACP-Supervisor',
+          from_agent: leadAgent,
           to: [leadAgent],
           subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
           body,
