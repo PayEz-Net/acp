@@ -227,7 +227,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
             if (!m.read_at) {
               unreadMessages.push({
                 ...m,
-                to_agent: (m.to_agent as string) || agent,
+                to_agent: (m.to_agent as string) || (Array.isArray(m.to) ? (m.to as string[]).join(', ') : m.to as string) || agent,
                 is_read: false,
               });
             }
@@ -253,7 +253,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
         const rawMessages = response.data?.messages || [];
         const allMessages: MailMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
           ...m,
-          to_agent: (m.to_agent as string) || agent,
+          to_agent: (m.to_agent as string) || (Array.isArray(m.to) ? (m.to as string[]).join(', ') : m.to as string) || agent,
           is_read: !!m.read_at,
         }));
 
@@ -294,7 +294,12 @@ export const useMailStore = create<MailStore>((set, get) => ({
       }
 
       // ActionPanel response: { success, data: { ...message }, actions, suggested, context }
-      const message: MailMessage = response.data;
+      const raw = response.data;
+      const message: MailMessage = {
+        ...raw,
+        to_agent: raw.to_agent || (Array.isArray(raw.to) ? raw.to.join(', ') : raw.to) || '',
+        is_read: raw.is_read ?? !!raw.read_at,
+      };
 
       set({
         selectedMessage: message,
