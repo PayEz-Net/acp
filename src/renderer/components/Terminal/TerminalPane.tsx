@@ -70,13 +70,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         navigator.clipboard.writeText(terminal.getSelection());
         return false; // Don't send to PTY
       }
-      // Ctrl+V to paste
-      if (e.ctrlKey && e.key === 'v') {
-        navigator.clipboard.readText().then((text) => {
-          if (text) terminal.paste(text);
-        });
-        return false;
-      }
+      // Let xterm handle Ctrl+V natively — no custom handler needed.
+      // Adding a manual terminal.paste() here causes triple-paste because
+      // xterm's built-in paste + onData both fire independently.
       return true;
     });
 
