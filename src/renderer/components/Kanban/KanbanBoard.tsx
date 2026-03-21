@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useKanbanStore, getTasksByLane, getPriorityColor } from '../../stores/kanbanStore';
 import { useAppStore } from '../../stores/appStore';
 import { KanbanLane, KanbanTask } from '@shared/types';
-import { X, Plus, GripVertical } from 'lucide-react';
+import { X, Plus, GripVertical, User } from 'lucide-react';
 
 interface KanbanBoardProps {
   isOpen: boolean;
@@ -16,7 +16,18 @@ const LANES: { id: KanbanLane; label: string; color: string }[] = [
   { id: 'done', label: 'Done', color: 'border-green-500' },
 ];
 
+function useAgentName(agentId?: number): string | undefined {
+  const agents = useAppStore((s) => s.agents);
+  if (!agentId) return undefined;
+  const agent = agents.find((a) => a.id === String(agentId));
+  return agent?.displayName || agent?.name;
+}
+
 function TaskCard({ task, onSelect, onDragStart }: { task: KanbanTask; onSelect: () => void; onDragStart: (e: React.DragEvent) => void }) {
+  const assigneeName = useAgentName(task.assigned_agent_id);
+  const creatorName = useAgentName(task.created_by_agent_id);
+  const ownerLabel = assigneeName || creatorName;
+
   return (
     <div
       draggable
@@ -27,13 +38,16 @@ function TaskCard({ task, onSelect, onDragStart }: { task: KanbanTask; onSelect:
       <div className="flex items-start gap-2">
         <GripVertical className="w-3 h-3 text-slate-600 mt-1 shrink-0 cursor-grab" />
         <div className="min-w-0 flex-1">
-          <div className="text-sm text-slate-200 font-medium truncate">{task.title}</div>
-          <div className="flex items-center gap-2 mt-1">
+          <div className="text-sm text-slate-200 font-medium line-clamp-2" title={task.title}>{task.title}</div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
             <span className={`text-xs px-1.5 py-0.5 rounded border ${getPriorityColor(task.priority)}`}>
               {task.priority}
             </span>
-            {task.assigned_agent_id && (
-              <span className="text-xs text-slate-500">Agent #{task.assigned_agent_id}</span>
+            {ownerLabel && (
+              <span className="flex items-center gap-1 text-xs text-slate-400">
+                <User className="w-3 h-3" />
+                {ownerLabel}
+              </span>
             )}
           </div>
         </div>

@@ -60,11 +60,18 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
       const data = await res.json();
       const rawTasks = data.data?.tasks || data.data || data.tasks || [];
       // Map API fields (status, assignedTo) to KanbanTask fields (lane, assigned_agent_id)
-      const tasks: KanbanTask[] = rawTasks.map((t: Record<string, unknown>) => ({
+      const mapped: KanbanTask[] = rawTasks.map((t: Record<string, unknown>) => ({
         ...t,
         lane: (t.lane as string) || (t.status as string) || 'backlog',
         priority: (t.priority as string) || 'normal',
       }));
+      // Dedup by task id — keep first occurrence
+      const seen = new Set<number>();
+      const tasks = mapped.filter((t) => {
+        if (seen.has(t.id)) return false;
+        seen.add(t.id);
+        return true;
+      });
       set({ tasks, loading: false });
     } catch (err) {
       console.error('[Kanban] Failed to fetch tasks:', err);
