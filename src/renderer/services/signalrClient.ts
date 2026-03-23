@@ -317,22 +317,27 @@ export class AgentMailSignalRClient {
 
       if (isAuthError) {
         console.log('[SignalR] Auth error detected, attempting token refresh and reconnect...');
+        // P1: Save subscriptions BEFORE any reconnect attempt — they must survive failures
+        const savedAgents = new Set(this.subscribedAgents);
         try {
           // Force token refresh via the main process
           const freshToken = await this.options.getAccessToken();
           if (freshToken) {
             console.log('[SignalR] Got fresh token, reconnecting...');
-            // Wait a bit then reconnect
             await new Promise(r => setTimeout(r, 1000));
             await this.connect();
-            // Re-subscribe to previously subscribed agents
+            // Restore and re-subscribe
+            this.subscribedAgents = savedAgents;
             if (this.subscribedAgents.size > 0) {
               await this.resubscribeAll();
             }
-            return; // Don't clear subscribed agents
+            return;
           }
         } catch (reconnectError) {
           console.error('[SignalR] Failed to reconnect after auth error:', reconnectError);
+          // Preserve subscriptions so next reconnect attempt can restore them
+          this.subscribedAgents = savedAgents;
+          return;
         }
       }
 

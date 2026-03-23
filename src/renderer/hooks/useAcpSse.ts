@@ -61,18 +61,26 @@ export function useAcpSse() {
       return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    let disposed = false;
+    abortRef.current = new AbortController();
     let retryCount = 0;
-    const MAX_RETRIES = 5;
+
+    // P0: Stale ping watchdog — force reconnect if no ping for 60s
+    const STALE_PING_MS = 60_000;
+    const pingWatchdog = setInterval(() => {
+      if (disposed) return;
+      const last = lastPingRef.current;
+      if (last > 0 && Date.now() - last > STALE_PING_MS && connectionStateRef.current === 'connected') {
+        console.warn(`[AcpSse] No ping for ${Math.round((Date.now() - last) / 1000)}s — forcing reconnect`);
+        abortRef.current?.abort();
+        abortRef.current = new AbortController();
+        connect();
+      }
+    }, 15_000);
 
     async function connect() {
-      if (retryCount >= MAX_RETRIES) {
-        console.warn('[AcpSse] Max retries reached, stopping');
-        connectionStateRef.current = 'disconnected';
-        return;
-      }
-
+      if (disposed) return;
+      // P3: No hard retry limit — exponential backoff with 30s cap, never give up
       const secret = await getSecret();
       const headers: Record<string, string> = { 'Accept': 'text/event-stream' };
       if (secret) {
@@ -80,17 +88,17 @@ export function useAcpSse() {
       }
 
       const url = 'http://127.0.0.1:3001/v1/sse/stream';
-      console.log('[AcpSse] Connecting...');
+      console.log(`[AcpSse] Connecting... (attempt ${retryCount + 1})`);
       connectionStateRef.current = 'reconnecting';
 
       try {
-        const response = await fetch(url, { headers, signal: controller.signal });
+        const response = await fetch(url, { headers, signal: abortRef.current!.signal });
 
         if (!response.ok) {
           console.error(`[AcpSse] Connection failed: ${response.status}`);
           retryCount++;
-          const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000);
-          setTimeout(() => { if (!controller.signal.aborted) connect(); }, delay);
+          const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000) + Math.random() * 1000;
+          setTimeout(() => { if (!disposed) connect(); }, delay);
           return;
         }
 
@@ -103,10 +111,11 @@ export function useAcpSse() {
         console.log('[AcpSse] Connected');
         connectionStateRef.current = 'connected';
         retryCount = 0;
+        lastPingRef.current = Date.now(); // treat connect as implicit ping
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done || controller.signal.aborted) break;
+          if (done || disposed) break;
 
           buffer += decoder.decode(value, { stream: true });
           const events = buffer.split('\n\n');
@@ -293,18 +302,20 @@ export function useAcpSse() {
         }
 
         // Stream ended — reconnect
-        if (!controller.signal.aborted) {
+        if (!disposed) {
           console.log('[AcpSse] Stream ended, reconnecting...');
           connectionStateRef.current = 'reconnecting';
+          abortRef.current = new AbortController();
           setTimeout(connect, 2000);
         }
       } catch (err) {
-        if (controller.signal.aborted) return;
+        if (disposed) return;
         retryCount++;
         connectionStateRef.current = 'reconnecting';
-        const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000);
-        console.error(`[AcpSse] Error (retry ${retryCount}/${MAX_RETRIES}):`, err);
-        setTimeout(() => { if (!controller.signal.aborted) connect(); }, delay);
+        abortRef.current = new AbortController();
+        const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000) + Math.random() * 1000;
+        console.error(`[AcpSse] Error (retry ${retryCount}, next in ${Math.round(delay)}ms):`, err);
+        setTimeout(() => { if (!disposed) connect(); }, delay);
       }
     }
 
@@ -312,7 +323,9 @@ export function useAcpSse() {
 
     return () => {
       console.log('[AcpSse] Disconnecting');
-      controller.abort();
+      disposed = true;
+      clearInterval(pingWatchdog);
+      abortRef.current?.abort();
       abortRef.current = null;
       connectionStateRef.current = 'disconnected';
     };
