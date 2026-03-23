@@ -2,6 +2,17 @@ import { create } from 'zustand';
 import { KanbanTask, KanbanLane, KanbanPriority } from '@shared/types';
 import { useAppStore } from './appStore';
 
+// Map API status values to kanban lane names
+function statusToLane(status: string): KanbanLane {
+  switch (status) {
+    case 'todo': case 'open': case 'new': return 'backlog';
+    case 'in_progress': case 'active': case 'working': return 'in_progress';
+    case 'review': case 'testing': case 'qa': return 'review';
+    case 'done': case 'completed': case 'closed': case 'resolved': return 'done';
+    default: return 'backlog';
+  }
+}
+
 // Helper to make authenticated requests to acp-api kanban endpoints
 async function kanbanRequest(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<Response> {
   const { method = 'GET', body } = options;
@@ -62,7 +73,7 @@ export const useKanbanStore = create<KanbanStore>((set, get) => ({
       // Map API fields (status, assignedTo) to KanbanTask fields (lane, assigned_agent_id)
       const mapped: KanbanTask[] = rawTasks.map((t: Record<string, unknown>) => ({
         ...t,
-        lane: (t.lane as string) || (t.status as string) || 'backlog',
+        lane: (t.lane as KanbanLane) || statusToLane((t.status as string) || ''),
         priority: (t.priority as string) || 'normal',
       }));
       // Dedup by task id — keep first occurrence

@@ -70,9 +70,17 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         navigator.clipboard.writeText(terminal.getSelection());
         return false; // Don't send to PTY
       }
-      // Let xterm handle Ctrl+V natively — no custom handler needed.
-      // Adding a manual terminal.paste() here causes triple-paste because
-      // xterm's built-in paste + onData both fire independently.
+      // Ctrl+V: read clipboard and write to PTY directly.
+      // Return false to block xterm's built-in paste (which caused triple-paste).
+      if (e.ctrlKey && e.key === 'v' && e.type === 'keydown') {
+        navigator.clipboard.readText().then(text => {
+          const tid = agent.terminalId;
+          if (text && tid) {
+            window.electronAPI.writeTerminal(tid, text);
+          }
+        });
+        return false;
+      }
       return true;
     });
 
