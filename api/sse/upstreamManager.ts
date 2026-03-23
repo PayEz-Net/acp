@@ -16,7 +16,7 @@ type MailEventHandler = (agent: string, data: Record<string, unknown>) => void;
 const BACKOFF_BASE_MS = 2000;
 const BACKOFF_MAX_MS = 60_000;
 const MAX_CONSECUTIVE_FAILURES = 5;
-const DEGRADED_RETRY_MS = 60 * 1000; // 1 minute (was 5 — too slow for recovery)
+const DEGRADED_RETRY_MS = 15 * 1000; // 15s — fast recovery for agent coordination
 
 function backoffDelay(failures: number): number {
   return Math.min(BACKOFF_BASE_MS * Math.pow(2, failures), BACKOFF_MAX_MS);
@@ -171,13 +171,14 @@ export class UpstreamSseManager {
       if (conn.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         conn.state = 'failed';
         console.error(`[SSE] ${agent}: degraded after ${MAX_CONSECUTIVE_FAILURES} failures, retrying in ${DEGRADED_RETRY_MS / 1000}s`);
+        const jitter = Math.random() * 3000; // 0-3s jitter to avoid thundering herd
         conn.degradedRetryTimer = setTimeout(() => {
           if (!this.running) return;
           console.log(`[SSE] ${agent}: degraded retry — attempting reconnect`);
           conn.consecutiveFailures = 0;
           conn.state = 'reconnecting';
           this.connect(agent);
-        }, DEGRADED_RETRY_MS);
+        }, DEGRADED_RETRY_MS + jitter);
       } else {
         this.scheduleReconnect(agent);
       }
