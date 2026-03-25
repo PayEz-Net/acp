@@ -7,7 +7,7 @@ import { TitleBar } from './components/Layout/TitleBar';
 import { KanbanBoard } from './components/Kanban/KanbanBoard';
 import { ChatPanel } from './components/Chat/ChatPanel';
 import { StandupView } from './components/Autonomy/StandupView';
-import { DocumentSidebar } from './components/Documents/DocumentSidebar';
+import { DocumentSidebar, DocumentModal } from './components/Documents';
 import { ContractorPanel } from './components/Contractors';
 import { ProjectPicker } from './components/Projects';
 import { UnattendedBanner, EmergencyStopButton } from './components/Autonomy';
@@ -186,6 +186,9 @@ export default function App() {
 
       {/* Emergency Stop — floating button when unattended active */}
       <EmergencyStopButton />
+
+      {/* Document Viewer Modal — fixed overlay */}
+      <DocumentModal />
     </div>
   );
 }
