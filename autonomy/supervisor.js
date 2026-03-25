@@ -106,10 +106,17 @@ export class Supervisor {
    * Agents work autonomously until a stop condition is met.
    */
   async startUnattended(config = {}) {
+    // If already active (in-memory or DB), stop first then restart cleanly
     if (this.unattendedMode) {
-      const err = new Error('Unattended mode is already active');
-      err.code = 'INVALID_REQUEST';
-      throw err;
+      console.log('[Supervisor] Unattended already active in-memory — restarting');
+      await this.stopUnattended('restart');
+    }
+
+    // If DB says enabled (stale from server restart), clear it first
+    const dbState = await this.getState();
+    if (dbState?.enabled) {
+      console.log('[Supervisor] Stale autonomy state in DB — clearing before start');
+      try { await this.stop('restart'); } catch { /* already handled */ }
     }
 
     // Start supervisor with config
@@ -173,8 +180,9 @@ export class Supervisor {
     const wasUnattended = this.unattendedMode;
     this.unattendedMode = false;
 
-    // Stop ping timer (Nightly Kanban)
+    // Stop ping timer and clear config (Nightly Kanban)
     this._stopPingTimer();
+    this._pingConfig = null;
 
     // Stop dead man's switch
     this.stopDeadManSwitch();
@@ -224,9 +232,13 @@ export class Supervisor {
    * Stops party engine, stops supervisor, returns kill list for caller to terminate PTYs.
    */
   async emergencyStop() {
-    if (!this.unattendedMode) return { stopped: false, reason: 'not_running' };
+    // Check both in-memory flag AND DB state — server restart clears in-memory
+    // but DB may still have enabled: true (stale session)
+    const dbState = await this.getState();
+    if (!this.unattendedMode && !dbState?.enabled) return { stopped: false, reason: 'not_running' };
     this.unattendedMode = false;
     this._stopPingTimer();
+    this._pingConfig = null;
     this.stopDeadManSwitch();
 
     await this._storage.updateAutonomyState({
@@ -336,7 +348,10 @@ export class Supervisor {
       clearInterval(this._pingTimer);
       this._pingTimer = null;
     }
-    this._pingConfig = null;
+    // Note: _pingConfig is cleared in stopUnattended, NOT here.
+    // _startPingTimer calls _stopPingTimer to clear the old interval
+    // before setting a new one, and nulling config here would crash
+    // the SSE emit that reads _pingConfig after _startPingTimer returns.
   }
 
   async _sendPing() {
@@ -354,8 +369,9 @@ export class Supervisor {
       ? Math.round((Date.now() - new Date(state.startedAt).getTime()) / 60000)
       : 0;
 
-    // Gather kanban summary
+    // Gather kanban summary + headlines for lead agent
     let taskSummary = '';
+    let headlines = '';
     try {
       const tasks = await this._storage.listTasks();
       const byStatus = {};
@@ -364,6 +380,21 @@ export class Supervisor {
       }
       const parts = Object.entries(byStatus).map(([s, n]) => `${s}: ${n}`);
       taskSummary = parts.length > 0 ? parts.join(', ') : 'no tasks';
+
+      // Headlines: backlog + in_progress tasks for this agent or unassigned
+      const actionable = tasks.filter(t =>
+        (t.status === 'backlog' || t.status === 'in_progress') &&
+        (!t.assignedTo || t.assignedTo === leadAgent)
+      );
+      if (actionable.length > 0) {
+        const lines = actionable.map(t => {
+          const tag = t.status === 'in_progress' ? '[WIP]' : '[BACKLOG]';
+          const title = t.title.length > 60 ? t.title.slice(0, 57) + '...' : t.title;
+          const assignee = t.assignedTo ? '' : ' (unassigned)';
+          return `  ${tag} ${title}${assignee}`;
+        });
+        headlines = '\n\nYour work queue:\n' + lines.join('\n');
+      }
 
       // Check stop conditions while we have tasks
       const stopReason = await this.checkStopConditions(tasks);
@@ -379,7 +410,7 @@ export class Supervisor {
     // Send ping via agent mail
     const cfg = this._cfg;
     const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
-    const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h\n\nCheck kanban, check mail, report status, keep working.`;
+    const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
     try {
       await fetch(`${vibeApiUrl}/v1/agentmail/send`, {
