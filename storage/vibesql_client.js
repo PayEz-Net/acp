@@ -1129,6 +1129,53 @@ export class VibeSqlClient {
     };
   }
 
+  async updateDocument(documentId, updates) {
+    // Merge updates into existing JSONB data
+    const existing = await this._query(
+      `SELECT document_id, data FROM vibe.documents
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'agent_documents'
+       AND (data->>'document_id')::int = ${escapeSql(documentId)}
+       LIMIT 1`
+    );
+    if (existing.rows.length === 0) return null;
+    const r = existing.rows[0];
+    const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
+
+    // Apply updates
+    if (updates.title !== undefined) d.title = updates.title;
+    if (updates.content_md !== undefined) d.content_md = updates.content_md;
+    if (updates.document_type !== undefined) d.document_type = updates.document_type;
+    if (updates.version !== undefined) d.version = updates.version;
+    d.updated_at = new Date().toISOString();
+
+    await this._query(
+      `UPDATE vibe.documents SET data = ${escapeJsonb(d)}, updated_at = NOW()
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'agent_documents'
+       AND (data->>'document_id')::int = ${escapeSql(documentId)}`
+    );
+
+    return {
+      id: d.document_id || r.document_id,
+      title: d.title || 'Untitled',
+      content_md: d.content_md || '',
+      type: d.document_type || 'attachment',
+      author_agent: d.created_by ? String(d.created_by) : undefined,
+      version: d.version || 1,
+      created_at: d.created_at,
+      updated_at: d.updated_at,
+    };
+  }
+
+  async deleteDocument(documentId) {
+    const result = await this._query(
+      `DELETE FROM vibe.documents
+       WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'agent_documents'
+       AND (data->>'document_id')::int = ${escapeSql(documentId)}
+       RETURNING document_id`
+    );
+    return result.rows.length > 0;
+  }
+
   async listPoolProfiles() {
     const result = await this._query(
       `SELECT data FROM vibe.documents
