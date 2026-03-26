@@ -248,13 +248,9 @@ const PHASE2A_MIGRATION = [
   `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS exit_code INTEGER`,
   `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS cancel_reason TEXT`,
   // Update CHECK constraint to allow 'queued' and 'cancelled' statuses
-  // DROP + ADD is idempotent if we catch the drop error
-  `DO $$ BEGIN
-     ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check;
-     ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
-       CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired'));
-   EXCEPTION WHEN OTHERS THEN NULL;
-   END $$`,
+  `ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check`,
+  `ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
+     CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired'))`,
 ];
 
 // Projects migration: new tables + FKs
@@ -307,12 +303,9 @@ const UNATTENDED_MIGRATION = [
 const CONTRACTOR_V2_MIGRATION = [
   `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS mailbox_slot VARCHAR(20)`,
   `ALTER TABLE agent_contracts ADD COLUMN IF NOT EXISTS conversation_id TEXT`,
-  `DO $$ BEGIN
-     ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check;
-     ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
-       CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired', 'promoted'));
-   EXCEPTION WHEN OTHERS THEN NULL;
-   END $$`,
+  `ALTER TABLE agent_contracts DROP CONSTRAINT IF EXISTS agent_contracts_status_check`,
+  `ALTER TABLE agent_contracts ADD CONSTRAINT agent_contracts_status_check
+     CHECK (status IN ('active', 'queued', 'completed', 'cancelled', 'expired', 'promoted'))`,
 ];
 
 // Agent startup config migration: startup_order + deleted_at columns
