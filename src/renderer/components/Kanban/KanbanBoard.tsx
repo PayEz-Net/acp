@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useKanbanStore, getTasksByLane, getPriorityColor } from '../../stores/kanbanStore';
 import { useAppStore } from '../../stores/appStore';
 import { KanbanLane, KanbanTask } from '@shared/types';
-import { X, Plus, GripVertical, User } from 'lucide-react';
+import { X, Plus, GripVertical, User, RefreshCw } from 'lucide-react';
 
 interface KanbanBoardProps {
   isOpen: boolean;
@@ -57,7 +57,7 @@ function TaskCard({ task, onSelect, onDragStart }: { task: KanbanTask; onSelect:
 }
 
 export function KanbanBoard({ isOpen, onClose }: KanbanBoardProps) {
-  const { tasks, isCreatingTask, fetchTasks, moveTask, createTask, setSelectedTask, setCreatingTask } = useKanbanStore();
+  const { tasks, isCreatingTask, loading, fetchTasks, moveTask, createTask, setSelectedTask, setCreatingTask } = useKanbanStore();
   const { backendAvailable } = useAppStore();
   const [dragTaskId, setDragTaskId] = useState<number | null>(null);
 
@@ -95,6 +95,9 @@ export function KanbanBoard({ isOpen, onClose }: KanbanBoardProps) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
         <span className="text-sm font-semibold text-slate-200">Kanban Board</span>
         <div className="flex items-center gap-2">
+          <button onClick={fetchTasks} disabled={loading} className="text-slate-400 hover:text-blue-400 transition-colors disabled:opacity-50" title="Refresh">
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
           <button onClick={() => setCreatingTask(true)} className="text-slate-400 hover:text-emerald-400 transition-colors" title="New Task">
             <Plus className="w-4 h-4" />
           </button>
