@@ -412,15 +412,17 @@ export class Supervisor {
     const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
+    const mailHeaders = {
+      'X-Vibe-Client-Id': cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
+      'X-Vibe-Client-Secret': cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
+      'X-Vibe-User-Id': cfg.vibeUserId || '0',
+      'Content-Type': 'application/json',
+    };
+
     try {
-      await fetch(`${vibeApiUrl}/v1/agentmail/send`, {
+      const sendRes = await fetch(`${vibeApiUrl}/v1/agentmail/send`, {
         method: 'POST',
-        headers: {
-          'X-Vibe-Client-Id': cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
-          'X-Vibe-Client-Secret': cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
-          'X-Vibe-User-Id': cfg.vibeUserId || '0',
-          'Content-Type': 'application/json',
-        },
+        headers: mailHeaders,
         body: JSON.stringify({
           from_agent: leadAgent,
           to: [leadAgent],
@@ -430,6 +432,28 @@ export class Supervisor {
         }),
       });
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
+
+      // Mark ping as read so it doesn't clutter the lead agent's unread count
+      try {
+        const sendData = await sendRes.json();
+        const messageId = sendData?.data?.message_id;
+        if (messageId) {
+          // Fetch inbox to find the inbox_id for this message
+          const inboxRes = await fetch(`${vibeApiUrl}/v1/agentmail/inbox/${leadAgent}?page_size=1`, {
+            headers: mailHeaders,
+          });
+          const inboxData = await inboxRes.json();
+          const entry = inboxData?.data?.messages?.find(m => m.message_id === messageId);
+          if (entry?.inbox_id) {
+            await fetch(`${vibeApiUrl}/v1/agentmail/inbox/${entry.inbox_id}/read`, {
+              method: 'POST',
+              headers: mailHeaders,
+            });
+          }
+        }
+      } catch {
+        // Non-critical — ping was sent, mark-read is best-effort
+      }
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
     }
