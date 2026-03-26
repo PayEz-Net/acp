@@ -391,9 +391,13 @@ export class Supervisor {
           const tag = t.status === 'in_progress' ? '[WIP]' : '[BACKLOG]';
           const title = t.title.length > 60 ? t.title.slice(0, 57) + '...' : t.title;
           const assignee = t.assignedTo ? '' : ' (unassigned)';
-          return `  ${tag} ${title}${assignee}`;
+          return `  ${tag} #${t.id} ${title}${assignee}`;
         });
+        const hasBacklog = actionable.some(t => t.status === 'backlog');
         headlines = '\n\nYour work queue:\n' + lines.join('\n');
+        if (hasBacklog) {
+          headlines += '\n\nClaim a task: PUT /v1/kanban/tasks/{id} {"status":"in_progress","assignedTo":"YourName"}';
+        }
       }
 
       // Check stop conditions while we have tasks
