@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* xterm.js terminal styles */
+.xterm {
+  padding: 8px;
+  overflow: hidden;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+/* Draggable title bar */
+.titlebar {
+  -webkit-app-region: drag;
+}
+
+.titlebar button {
+  -webkit-app-region: no-drag;
+}
+
+/* Terminal pane styles */
+.terminal-pane {
+  border: 1px solid var(--bg-tertiary);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-pane.focused {
+  border-color: var(--accent);
+}
+
+.terminal-header {
+  background: var(--bg-secondary);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--bg-tertiary);
+}
+
+.terminal-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Status indicators */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-online { background: #10b981; }
+.status-busy { background: #f59e0b; animation: pulse 1.5s ease-in-out infinite; }
+.status-idle { background: #3b82f6; }
+.status-offline { background: #6b7280; }
+.status-error { background: #ef4444; }
+.status-starting { background: #8b5cf6; animation: pulse 1s ease-in-out infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ACP (Agent Collaboration Platform) Styles */
+
+.grid-bg {
+  background-color: #0B1221;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.wood-table {
+  background: linear-gradient(135deg, #3d2b1f 0%, #2a1d15 100%);
+  border: 1px solid #4a3428;
+  box-shadow: 0 8px 15px -3px rgba(0, 0, 0, 0.5);
+}
+
+.furniture-glow {
+  box-shadow: 0 0 15px rgba(0,0,0,0.5);
+}
+
+/* ACP scrollbar styling */
+.acp-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.acp-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.acp-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 10px;
+}
+
+/* Agent sprite animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.agent-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Mingle connection line animation */
+@keyframes dash {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+.mingle-line,
+.animate-dash {
+  animation: dash 0.5s linear infinite;
+}

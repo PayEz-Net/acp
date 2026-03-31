@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+release/
+out/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+.mcp.json
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Electron
+*.asar
+
+# TypeScript
+*.tsbuildinfo
+
+# Testing
+coverage/
+.acp/
+.acp-test-*/
+
+# Code intelligence
+.gitnexus
+.vs/
+*.zip

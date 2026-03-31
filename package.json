@@ -1,0 +1,19 @@
+{
+  "name": "acp",
+  "version": "0.1.0",
+  "description": "Agent Collaboration Platform — Desktop shell + API for orchestrating AI agent teams",
+  "private": true,
+  "license": "MIT",
+  "author": "PayEz <dev@payez.net>",
+  "workspaces": [
+    "packages/api",
+    "packages/desktop"
+  ],
+  "scripts": {
+    "dev:api": "cd packages/api && npm start",
+    "dev:desktop": "cd packages/desktop && npm run dev:electron",
+    "dev": "concurrently -k \"npm run dev:api\" \"npm run dev:desktop\"",
+    "install:all": "cd packages/api && npm install && cd ../desktop && npm install",
+    "test": "cd packages/api && npm test"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "appId": "com.idealvibe.agent-collaboration-platform",
+  "productName": "ACP",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "resources/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "../acp-api",
+      "to": "acp-api",
+      "filter": ["api/**/*", "config.ts", "tsconfig.json", "package.json", "node_modules/**/*"]
+    }
+  ],
+  "win": {
+    "target": ["nsis", "portable"],
+    "icon": "resources/icon.ico"
+  },
+  "mac": {
+    "target": ["dmg", "zip"],
+    "icon": "resources/icon.icns"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "icon": "resources/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}
