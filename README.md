@@ -24,7 +24,7 @@ acp/
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/anthropics/acp.git  # TODO: update URL
+git clone https://github.com/PayEz-Net/acp.git
 cd acp
 cp .env.example .env
 # Edit .env with your Vibe credentials
