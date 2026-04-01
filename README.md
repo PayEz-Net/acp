@@ -1,6 +1,23 @@
 # ACP — Agent Collaboration Platform
 
-Desktop application for orchestrating AI agent teams. ACP provides a terminal grid where each pane runs a Claude Code session with an assigned agent identity, plus a backend API for agent collaboration, messaging, and task management.
+Desktop application for orchestrating AI agent teams. ACP provides a terminal grid where each pane runs an AI agent session (Claude Code or Kimi Code CLI) with an assigned agent identity, plus a backend API for agent collaboration, messaging, and task management.
+
+## 🎉 New: Kimi Code CLI Support
+
+ACP now supports **Kimi Code CLI** as the default AI provider! Agents run in `--yolo` mode for fast, interruption-free collaboration.
+
+```bash
+# Kimi starts automatically with --yolo (skip permissions)
+# Or switch to Claude in Settings
+```
+
+| Feature | Claude | Kimi |
+|---------|--------|------|
+| Skip permissions | `--dangerously-skip-permissions` | `--yolo` |
+| Skills location | `.claude/skills/` | `.kimi/skills/` |
+| Cloud profiles | ✅ | ✅ |
+| Agent mail | ✅ | ✅ |
+| Real-time push | ✅ | ✅ |
 
 ## Architecture
 
@@ -47,7 +64,7 @@ cd packages/desktop && npm run dev:electron
 - **Node.js 20+**
 - **VibeSQL** — local instance or `api.idealvibe.online` (see [VibeSQL setup](#vibesql))
 - **Redis** (optional, for real-time features)
-- **Claude Code CLI** — installed and authenticated (the terminal panes run Claude Code sessions)
+- **Claude Code CLI** or **Kimi Code CLI** — at least one installed
 
 ## Configuration
 
@@ -73,7 +90,42 @@ Default 4-pane layout (configurable):
 | Bottom-left | DotNetPert | Backend (.NET) |
 | Bottom-right | QAPert | QA / Testing |
 
-Each pane spawns a Claude Code session via `node-pty` and auto-injects the agent identity.
+Each pane spawns an AI agent session via `node-pty` and auto-injects the agent identity.
+
+## AI Provider Selection
+
+Switch between Claude and Kimi in the app:
+
+1. Open **Settings** (gear icon)
+2. Go to **AI Provider** section
+3. Select **Kimi** or **Claude**
+4. Kill and restart agents to apply
+
+### Kimi Skills
+
+Kimi loads skills from `.kimi/skills/`:
+
+```
+.kimi/skills/
+├── agent-onboarding/   # "report as" handler, cloud profile loading
+├── vibe-sql/           # Database queries
+└── gitnexus-code/      # Code intelligence
+```
+
+### Agent Onboarding
+
+When agents spawn, they automatically:
+1. Connect to VibeSQL cloud
+2. Load identity from `vibe.global_vibe_agents`
+3. Load skills from `vibe.agent_skills`
+4. Check inbox for pending mail
+
+```
+✓ {AgentName} initialized
+⚡ Connecting to VibeSQL cloud...
+✓ Profile loaded
+✓ Ready for assignments
+```
 
 ## VibeSQL
 
@@ -102,6 +154,16 @@ docker run -p 5173:5173 idealvibe/vibesql-micro
 | **Storage** | VibeSQL (PostgreSQL) |
 | **State** | zustand, electron-store |
 | **Styling** | Tailwind CSS |
+| **AI Providers** | Claude Code CLI, Kimi Code CLI |
+
+## Changelog
+
+### 2025-04-01 — Kimi Support
+- Added Kimi Code CLI as default AI provider
+- Added `--yolo` mode for skip-permissions workflow
+- Added `.kimi/skills/` for project-level context
+- Added AI Provider toggle in Settings
+- Improved agent onboarding with cloud profile loading
 
 ## License
 

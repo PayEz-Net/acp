@@ -1,10 +1,94 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/appStore';
-import { X, Server, Users, Radio, RefreshCw } from 'lucide-react';
+import { X, Server, Users, Radio, RefreshCw, Bot } from 'lucide-react';
 
 interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+// Agent Provider selection component
+function AgentProviderSection() {
+  const { settings, setSettings } = useAppStore();
+  const [provider, setProvider] = useState(settings.agentProvider || 'kimi');
+  const [effort, setEffort] = useState(settings.claudeEffort || 'max');
+
+  const handleProviderChange = async (newProvider: 'claude' | 'kimi') => {
+    setProvider(newProvider);
+    await window.electronAPI.setSettings({ 
+      ...settings, 
+      agentProvider: newProvider 
+    });
+    setSettings({ ...settings, agentProvider: newProvider });
+  };
+
+  const handleEffortChange = async (newEffort: 'low' | 'medium' | 'high' | 'max') => {
+    setEffort(newEffort);
+    await window.electronAPI.setSettings({ 
+      ...settings, 
+      claudeEffort: newEffort 
+    });
+    setSettings({ ...settings, claudeEffort: newEffort });
+  };
+
+  return (
+    <div className="p-4 border-b border-slate-800">
+      <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+        <Bot className="w-4 h-4" /> AI Provider
+      </h3>
+      
+      {/* Provider Selection */}
+      <div className="flex gap-2 mb-3">
+        <button
+          onClick={() => handleProviderChange('kimi')}
+          className={`flex-1 py-2 px-3 text-sm rounded border transition-colors ${
+            provider === 'kimi'
+              ? 'bg-violet-600 border-violet-500 text-white'
+              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+          }`}
+        >
+          Kimi
+        </button>
+        <button
+          onClick={() => handleProviderChange('claude')}
+          className={`flex-1 py-2 px-3 text-sm rounded border transition-colors ${
+            provider === 'claude'
+              ? 'bg-amber-600 border-amber-500 text-white'
+              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+          }`}
+        >
+          Claude
+        </button>
+      </div>
+
+      {/* Claude Effort Level (only shown for Claude) */}
+      {provider === 'claude' && (
+        <div className="mt-3">
+          <label className="text-xs text-slate-400 mb-2 block">Thinking Effort</label>
+          <select
+            value={effort}
+            onChange={(e) => handleEffortChange(e.target.value as 'low' | 'medium' | 'high' | 'max')}
+            className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded px-3 py-2"
+          >
+            <option value="low">Low (fastest)</option>
+            <option value="medium">Medium</option>
+            <option value="high">High (recommended)</option>
+            <option value="max">Max (slowest)</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-1">
+            Higher effort = more thorough analysis but slower responses.
+          </p>
+        </div>
+      )}
+
+      {/* Kimi Note */}
+      {provider === 'kimi' && (
+        <p className="text-xs text-slate-500 mt-2">
+          Kimi Code CLI with project-level skills from .agents/skills/
+        </p>
+      )}
+    </div>
+  );
 }
 
 interface HealthData {
@@ -130,6 +214,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             ))}
           </div>
         </div>
+
+        {/* Agent Provider */}
+        <AgentProviderSection />
 
         {/* SSE */}
         <div className="p-4">

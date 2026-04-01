@@ -205,8 +205,11 @@ export interface AppSettings {
   environment: 'prod' | 'dev';
   // Vibe API client identity (display/routing — HMAC creds now live in acp-api)
   vibeClientId?: string;
+  // AI Agent provider: 'claude' or 'kimi'
+  agentProvider?: 'claude' | 'kimi';
   // Claude Code effort level: low, medium, high, max
   // NOTE: publish/distribute with 'high' — 'max' is for internal dev only
+  // Only used when agentProvider is 'claude'
   claudeEffort?: 'low' | 'medium' | 'high' | 'max';
 }
 
@@ -313,7 +316,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showSidebar: true,
   vibeApiUrl: 'https://api.idealvibe.online',
   environment: 'prod',
-  vibeClientId: '',
+  vibeClientId: 'vibe_b2d2aac0315549d9',
+  agentProvider: 'kimi', // Default to Kimi Code CLI
   claudeEffort: 'max',
 };
 
