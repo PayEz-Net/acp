@@ -72,23 +72,54 @@ export function spawnAgent(agentName: string, workDir: string): string {
     }
   });
 
-  // Auto-inject claude with skip-permissions, then wait for ready prompt
+  // Auto-inject agent CLI based on provider setting
+  const settings = getSettings();
+  const provider = settings.agentProvider || 'kimi';
+  
   setTimeout(() => {
-    const effort = getSettings().claudeEffort || 'high';
-    ptyProcess.write(`claude --dangerously-skip-permissions --effort ${effort}\r`);
+    if (provider === 'claude') {
+      // Claude Code startup with effort level
+      const effort = settings.claudeEffort || 'high';
+      ptyProcess.write(`claude --dangerously-skip-permissions --effort ${effort}\r`);
+      console.log(`[PTY] Starting Claude (${effort}) for ${agentName}`);
+    } else {
+      // Kimi Code CLI startup in yolo mode (skip permissions)
+      ptyProcess.write(`kimi --yolo\r`);
+      console.log(`[PTY] Starting Kimi (yolo mode) for ${agentName}`);
+    }
 
     let reportSent = false;
+    let buffer = '';
     const dataListener = ptyProcess.onData((data) => {
-      if (!reportSent && data.includes('\u276F')) {
-        reportSent = true;
-        console.log(`[PTY] Claude ready for ${agentName}, sending report command`);
-        setTimeout(() => {
-          ptyProcess.write(`report as ${agentName}\r`);
-        }, 500);
-        dataListener.dispose();
+      buffer += data;
+      
+      if (provider === 'claude') {
+        // Claude uses "❯" (u276F) as prompt
+        if (!reportSent && data.includes('\u276F')) {
+          reportSent = true;
+          console.log(`[PTY] Claude ready for ${agentName}, sending report command`);
+          setTimeout(() => {
+            ptyProcess.write(`report as ${agentName}\r`);
+          }, 500);
+          dataListener.dispose();
+        }
+      } else {
+        // Kimi: wait for banner to complete (contains "Session:" and ends with prompt)
+        // The prompt appears after the banner - look for "> " at end of output
+        if (!reportSent && buffer.includes('Session:') && buffer.includes('Tip:')) {
+          // Banner is complete, now wait a bit for prompt and send
+          reportSent = true;
+          console.log(`[PTY] Kimi banner complete for ${agentName}, sending report command`);
+          setTimeout(() => {
+            ptyProcess.write(`report as ${agentName}\r`);
+          }, 1000);
+          dataListener.dispose();
+        }
       }
     });
 
+    // Staggered fallback based on agent name to prevent all hitting at once
+    const fallbackDelay = 5000 + (agentName.length * 500); // 5s + 0.5s per char in name
     setTimeout(() => {
       if (!reportSent) {
         reportSent = true;
@@ -96,7 +127,7 @@ export function spawnAgent(agentName: string, workDir: string): string {
         ptyProcess.write(`report as ${agentName}\r`);
         dataListener.dispose();
       }
-    }, 15000);
+    }, fallbackDelay);
   }, 500);
 
   return id;

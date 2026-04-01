@@ -26,6 +26,9 @@ interface AppStore {
   // API settings
   vibeApiUrl: string;
 
+  // Full settings object for UI
+  settings: AppSettings;
+
   // Autonomy state
   autonomyEnabled: boolean;
   autonomyStatus: AutonomyStatus | null;
@@ -72,6 +75,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   autonomyEnabled: false,
   autonomyStatus: null,
   autonomyPanelOpen: false,
+  settings: {} as AppSettings,
 
   // Actions
   setLayout: (layout) => set({ layout }),
@@ -108,6 +112,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     focusAgent: settings.focusAgent,
     showSidebar: settings.showSidebar,
     vibeApiUrl: settings.vibeApiUrl ?? 'https://api.idealvibe.online',
+    settings,
   }),
 
   registerTerminal: (agentName, terminal) => {

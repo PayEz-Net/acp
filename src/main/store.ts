@@ -60,6 +60,7 @@ export function getSettings(): AppSettings {
     vibeApiUrl: store.get('vibeApiUrl') ?? 'https://api.idealvibe.online',
     environment: store.get('environment') ?? 'prod',
     vibeClientId: store.get('vibeClientId' as keyof AppSettings) as string ?? '',
+    agentProvider: (store.get('agentProvider' as keyof AppSettings) as AppSettings['agentProvider']) ?? 'kimi',
     claudeEffort: (store.get('claudeEffort' as keyof AppSettings) as AppSettings['claudeEffort']) ?? 'max',
   };
 }

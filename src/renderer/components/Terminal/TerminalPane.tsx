@@ -31,6 +31,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       cursorBlink: true,
       fontSize: compact ? 11 : 13,
       fontFamily: 'Consolas, "Courier New", monospace',
+      screenReaderMode: false, // Disable hidden textarea that interferes with chat input
       theme: {
         background: '#0f172a',
         foreground: '#e2e8f0',
@@ -401,9 +402,10 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           onClick={(e) => {
             e.stopPropagation();
-            xtermRef.current?.focus();
-            const textarea = terminalRef.current?.querySelector('textarea');
-            if (textarea) textarea.focus();
+            // Only focus terminal on explicit user click, don't steal from other inputs
+            if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+              xtermRef.current?.focus();
+            }
           }}
           onContextMenu={(e) => {
             e.preventDefault();
