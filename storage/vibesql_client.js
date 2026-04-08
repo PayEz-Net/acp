@@ -901,8 +901,9 @@ export class VibeSqlClient {
   }
 
   async getAgentRegistration(agentId) {
+    // Case-insensitive lookup - extract name portion and compare with ILIKE
     const result = await this._query(
-      `SELECT * FROM acp_runtime_registry WHERE agent_id = ${escapeSql(agentId)}`
+      `SELECT * FROM acp_runtime_registry WHERE agent_id ILIKE ${escapeSql(agentId)}`
     );
     if (result.rows.length === 0) return null;
     return rowToCamel(result.rows[0]);
