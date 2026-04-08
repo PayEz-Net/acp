@@ -191,11 +191,12 @@ export default function mailProxyRoutes(
       }
       
       // Mark each unread message as read
+      // Use inbox_id first (cloud API expects this), fall back to message_id
       let markedCount = 0;
       const errors: string[] = [];
       
       for (const msg of unreadMessages) {
-        const msgId = msg.message_id || msg.id;
+        const msgId = msg.inbox_id || msg.message_id || msg.id;
         try {
           const result = await proxyToCloud(cfg, `/inbox/${msgId}/read`, 'POST');
           if (result.status === 200 && result.data?.success) {
