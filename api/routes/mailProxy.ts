@@ -95,10 +95,10 @@ export default function mailProxyRoutes(
     }
   });
 
-  // GET /v1/mail/messages/:id -> idealvibe.online/v1/agentmail/messages/:id
-  router.get('/messages/:id', async (req: Request, res: Response) => {
+  // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
+  router.get('/messages/:message_id', async (req: Request, res: Response) => {
     try {
-      const result = await proxyToCloud(cfg, `/messages/${req.params.id}`, 'GET', req.query as Record<string, any>);
+      const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', req.query as Record<string, any>);
       res.status(result.status).json(result.data);
     } catch (err: any) {
       const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
@@ -151,10 +151,10 @@ export default function mailProxyRoutes(
     }
   });
 
-  // POST /v1/mail/inbox/:id/read -> idealvibe.online/v1/agentmail/inbox/:id/read
-  router.post('/inbox/:id/read', async (req: Request, res: Response) => {
+  // POST /v1/mail/inbox/:inbox_id/read -> idealvibe.online/v1/agentmail/inbox/:inbox_id/read
+  router.post('/inbox/:inbox_id/read', async (req: Request, res: Response) => {
     try {
-      const result = await proxyToCloud(cfg, `/inbox/${req.params.id}/read`, 'POST');
+      const result = await proxyToCloud(cfg, `/inbox/${req.params.inbox_id}/read`, 'POST');
       res.status(result.status).json(result.data);
     } catch (err: any) {
       const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
@@ -190,22 +190,21 @@ export default function mailProxyRoutes(
         return;
       }
       
-      // Mark each unread message as read
-      // Use inbox_id first (cloud API expects this), fall back to message_id
+      // Mark each unread message as read using inbox_id
       let markedCount = 0;
       const errors: string[] = [];
       
       for (const msg of unreadMessages) {
-        const msgId = msg.inbox_id || msg.message_id || msg.id;
+        const inbox_id = msg.inbox_id;
         try {
-          const result = await proxyToCloud(cfg, `/inbox/${msgId}/read`, 'POST');
+          const result = await proxyToCloud(cfg, `/inbox/${inbox_id}/read`, 'POST');
           if (result.status === 200 && result.data?.success) {
             markedCount++;
           } else {
-            errors.push(`Message ${msgId}: ${result.data?.error || 'Unknown error'}`);
+            errors.push(`inbox_id ${inbox_id}: ${result.data?.error || 'Unknown error'}`);
           }
         } catch (err: any) {
-          errors.push(`Message ${msgId}: ${err.message}`);
+          errors.push(`inbox_id ${inbox_id}: ${err.message}`);
         }
       }
       
