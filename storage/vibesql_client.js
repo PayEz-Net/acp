@@ -919,7 +919,7 @@ export class VibeSqlClient {
     const result = await this._query(
       `SELECT name, display_name, role, identity_md, role_md, philosophy_md, communication_md, response_pattern_md, expertise_json, is_active 
        FROM vibe.global_vibe_agents 
-       WHERE name = ${escapeSql(name)} AND is_active = TRUE`
+       WHERE name ILIKE ${escapeSql(name)} AND is_active = TRUE`
     );
     if (result.rows.length === 0) return null;
     return rowToCamel(result.rows[0]);
