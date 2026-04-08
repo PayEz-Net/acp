@@ -38,7 +38,8 @@ export default function messagingRoutes(storage) {
     try {
       req.operationCode = 'msg_inbox';
       const unreadOnly = req.query.unread === 'true';
-      const messages = await getInbox(storage, req.params.agent, { unreadOnly });
+      const sort = req.query.sort || 'newest-unread'; // 'newest' or 'newest-unread'
+      const messages = await getInbox(storage, req.params.agent, { unreadOnly, sort });
       const elapsed = Math.round(performance.now() - req.startTime);
       res.json(success(messages, 'msg_inbox', req.requestId, {
         performance: { response_time_ms: elapsed },

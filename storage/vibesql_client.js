@@ -661,7 +661,7 @@ export class VibeSqlClient {
     return rowToCamel(result.rows[0]);
   }
 
-  async getMessages(filter = {}) {
+  async getMessages(filter = {}, sort = 'newest-unread') {
     const conditions = ['1=1'];
     if (filter.messageType) conditions.push(`message_type = ${escapeSql(filter.messageType)}`);
     if (filter.toAgent) conditions.push(`to_agent = ${escapeSql(filter.toAgent)}`);
@@ -670,8 +670,14 @@ export class VibeSqlClient {
     if (filter.clusterId) conditions.push(`cluster_id = ${escapeSql(filter.clusterId)}`);
     if (filter.isRead !== undefined) conditions.push(`is_read = ${escapeSql(filter.isRead)}`);
     if (filter.isArchived !== undefined) conditions.push(`is_archived = ${escapeSql(filter.isArchived)}`);
+    
+    // Sort options: 'newest' = by date only, 'newest-unread' = unread first, then date
+    const orderBy = sort === 'newest' 
+      ? 'created_at DESC' 
+      : 'is_read ASC, created_at DESC';
+    
     const result = await this._query(
-      `SELECT * FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`
+      `SELECT * FROM messages WHERE ${conditions.join(' AND ')} ORDER BY ${orderBy}`
     );
     return result.rows.map(rowToCamel);
   }
@@ -908,6 +914,16 @@ export class VibeSqlClient {
   }
 
   // --- Agents ---
+
+  async getAgentProfileFromGlobal(name) {
+    const result = await this._query(
+      `SELECT name, display_name, role, identity_md, role_md, philosophy_md, communication_md, response_pattern_md, expertise_json, is_active 
+       FROM vibe.global_vibe_agents 
+       WHERE name = ${escapeSql(name)} AND is_active = TRUE`
+    );
+    if (result.rows.length === 0) return null;
+    return rowToCamel(result.rows[0]);
+  }
 
   async getAgentByName(name) {
     const result = await this._query(

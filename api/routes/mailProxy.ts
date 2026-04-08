@@ -164,6 +164,68 @@ export default function mailProxyRoutes(
     }
   });
 
+  // POST /v1/mail/inbox/:agent/read-all -> Mark all messages as read for agent
+  // This is a local convenience endpoint that batches individual mark-read calls
+  router.post('/inbox/:agent/read-all', async (req: Request, res: Response) => {
+    try {
+      const agentName = req.params.agent;
+      
+      // First, fetch all messages for the agent
+      const inboxResult = await proxyToCloud(cfg, `/inbox/${agentName}`, 'GET', { page: 1, page_size: 100 });
+      
+      if (inboxResult.status !== 200 || !inboxResult.data?.success) {
+        res.status(inboxResult.status).json(inboxResult.data);
+        return;
+      }
+      
+      const messages = inboxResult.data.data?.messages || [];
+      const unreadMessages = messages.filter((m: any) => !m.read_at);
+      
+      if (unreadMessages.length === 0) {
+        res.json({
+          success: true,
+          data: { marked: 0, total: messages.length },
+          message: 'No unread messages to mark'
+        });
+        return;
+      }
+      
+      // Mark each unread message as read
+      let markedCount = 0;
+      const errors: string[] = [];
+      
+      for (const msg of unreadMessages) {
+        const msgId = msg.message_id || msg.id;
+        try {
+          const result = await proxyToCloud(cfg, `/inbox/${msgId}/read`, 'POST');
+          if (result.status === 200 && result.data?.success) {
+            markedCount++;
+          } else {
+            errors.push(`Message ${msgId}: ${result.data?.error || 'Unknown error'}`);
+          }
+        } catch (err: any) {
+          errors.push(`Message ${msgId}: ${err.message}`);
+        }
+      }
+      
+      res.json({
+        success: markedCount > 0,
+        data: { 
+          marked: markedCount, 
+          total: unreadMessages.length,
+          agent: agentName
+        },
+        errors: errors.length > 0 ? errors : undefined,
+        message: `Marked ${markedCount}/${unreadMessages.length} messages as read`
+      });
+    } catch (err: any) {
+      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
+      res.status(502).json(
+        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_mark_all_read', (req as any).requestId)
+      );
+    }
+  });
+
   // GET /v1/mail/agents -> idealvibe.online/v1/agentmail/agents
   router.get('/agents', async (req: Request, res: Response) => {
     try {

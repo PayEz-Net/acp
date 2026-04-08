@@ -15,7 +15,7 @@ export async function sendMail(storage, msg) {
 export async function getInbox(storage, agentName, opts = {}) {
   const filter = { toAgent: agentName, messageType: 'mail', isArchived: false };
   if (opts.unreadOnly) filter.isRead = false;
-  return storage.getMessages(filter);
+  return storage.getMessages(filter, opts.sort);
 }
 
 export async function getMail(storage, id) {

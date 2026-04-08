@@ -42,6 +42,27 @@ export default function agentRoutes(storage: any): Router {
     }
   });
 
+  // GET /v1/agents/:name/profile — get agent persona from global_vibe_agents
+  router.get('/:name/profile', async (req: Request, res: Response) => {
+    try {
+      const name = req.params.name;
+      if (!name || typeof name !== 'string') {
+        res.status(400).json(error('VALIDATION_ERROR', 'name is required', 'agent_profile', (req as any).requestId));
+        return;
+      }
+
+      const profile = await storage.getAgentProfileFromGlobal(name);
+      if (!profile) {
+        res.status(404).json(error('AGENT_NOT_FOUND', `Agent '${name}' not found in global_vibe_agents`, 'agent_profile', (req as any).requestId));
+        return;
+      }
+
+      res.json(success(profile, 'agent_profile', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_profile', (req as any).requestId));
+    }
+  });
+
   // GET /v1/agents/startup-config — active agents sorted by startup_order
   router.get('/startup-config', async (req: Request, res: Response) => {
     try {

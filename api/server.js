@@ -94,19 +94,26 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
-  // Contractor service — resolution logic, pool scanning, timeout, chat integration (v2)
-  const contractorService = new ContractorService(storage, localEventBus, appConfig);
+  // Contractor service — disabled by default (not stable yet)
+  const contractorService = appConfig.enableContractors 
+    ? new ContractorService(storage, localEventBus, appConfig)
+    : null;
 
   // Session manager — auto-spawn contractor sessions (Phase 2b)
-  const contractorSessionManager = new ContractorSessionManager(storage, localEventBus, appConfig);
-  // Orphan detection on startup
-  contractorSessionManager.checkOrphans().then(n => {
-    if (n > 0) logger.info(`[SessionManager] Marked ${n} orphaned contract(s) as expired`);
-  }).catch(() => {});
+  const contractorSessionManager = appConfig.enableContractors
+    ? new ContractorSessionManager(storage, localEventBus, appConfig)
+    : null;
+    
+  // Orphan detection on startup (only if contractors enabled)
+  if (contractorSessionManager) {
+    contractorSessionManager.checkOrphans().then(n => {
+      if (n > 0) logger.info(`[SessionManager] Marked ${n} orphaned contract(s) as expired`);
+    }).catch(() => {});
+  }
 
   // Mail proxy — acp-api signs with HMAC, renderer only needs local bearer token
   // onMailSent callback wired after lifecycleHooks is created (below)
-  // contractorService injected for pre-send contractor resolution
+  // contractorService injected for pre-send contractor resolution (null if disabled)
   let mailSentCallback = null;
   app.use('/v1/mail', mailProxyRoutes(appConfig, (from, subject, to) => {
     if (mailSentCallback) mailSentCallback(from, subject, to);
@@ -186,8 +193,11 @@ export async function createApp(cfg) {
   app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus, storage));
-  app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
-  app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
+  // Contractor routes — only mounted if enabled (disabled by default)
+  if (contractorService && contractorSessionManager) {
+    app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
+    app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
+  }
   app.use('/v1/projects', projectRoutes(storage, localEventBus));
   app.use('/v1/documents', documentRoutes(storage));
   app.use('/v1/agents', agentRoutes(storage));

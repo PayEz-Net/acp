@@ -21,6 +21,7 @@ export const config = {
   vibesqlContainerSecret: process.env.VIBESQL_CONTAINER_SECRET || 'ContainersSuperDevSecret',
   vibesqlDirectUrl: process.env.VIBESQL_DIRECT_URL || process.env.VIBESQL_URL || 'http://10.0.0.93:52411',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',
+  enableContractors: process.env.ENABLE_CONTRACTORS === 'true', // Disabled by default - not stable yet
   partyTickMs: parseInt(process.env.PARTY_TICK_MS ?? '', 10) || 5000,
   autonomyMaxRuntimeHours: parseInt(process.env.AUTONOMY_MAX_RUNTIME_HOURS ?? '', 10) || 4,
   escalationSensitivity: parseInt(process.env.ESCALATION_SENSITIVITY ?? '', 10) || 2,
