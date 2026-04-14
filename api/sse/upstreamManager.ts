@@ -1,4 +1,5 @@
 import type { Config } from '../../config.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 export type AgentSseState = 'connected' | 'reconnecting' | 'failed' | 'stopped';
 
@@ -103,12 +104,30 @@ export class UpstreamSseManager {
     this.start(agents);
   }
 
-  private buildAuthHeaders(): Record<string, string> {
-    return {
-      'X-Vibe-Client-Id': this.cfg.vibeClientId,
-      'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
-      'X-Vibe-User-Id': this.cfg.vibeUserId,
+  /**
+   * Build signed HMAC headers for an SSE connect. The stream endpoint
+   * needs a fresh signature per connect attempt — signatures expire
+   * after 5 minutes on the server, so we always recompute at the
+   * moment of dial. Bearer is layered on top when available so member
+   * routes can resolve a user context, but HMAC is the primary auth.
+   */
+  private async buildStreamAuthHeaders(path: string): Promise<Record<string, string>> {
+    const hmac = signVibeRequest('GET', path, {
+      clientId: this.cfg.vibeClientId,
+      signingKey: this.cfg.vibeHmacKey,
+    });
+    const headers: Record<string, string> = {
+      ...hmac,
+      'X-Vibe-Via': 'idp-proxy',
     };
+    try {
+      const { ensureValidToken } = await import('../auth/tokenManager.js');
+      const token = await ensureValidToken(this.cfg.idpUrl);
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    } catch {
+      // non-fatal — HMAC signature alone is sufficient
+    }
+    return headers;
   }
 
   private async connect(agent: string): Promise<void> {
@@ -121,7 +140,10 @@ export class UpstreamSseManager {
     conn.controller = new AbortController();
 
     const url = `${this.cfg.vibeApiUrl}/v1/agentmail/stream?agent=${agent}`;
-    const headers = this.buildAuthHeaders();
+    // HMAC signature covers the path-only portion (no query string),
+    // signVibeRequest strips it internally but pass the clean path
+    // explicitly for clarity.
+    const headers = await this.buildStreamAuthHeaders('/v1/agentmail/stream');
 
     try {
       const res = await fetch(url, {
@@ -130,6 +152,15 @@ export class UpstreamSseManager {
       });
 
       if (!res.ok) {
+        // 403/404 are terminal — the agent isn't owned by the caller or doesn't
+        // exist at all. Retrying won't help and just burns cycles upstream.
+        // Everything else (500, 502, transient 401 before the forceRefresh kicks
+        // in, etc.) remains retryable.
+        if (res.status === 403 || res.status === 404) {
+          conn.state = 'failed';
+          console.error(`[SSE] ${agent}: terminal HTTP ${res.status} — giving up (not retrying)`);
+          return;
+        }
         throw new Error(`HTTP ${res.status}`);
       }
 

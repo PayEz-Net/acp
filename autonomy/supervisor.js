@@ -1,3 +1,5 @@
+import { signVibeRequest } from '../api/auth/vibeHmac.js';
+
 export class Supervisor {
   constructor(storage, cfg = {}) {
     this._storage = storage;
@@ -416,17 +418,20 @@ export class Supervisor {
     const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
-    const mailHeaders = {
-      'X-Vibe-Client-Id': cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
-      'X-Vibe-Client-Secret': cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
-      'X-Vibe-User-Id': cfg.vibeUserId || '0',
-      'Content-Type': 'application/json',
+    const hmacCfg = {
+      clientId: cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
+      signingKey: cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
     };
 
     try {
-      const sendRes = await fetch(`${vibeApiUrl}/v1/agentmail/send`, {
+      const sendPath = '/v1/agentmail/send';
+      const sendRes = await fetch(`${vibeApiUrl}${sendPath}`, {
         method: 'POST',
-        headers: mailHeaders,
+        headers: {
+          ...signVibeRequest('POST', sendPath, hmacCfg),
+          'X-Vibe-Via': 'idp-proxy',
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
           from_agent: leadAgent,
           to: [leadAgent],
@@ -443,15 +448,24 @@ export class Supervisor {
         const messageId = sendData?.data?.message_id;
         if (messageId) {
           // Fetch inbox to find the inbox_id for this message
-          const inboxRes = await fetch(`${vibeApiUrl}/v1/agentmail/inbox/${leadAgent}?page_size=1`, {
-            headers: mailHeaders,
+          const inboxPath = `/v1/agentmail/inbox/${leadAgent}`;
+          const inboxRes = await fetch(`${vibeApiUrl}${inboxPath}?page_size=1`, {
+            headers: {
+              ...signVibeRequest('GET', inboxPath, hmacCfg),
+              'X-Vibe-Via': 'idp-proxy',
+            },
           });
           const inboxData = await inboxRes.json();
           const entry = inboxData?.data?.messages?.find(m => m.message_id === messageId);
           if (entry?.inbox_id) {
-            await fetch(`${vibeApiUrl}/v1/agentmail/inbox/${entry.inbox_id}/read`, {
+            const readPath = `/v1/agentmail/inbox/${entry.inbox_id}/read`;
+            await fetch(`${vibeApiUrl}${readPath}`, {
               method: 'POST',
-              headers: mailHeaders,
+              headers: {
+                ...signVibeRequest('POST', readPath, hmacCfg),
+                'X-Vibe-Via': 'idp-proxy',
+                'Content-Type': 'application/json',
+              },
             });
           }
         }

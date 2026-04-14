@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 import { ChatPersistence, VibeQueryClient } from '../../chat/persistence.js';
 import type { Config } from '../../config.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 interface PoolProfile {
   name: string;
@@ -111,7 +112,7 @@ export class ContractorService {
     this.storage = storage;
     this.eventBus = eventBus;
     this.cfg = cfg;
-    const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl, vibesqlContainerSecret: cfg.vibesqlContainerSecret });
+    const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl || 'http://localhost', vibesqlContainerSecret: cfg.vibesqlContainerSecret });
     this.chat = new ChatPersistence(db);
   }
 
@@ -423,13 +424,17 @@ export class ContractorService {
    */
   private async updateCloudSlotDisplayName(slot: string, displayName: string): Promise<void> {
     try {
-      const url = `${this.cfg.vibeApiUrl}/v1/agentmail/agents/${encodeURIComponent(slot)}`;
+      const path = `/v1/agentmail/agents/${encodeURIComponent(slot)}`;
+      const url = `${this.cfg.vibeApiUrl}${path}`;
+      const hmac = signVibeRequest('PATCH', path, {
+        clientId: this.cfg.vibeClientId,
+        signingKey: this.cfg.vibeHmacKey,
+      });
       await fetch(url, {
         method: 'PATCH',
         headers: {
-          'X-Vibe-Client-Id': this.cfg.vibeClientId,
-          'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
-          'X-Vibe-User-Id': this.cfg.vibeUserId,
+          ...hmac,
+          'X-Vibe-Via': 'idp-proxy',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ display_name: displayName }),

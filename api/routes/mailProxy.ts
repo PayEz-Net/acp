@@ -3,22 +3,52 @@ import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
 
 /**
- * Builds auth headers for idealvibe.online API.
- * Uses app-level client ID + secret (not HMAC signature — the cloud API
- * accepts these as direct credentials via X-Vibe-Client-Id/Secret).
+ * Build auth headers for an outbound cloud vibe-api proxy call.
+ *
+ * Signs the request with HMAC-SHA256 using the client's signing key
+ * (cfg.vibeHmacKey). Server-side recipe is mirrored in
+ * `api/auth/vibeHmac.ts`; the cloud API validates the signature in
+ * `VibeClientAuthMiddleware.ValidateHmacSignature`. We do NOT use
+ * Bearer auth or X-Vibe-Client-Secret here — Bearer is optional and
+ * layered ON TOP of HMAC by the cloud (for user context on member
+ * routes), while X-Vibe-Client-Secret is the Enterprise-license path
+ * that has a BCrypt-hashed server-stored secret we don't have.
+ *
+ * If the caller also has a valid IDP Bearer token (user session from
+ * the Electron login), we attach it as well so member routes that
+ * need `X-Vibe-User-Id` context still resolve. Purely additive.
  */
-function buildAuthHeaders(cfg: Config): Record<string, string> {
-  return {
-    'X-Vibe-Client-Id': cfg.vibeClientId,
-    'X-Vibe-Client-Secret': cfg.vibeHmacKey,
-    'X-Vibe-User-Id': cfg.vibeUserId,
+async function buildAuthHeaders(
+  cfg: Config,
+  method: 'GET' | 'POST',
+  fullPath: string,
+): Promise<Record<string, string>> {
+  const hmacHeaders = signVibeRequest(method, fullPath, {
+    clientId: cfg.vibeClientId,
+    signingKey: cfg.vibeHmacKey,
+  });
+  const headers: Record<string, string> = {
+    ...hmacHeaders,
+    'X-Vibe-Via': 'idp-proxy',
+    'X-Vibe-User-Id': cfg.vibeUserId || '0',
     'Content-Type': 'application/json',
   };
+  // Attach Bearer if we have a live user session — lets member routes
+  // resolve user context on top of the machine-auth HMAC signature.
+  try {
+    const { ensureValidToken } = await import('../auth/tokenManager.js');
+    const token = await ensureValidToken(cfg.idpUrl);
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } catch {
+    // non-fatal — HMAC alone is valid for any route that doesn't require user context
+  }
+  return headers;
 }
 
 /**
@@ -48,22 +78,25 @@ async function proxyToCloud(
 ): Promise<{ status: number; data: unknown }> {
   const qs = query ? buildQueryString(query) : '';
   const url = `${cfg.vibeApiUrl}${AGENTMAIL_BASE}${path}${qs}`;
-  const headers = buildAuthHeaders(cfg);
+  // HMAC signature is computed over the path-only portion of the URL
+  // (no host, no query string) — see api/auth/vibeHmac.ts for the exact
+  // recipe. signVibeRequest strips the query string internally, but we
+  // pass AGENTMAIL_BASE + path (without qs) here to make that explicit.
+  const signedPath = `${AGENTMAIL_BASE}${path}`;
+
+  const headers = await buildAuthHeaders(cfg, method, signedPath);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
-
   try {
     const opts: RequestInit = {
       method,
       headers,
       signal: controller.signal,
     };
-
     if (body && method === 'POST') {
       opts.body = JSON.stringify(body);
     }
-
     const res = await fetch(url, opts);
     const data = await res.json();
     return { status: res.status, data };
@@ -173,12 +206,13 @@ export default function mailProxyRoutes(
       // First, fetch all messages for the agent
       const inboxResult = await proxyToCloud(cfg, `/inbox/${agentName}`, 'GET', { page: 1, page_size: 100 });
       
-      if (inboxResult.status !== 200 || !inboxResult.data?.success) {
-        res.status(inboxResult.status).json(inboxResult.data);
+      const inboxData = inboxResult.data as any;
+      if (inboxResult.status !== 200 || !inboxData?.success) {
+        res.status(inboxResult.status).json(inboxData);
         return;
       }
       
-      const messages = inboxResult.data.data?.messages || [];
+      const messages = inboxData.data?.messages || [];
       const unreadMessages = messages.filter((m: any) => !m.read_at);
       
       if (unreadMessages.length === 0) {
@@ -198,10 +232,11 @@ export default function mailProxyRoutes(
         const inbox_id = msg.inbox_id;
         try {
           const result = await proxyToCloud(cfg, `/inbox/${inbox_id}/read`, 'POST');
-          if (result.status === 200 && result.data?.success) {
+          const resultData = result.data as any;
+          if (result.status === 200 && resultData?.success) {
             markedCount++;
           } else {
-            errors.push(`inbox_id ${inbox_id}: ${result.data?.error || 'Unknown error'}`);
+            errors.push(`inbox_id ${inbox_id}: ${resultData?.error || 'Unknown error'}`);
           }
         } catch (err: any) {
           errors.push(`inbox_id ${inbox_id}: ${err.message}`);

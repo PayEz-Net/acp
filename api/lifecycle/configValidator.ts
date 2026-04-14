@@ -23,47 +23,25 @@ export async function validateConfig(cfg: Config): Promise<{ ok: boolean; warnin
     logger.warn('config', 'ACP_CALLBACK_PORT not set');
   }
 
-  // Check VibeSQL reachability (3s timeout)
+  // Check idealvibe.online reachability (3s timeout) via the public
+  // /health endpoint — no auth required, no HMAC signing, no risk of
+  // a false-positive "unreachable" warning just because credentials
+  // are misaligned. Previous version hit /v1/agentmail/agents with
+  // X-Vibe-Client-Secret, which (a) was the wrong auth mode entirely
+  // and (b) wouldn't have told us anything about reachability vs
+  // credential state anyway.
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${cfg.vibesqlDirectUrl}/v1/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql: 'SELECT 1' }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (res.ok) {
-      logger.info('config', 'VibeSQL reachable', { url: cfg.vibesqlDirectUrl });
-    } else {
-      warnings.push(`VibeSQL returned HTTP ${res.status}`);
-      logger.warn('config', `VibeSQL returned HTTP ${res.status}`, { url: cfg.vibesqlDirectUrl });
-    }
-  } catch (err: any) {
-    const msg = err.name === 'AbortError' ? 'timeout (3s)' : err.message;
-    warnings.push(`VibeSQL unreachable: ${msg}`);
-    logger.warn('config', `VibeSQL unreachable: ${msg}`, { url: cfg.vibesqlDirectUrl });
-  }
-
-  // Check idealvibe.online reachability (3s timeout)
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${cfg.vibeApiUrl}/v1/agentmail/agents`, {
-      headers: {
-        'X-Vibe-Client-Id': cfg.vibeClientId,
-        'X-Vibe-Client-Secret': cfg.vibeHmacKey,
-        'X-Vibe-User-Id': cfg.vibeUserId,
-      },
+    const res = await fetch(`${cfg.vibeApiUrl}/health`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
     if (res.ok) {
       logger.info('config', 'idealvibe.online reachable', { url: cfg.vibeApiUrl });
     } else {
-      warnings.push(`idealvibe.online returned HTTP ${res.status}`);
-      logger.warn('config', `idealvibe.online returned HTTP ${res.status}`, { url: cfg.vibeApiUrl });
+      warnings.push(`idealvibe.online /health returned HTTP ${res.status}`);
+      logger.warn('config', `idealvibe.online /health returned HTTP ${res.status}`, { url: cfg.vibeApiUrl });
     }
   } catch (err: any) {
     const msg = err.name === 'AbortError' ? 'timeout (3s)' : err.message;

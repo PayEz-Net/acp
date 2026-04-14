@@ -4,6 +4,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { LocalEventBus } from '../sse/localEventBus.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 const RING_BUFFER_SIZE = 100;
 const SSE_THROTTLE_MS = 1000;
@@ -214,13 +215,17 @@ export class ProcessMonitor {
       );
       const mailboxSlot = result.rows?.[0]?.mailbox_slot;
       if (mailboxSlot) {
-        const url = `${this.cfg.vibeApiUrl}/v1/agentmail/send`;
+        const path = '/v1/agentmail/send';
+        const url = `${this.cfg.vibeApiUrl}${path}`;
+        const hmac = signVibeRequest('POST', path, {
+          clientId: this.cfg.vibeClientId,
+          signingKey: this.cfg.vibeHmacKey,
+        });
         await fetch(url, {
           method: 'POST',
           headers: {
-            'X-Vibe-Client-Id': this.cfg.vibeClientId,
-            'X-Vibe-Client-Secret': this.cfg.vibeHmacKey,
-            'X-Vibe-User-Id': this.cfg.vibeUserId,
+            ...hmac,
+            'X-Vibe-Via': 'idp-proxy',
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({

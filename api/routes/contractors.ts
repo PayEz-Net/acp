@@ -3,6 +3,7 @@ import { success, error } from '../response.js';
 import { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import type { Config } from '../../config.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -12,15 +13,19 @@ const PROXY_TIMEOUT_MS = 10_000;
  * Returns the messages array from the response.
  */
 async function fetchCloudInbox(cfg: Config, agentName: string): Promise<any[]> {
-  const url = `${cfg.vibeApiUrl}${AGENTMAIL_BASE}/inbox/${encodeURIComponent(agentName)}?page_size=100`;
+  const path = `${AGENTMAIL_BASE}/inbox/${encodeURIComponent(agentName)}`;
+  const url = `${cfg.vibeApiUrl}${path}?page_size=100`;
+  const hmac = signVibeRequest('GET', path, {
+    clientId: cfg.vibeClientId,
+    signingKey: cfg.vibeHmacKey,
+  });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       headers: {
-        'X-Vibe-Client-Id': cfg.vibeClientId,
-        'X-Vibe-Client-Secret': cfg.vibeHmacKey,
-        'X-Vibe-User-Id': cfg.vibeUserId,
+        ...hmac,
+        'X-Vibe-Via': 'idp-proxy',
       },
       signal: controller.signal,
     });
