@@ -3,52 +3,35 @@ import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
+import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
 
-/**
- * Build auth headers for an outbound cloud vibe-api proxy call.
- *
- * Signs the request with HMAC-SHA256 using the client's signing key
- * (cfg.vibeHmacKey). Server-side recipe is mirrored in
- * `api/auth/vibeHmac.ts`; the cloud API validates the signature in
- * `VibeClientAuthMiddleware.ValidateHmacSignature`. We do NOT use
- * Bearer auth or X-Vibe-Client-Secret here — Bearer is optional and
- * layered ON TOP of HMAC by the cloud (for user context on member
- * routes), while X-Vibe-Client-Secret is the Enterprise-license path
- * that has a BCrypt-hashed server-stored secret we don't have.
- *
- * If the caller also has a valid IDP Bearer token (user session from
- * the Electron login), we attach it as well so member routes that
- * need `X-Vibe-User-Id` context still resolve. Purely additive.
- */
-async function buildAuthHeaders(
+export class NotAuthenticatedError extends Error {
+  constructor() {
+    super('No active IDP session — user must log in via POST /v1/auth/login');
+    this.name = 'NotAuthenticatedError';
+  }
+}
+
+function buildAuthHeaders(
   cfg: Config,
+  token: string,
   method: 'GET' | 'POST',
-  fullPath: string,
-): Promise<Record<string, string>> {
-  const hmacHeaders = signVibeRequest(method, fullPath, {
+  signedPath: string,
+): Record<string, string> {
+  const hmacHeaders = signVibeRequest(method, signedPath, {
     clientId: cfg.vibeClientId,
     signingKey: cfg.vibeHmacKey,
   });
-  const headers: Record<string, string> = {
+  return {
     ...hmacHeaders,
+    'Authorization': `Bearer ${token}`,
     'X-Vibe-Via': 'idp-proxy',
-    'X-Vibe-User-Id': cfg.vibeUserId || '0',
     'Content-Type': 'application/json',
   };
-  // Attach Bearer if we have a live user session — lets member routes
-  // resolve user context on top of the machine-auth HMAC signature.
-  try {
-    const { ensureValidToken } = await import('../auth/tokenManager.js');
-    const token = await ensureValidToken(cfg.idpUrl);
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-  } catch {
-    // non-fatal — HMAC alone is valid for any route that doesn't require user context
-  }
-  return headers;
 }
 
 /**
@@ -78,34 +61,80 @@ async function proxyToCloud(
 ): Promise<{ status: number; data: unknown }> {
   const qs = query ? buildQueryString(query) : '';
   const url = `${cfg.vibeApiUrl}${AGENTMAIL_BASE}${path}${qs}`;
-  // HMAC signature is computed over the path-only portion of the URL
-  // (no host, no query string) — see api/auth/vibeHmac.ts for the exact
-  // recipe. signVibeRequest strips the query string internally, but we
-  // pass AGENTMAIL_BASE + path (without qs) here to make that explicit.
+
+  let token = await ensureValidToken(cfg.idpUrl);
+  if (!token) {
+    throw new NotAuthenticatedError();
+  }
+
   const signedPath = `${AGENTMAIL_BASE}${path}`;
 
-  const headers = await buildAuthHeaders(cfg, method, signedPath);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
-  try {
-    const opts: RequestInit = {
-      method,
-      headers,
-      signal: controller.signal,
-    };
-    if (body && method === 'POST') {
-      opts.body = JSON.stringify(body);
+  const doFetch = async (bearer: string): Promise<{ status: number; data: unknown }> => {
+    const headers = buildAuthHeaders(cfg, bearer, method, signedPath);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const opts: RequestInit = {
+        method,
+        headers,
+        signal: controller.signal,
+      };
+      if (body && method === 'POST') {
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(url, opts);
+      const text = await res.text();
+      if (!text) {
+        return {
+          status: res.status,
+          data: { success: res.ok, data: null },
+        };
+      }
+      try {
+        return { status: res.status, data: JSON.parse(text) };
+      } catch {
+        return {
+          status: res.status,
+          data: {
+            success: false,
+            error: {
+              code: 'UPSTREAM_NON_JSON',
+              message: `Upstream returned non-JSON body (HTTP ${res.status}): ${text.slice(0, 400)}`,
+            },
+          },
+        };
+      }
+    } finally {
+      clearTimeout(timeout);
     }
-    const res = await fetch(url, opts);
-    const data = await res.json();
-    return { status: res.status, data };
-  } finally {
-    clearTimeout(timeout);
+  };
+
+  const firstAttempt = await doFetch(token);
+  if (firstAttempt.status !== 401) {
+    return firstAttempt;
   }
+
+  const refreshed = await forceRefresh(cfg.idpUrl);
+  if (!refreshed) {
+    throw new NotAuthenticatedError();
+  }
+  return doFetch(refreshed);
 }
 
 type MailSentCallback = (fromAgent: string, subject: string, toAgents: string[]) => void;
+
+function sendProxyError(res: Response, req: Request, err: any, operation: string): void {
+  if (err instanceof NotAuthenticatedError) {
+    res.status(401).json(
+      error('NOT_AUTHENTICATED', err.message, operation, (req as any).requestId)
+    );
+    return;
+  }
+  const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
+  res.status(502).json(
+    error('PROXY_ERROR', `Mail proxy failed: ${msg}`, operation, (req as any).requestId)
+  );
+}
 
 export default function mailProxyRoutes(
   cfg: Config,
@@ -121,10 +150,7 @@ export default function mailProxyRoutes(
       const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', req.query as Record<string, any>);
       res.status(result.status).json(result.data);
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_inbox', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_inbox');
     }
   });
 
@@ -134,10 +160,7 @@ export default function mailProxyRoutes(
       const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', req.query as Record<string, any>);
       res.status(result.status).json(result.data);
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_read', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_read');
     }
   });
 
@@ -177,10 +200,7 @@ export default function mailProxyRoutes(
         }
       }
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_send', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_send');
     }
   });
 
@@ -190,10 +210,7 @@ export default function mailProxyRoutes(
       const result = await proxyToCloud(cfg, `/inbox/${req.params.inbox_id}/read`, 'POST');
       res.status(result.status).json(result.data);
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_mark_read', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_mark_read');
     }
   });
 
@@ -254,10 +271,7 @@ export default function mailProxyRoutes(
         message: `Marked ${markedCount}/${unreadMessages.length} messages as read`
       });
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_mark_all_read', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_mark_all_read');
     }
   });
 
@@ -267,10 +281,7 @@ export default function mailProxyRoutes(
       const result = await proxyToCloud(cfg, '/agents', 'GET', req.query as Record<string, any>);
       res.status(result.status).json(result.data);
     } catch (err: any) {
-      const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
-      res.status(502).json(
-        error('PROXY_ERROR', `Mail proxy failed: ${msg}`, 'mail_agents', (req as any).requestId)
-      );
+      sendProxyError(res, req, err, 'mail_agents');
     }
   });
 

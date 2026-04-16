@@ -1,4 +1,5 @@
 import type { Config } from '../../config.js';
+import { ensureValidToken } from '../auth/tokenManager.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
 
 export type AgentSseState = 'connected' | 'reconnecting' | 'failed' | 'stopped';
@@ -104,30 +105,20 @@ export class UpstreamSseManager {
     this.start(agents);
   }
 
-  /**
-   * Build signed HMAC headers for an SSE connect. The stream endpoint
-   * needs a fresh signature per connect attempt — signatures expire
-   * after 5 minutes on the server, so we always recompute at the
-   * moment of dial. Bearer is layered on top when available so member
-   * routes can resolve a user context, but HMAC is the primary auth.
-   */
   private async buildStreamAuthHeaders(path: string): Promise<Record<string, string>> {
+    const token = await ensureValidToken(this.cfg.idpUrl);
+    if (!token) {
+      throw new Error('NO_SESSION');
+    }
     const hmac = signVibeRequest('GET', path, {
       clientId: this.cfg.vibeClientId,
       signingKey: this.cfg.vibeHmacKey,
     });
-    const headers: Record<string, string> = {
+    return {
       ...hmac,
+      'Authorization': `Bearer ${token}`,
       'X-Vibe-Via': 'idp-proxy',
     };
-    try {
-      const { ensureValidToken } = await import('../auth/tokenManager.js');
-      const token = await ensureValidToken(this.cfg.idpUrl);
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-    } catch {
-      // non-fatal — HMAC signature alone is sufficient
-    }
-    return headers;
   }
 
   private async connect(agent: string): Promise<void> {
@@ -140,12 +131,9 @@ export class UpstreamSseManager {
     conn.controller = new AbortController();
 
     const url = `${this.cfg.vibeApiUrl}/v1/agentmail/stream?agent=${agent}`;
-    // HMAC signature covers the path-only portion (no query string),
-    // signVibeRequest strips it internally but pass the clean path
-    // explicitly for clarity.
-    const headers = await this.buildStreamAuthHeaders('/v1/agentmail/stream');
 
     try {
+      const headers = await this.buildStreamAuthHeaders('/v1/agentmail/stream');
       const res = await fetch(url, {
         headers,
         signal: conn.controller.signal,
@@ -195,6 +183,14 @@ export class UpstreamSseManager {
       }
     } catch (err: any) {
       if (err.name === 'AbortError' && !this.running) return; // intentional stop
+
+      if (err.message === 'NO_SESSION') {
+        // No IDP session yet — poll for login without degrading the stream state
+        conn.state = 'reconnecting';
+        console.log(`[SSE] ${agent}: waiting for user login`);
+        conn.reconnectTimer = setTimeout(() => this.connect(agent), 5000);
+        return;
+      }
 
       conn.consecutiveFailures++;
       console.warn(`[SSE] ${agent}: error (${conn.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${err.message}`);

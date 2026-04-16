@@ -88,7 +88,7 @@ export default function projectRoutes(storage: any, eventBus: LocalEventBus): Ro
   // GET /v1/projects/:id — get project detail
   router.get('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_get', (req as any).requestId));
         return;
@@ -107,7 +107,7 @@ export default function projectRoutes(storage: any, eventBus: LocalEventBus): Ro
   // PATCH /v1/projects/:id — update project
   router.patch('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_update', (req as any).requestId));
         return;

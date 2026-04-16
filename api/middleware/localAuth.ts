@@ -19,10 +19,17 @@ interface AgentStorage {
  * Hook endpoints (register/deregister) remain Bearer-only (AC-5).
  * req.agentName is set on all authenticated requests (AC-4).
  */
+/** Public paths that don't require authentication */
+const PUBLIC_PATHS = [
+  '/health',
+  '/v1/auth/login',
+  '/v1/auth/status',
+];
+
 export function localAuth(secret: string | null, storage?: AgentStorage) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    // /health is unauthenticated for startup probes
-    if (req.path === '/health') {
+    // Public paths are unauthenticated
+    if (PUBLIC_PATHS.includes(req.path)) {
       next();
       return;
     }
@@ -32,7 +39,7 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
       next();
       return;
     }
-
+    
     const authHeader = req.headers.authorization;
     const agentHeader = req.headers['x-acp-agent'] as string | undefined;
 
@@ -63,13 +70,14 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
     // --- Agent Identity auth (X-ACP-Agent header — AC-1) ---
     if (agentHeader && storage) {
       try {
-        const reg = await storage.getAgentRegistration(`agent:${agentHeader}`);
+        const agentId = `agent:${agentHeader}`;
+        const reg = await storage.getAgentRegistration(agentId);
         if (reg) {
           (req as any).agentName = agentHeader;
           next();
           return;
         }
-      } catch {
+      } catch (err) {
         // Storage error — fall through to 401
       }
       // Agent name not registered (AC-2)

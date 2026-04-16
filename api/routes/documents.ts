@@ -17,7 +17,7 @@ export default function documentRoutes(storage: any): Router {
   // GET /v1/documents/:id — get single document
   router.get('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_get', (req as any).requestId));
         return;
@@ -36,7 +36,7 @@ export default function documentRoutes(storage: any): Router {
   // PUT /v1/documents/:id — update a document
   router.put('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_update', (req as any).requestId));
         return;
@@ -60,7 +60,7 @@ export default function documentRoutes(storage: any): Router {
   // DELETE /v1/documents/:id — delete a document
   router.delete('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_delete', (req as any).requestId));
         return;

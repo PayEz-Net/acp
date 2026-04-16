@@ -6,7 +6,7 @@ import type { Config } from '../../config.js';
 
 export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus, storage?: any): Router {
   const router = Router();
-  const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl, vibesqlContainerSecret: cfg.vibesqlContainerSecret });
+  const db = new VibeQueryClient({ vibesqlDirectUrl: cfg.vibesqlDirectUrl || 'http://localhost', vibesqlContainerSecret: cfg.vibesqlContainerSecret });
   const chat = new ChatPersistence(db);
 
   // POST /v1/chat/conversations — create conversation

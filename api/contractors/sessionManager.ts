@@ -36,7 +36,7 @@ export class SessionManager {
     this.eventBus = eventBus;
     this.cfg = cfg;
     this.maxConcurrent = parseInt(process.env.ACP_MAX_CONTRACTORS || String(DEFAULT_MAX_CONCURRENT), 10);
-    this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'claude';
+    this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'kimi';
     this.queueTimeoutMin = parseInt(process.env.ACP_QUEUE_TIMEOUT_MINUTES || String(DEFAULT_QUEUE_TIMEOUT_MIN), 10);
     this.processMonitor = new ProcessMonitor(storage, eventBus, cfg, () => this.drainQueue());
 
@@ -121,12 +121,18 @@ Do the work requested. Write your findings and results to stdout. When done, out
 
     // Spawn contractor CLI (cross-platform, no shell — DotNetPert F-3)
     // ACP_CONTRACTOR_CMD env override for test stubs (QAPert requirement)
-    const args = [
-      '--print',
-      '--dangerously-skip-permissions',
-      '--system-prompt', profileContent,
-      '--prompt', taskPrompt,
-    ];
+    const isClaude = this.contractorCmd.includes('claude');
+    const args = isClaude
+      ? [
+          '--print',
+          '--dangerously-skip-permissions',
+          '--system-prompt', profileContent,
+          '--prompt', taskPrompt,
+        ]
+      : [
+          '--print',
+          '--prompt', `${profileContent}\n\n${taskPrompt}`,
+        ];
 
     const child = spawn(this.contractorCmd, args, {
       cwd: workDir,

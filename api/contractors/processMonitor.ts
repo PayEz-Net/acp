@@ -313,13 +313,13 @@ export class ProcessMonitor {
 
   /**
    * Check if a PID is alive. On Windows, uses tasklist with PID filter
-   * and verifies process name contains 'claude' (QAPert F-8: PID reuse).
+   * and verifies process name contains 'kimi' (QAPert F-8: PID reuse).
    */
   private isPidAlive(pid: number): boolean {
     try {
       if (process.platform === 'win32') {
         const output = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: 'utf-8', timeout: 3000 });
-        return output.toLowerCase().includes('claude');
+        return output.toLowerCase().includes('kimi');
       } else {
         process.kill(pid, 0);
         return true;

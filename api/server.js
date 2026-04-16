@@ -1,3 +1,4 @@
+// ACP API server
 import express from 'express';
 import { config } from '../config.js';
 import { SessionManager } from '../agents/session_manager.js';
@@ -35,11 +36,15 @@ import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
 import documentRoutes from './routes/documents.js';
 import agentRoutes from './routes/agents.js';
+import cliProxyRoutes from './routes/cliProxy.js';
+import authRoutes from './routes/auth.js';
+
 import { validateConfig } from './lifecycle/configValidator.js';
 
 const startTime = Date.now();
 
 export async function createApp(cfg) {
+  console.error('[ACP] createApp starting');
   const appConfig = cfg || config;
   const app = express();
 
@@ -54,8 +59,9 @@ export async function createApp(cfg) {
 
   const sessionManager = new SessionManager(appConfig);
   await sessionManager.init();
-  const storage = sessionManager.storage;
-
+  // SessionManager implements the storage interface directly
+  const storage = sessionManager;
+  
   // Local auth — accepts Bearer (renderer) and/or X-ACP-Agent (agents)
   if (appConfig.nodeEnv === 'production' && !appConfig.acpLocalSecret) {
     console.error('[ACP] FATAL: ACP_LOCAL_SECRET not set in production mode');
@@ -64,8 +70,13 @@ export async function createApp(cfg) {
   if (!appConfig.acpLocalSecret) {
     console.warn('[ACP] WARNING: ACP_LOCAL_SECRET not set — Bearer auth disabled, agent identity auth only');
   }
+  
+  // Auth routes - ACP API is the auth hub (mounted BEFORE localAuth so they're public)
+  app.use('/v1/auth', authRoutes());
+  
+  // Apply local auth middleware to all routes after this point
   app.use(localAuth(appConfig.acpLocalSecret || null, storage));
-
+  
   // Health endpoint — unauthenticated, must respond within 1s
   // Storage probe has 500ms timeout to stay within budget
   let lastStorageStatus = 'unknown';
@@ -200,6 +211,7 @@ export async function createApp(cfg) {
   }
   app.use('/v1/projects', projectRoutes(storage, localEventBus));
   app.use('/v1/documents', documentRoutes(storage));
+  // Agent profile lookup (minimal - full management in acp-api-noaccount)
   app.use('/v1/agents', agentRoutes(storage));
 
   // Autonomy supervisor — single instance shared with routes and lifecycle hooks
@@ -208,6 +220,9 @@ export async function createApp(cfg) {
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
+  
+  // CLI proxy routes - forward to IDP
+  app.use(cliProxyRoutes(appConfig));
 
   // Lifecycle hooks — wire party engine, standup, and SSE events
   const lifecycleHooks = new LifecycleHooks({
