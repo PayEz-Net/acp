@@ -39,6 +39,18 @@ export class SessionManager {
     // context is plumbed through to SessionManager.
     this._documents = new Map();
     this._nextDocumentId = 1;
+
+    this._tasks = new Map();
+    this._nextTaskId = 1;
+
+    // Phase 1 stub: autonomy state is in-memory only. Supervisor writes
+    // enabled/stopCondition/unattendedMode/etc. here via updateAutonomyState,
+    // reads via getAutonomyState. Survives a single ACP session; doesn't
+    // persist across restarts (which is actually fine — a restart should
+    // clear unattended mode).
+    this._autonomyState = null;
+    this._standupEntries = [];
+    this._nextStandupEntryId = 1;
   }
 
   async init() {
@@ -224,6 +236,113 @@ export class SessionManager {
     return this._documents.delete(key);
   }
 
+  // -----------------------------------------------------------------------
+  // Autonomy state — Phase 1 in-memory stub.
+  // Backs autonomy/supervisor.js for unattended-mode start/stop/status.
+  // State is a flat object merged by updateAutonomyState; null when
+  // autonomy has never run this session. Doesn't persist across restarts,
+  // which matches the desired behavior (restart = clean slate for unattended).
+  // -----------------------------------------------------------------------
+
+  async getAutonomyState() {
+    return this._autonomyState;
+  }
+
+  async updateAutonomyState(partial) {
+    this._autonomyState = {
+      ...(this._autonomyState ?? {}),
+      ...partial,
+    };
+    return this._autonomyState;
+  }
+
+  // Standup entries — in-memory ring for supervisor status writes.
+  async createStandupEntry(entry) {
+    const id = this._nextStandupEntryId++;
+    const row = {
+      id,
+      created_at: new Date().toISOString(),
+      ...entry,
+    };
+    this._standupEntries.push(row);
+    // Keep the ring bounded so a long unattended run doesn't eat memory.
+    if (this._standupEntries.length > 500) {
+      this._standupEntries.splice(0, this._standupEntries.length - 500);
+    }
+    return id;
+  }
+
+  async listStandupEntries(filter = {}) {
+    let rows = this._standupEntries.slice();
+    if (filter.agent) {
+      rows = rows.filter(r => r.agent === filter.agent);
+    }
+    if (filter.type) {
+      rows = rows.filter(r => r.type === filter.type);
+    }
+    if (filter.limit) {
+      rows = rows.slice(-filter.limit);
+    }
+    return rows;
+  }
+
+  // -----------------------------------------------------------------------
+  // Kanban tasks — Phase 1 in-memory stub.
+  // Backs api/routes/kanban.ts + kanban/board.js so BAPert can fan out the
+  // 11 Phase 1 Sales Refocus tickets. Same TODO as projects/documents:
+  // replace with VibeSQL-backed store once per-request client context is
+  // plumbed through. Contract from kanban/board.js + __tests__/board.test.js.
+  // -----------------------------------------------------------------------
+
+  async createTask(task) {
+    const id = this._nextTaskId++;
+    const now = new Date().toISOString();
+    const row = {
+      id,
+      title: task.title,
+      description: task.description ?? null,
+      status: task.status ?? 'backlog',
+      priority: task.priority ?? 'medium',
+      assignedTo: task.assignedTo ?? null,
+      createdBy: task.createdBy ?? null,
+      specPath: task.specPath ?? null,
+      milestone: task.milestone ?? null,
+      filesChanged: task.filesChanged ?? [],
+      blockers: task.blockers ?? null,
+      created_at: now,
+      updatedAt: null,
+      completedAt: null,
+    };
+    this._tasks.set(id, row);
+    return id;
+  }
+
+  async getTask(id) {
+    const key = Number(id);
+    return this._tasks.get(key) || null;
+  }
+
+  async listTasks(filter = {}) {
+    let rows = Array.from(this._tasks.values());
+    if (filter.status) {
+      const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+      rows = rows.filter(t => statuses.includes(t.status));
+    }
+    if (filter.assignedTo) rows = rows.filter(t => t.assignedTo === filter.assignedTo);
+    if (filter.milestone) rows = rows.filter(t => t.milestone === filter.milestone);
+    if (filter.priority) rows = rows.filter(t => t.priority === filter.priority);
+    return rows;
+  }
+
+  async updateTask(id, updates) {
+    const key = Number(id);
+    const existing = this._tasks.get(key);
+    if (!existing) return null;
+    const next = { ...existing, ...updates };
+    this._tasks.set(key, next);
+    return next;
+  }
+
   get storage() {
     // Return stub storage for compatibility
     const self = this;
@@ -256,6 +375,16 @@ export class SessionManager {
       getDocument: (id) => self.getDocument(id),
       updateDocument: (id, updates) => self.updateDocument(id, updates),
       deleteDocument: (id) => self.deleteDocument(id),
+      // Kanban tasks — forwards to the in-memory Phase 1 stub above.
+      createTask: (data) => self.createTask(data),
+      getTask: (id) => self.getTask(id),
+      listTasks: (filter) => self.listTasks(filter),
+      updateTask: (id, updates) => self.updateTask(id, updates),
+      // Autonomy state + standup entries — forwards to the stubs above.
+      getAutonomyState: () => self.getAutonomyState(),
+      updateAutonomyState: (partial) => self.updateAutonomyState(partial),
+      createStandupEntry: (entry) => self.createStandupEntry(entry),
+      listStandupEntries: (filter) => self.listStandupEntries(filter),
     };
   }
 }
