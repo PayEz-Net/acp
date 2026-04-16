@@ -496,16 +496,22 @@ export class Supervisor {
   // ── Lead Agent DB Operations ─────────────────────────────
 
   /**
-   * Write lead agent designation to DB.
-   * Clears previous team-lead, sets new one.
+   * Mirror lead agent designation to vibe.global_vibe_agents when the
+   * storage backend supports raw SQL. In Phase 1 the in-memory
+   * SessionManager doesn't expose _query, and the authoritative lead is
+   * already in autonomy state (written by startUnattended before this
+   * runs), so we short-circuit silently instead of logging a scary
+   * "Failed to set lead agent in DB" error on every start.
    */
   async _setLeadAgent(agentName) {
+    if (typeof this._storage._query !== 'function') {
+      // In-memory stub: lead is kept in autonomy state, no DB mirror needed.
+      return;
+    }
     try {
-      // Clear previous lead
       await this._storage._query(
         `UPDATE vibe.global_vibe_agents SET role = NULL WHERE role = 'team-lead'`
       );
-      // Set new lead
       await this._storage._query(
         `UPDATE vibe.global_vibe_agents SET role = 'team-lead' WHERE name = '${agentName.replace(/'/g, "''")}'`
       );
