@@ -131,10 +131,14 @@ export class Supervisor {
 
     this.unattendedMode = true;
 
-    // Persist unattended fields
+    // Persist unattended fields — include leadAgent so _getLeadAgent can
+    // find it without a DB query. The underlying vibe.global_vibe_agents
+    // write is also attempted below for parity with the legacy flow, but
+    // the in-memory state is the dependable source of truth.
     await this._storage.updateAutonomyState({
       unattendedMode: true,
       escalationLevel: config.escalationLevel ?? 2,
+      leadAgent: config.leadAgent || null,
     });
 
     // Nightly Kanban: ping the lead agent on interval via agent mail.
@@ -500,10 +504,21 @@ export class Supervisor {
   }
 
   /**
-   * Read lead agent from DB (source of truth).
+   * Read lead agent. Prefers in-memory autonomy state (written at
+   * startUnattended), falls back to vibe.global_vibe_agents when the
+   * storage backend supports raw SQL (it doesn't in the Phase 1 stub).
    */
   async _getLeadAgent() {
+    // In-memory state is the authoritative Phase 1 source — leadAgent was
+    // stored by startUnattended. This avoids the _storage._query dependency
+    // that the in-memory SessionManager doesn't implement.
     try {
+      const state = await this._storage.getAutonomyState();
+      if (state?.leadAgent) return state.leadAgent;
+    } catch { /* fall through to DB path */ }
+
+    try {
+      if (typeof this._storage._query !== 'function') return null;
       const result = await this._storage._query(
         `SELECT name FROM vibe.global_vibe_agents WHERE role = 'team-lead' AND is_active = TRUE LIMIT 1`
       );
