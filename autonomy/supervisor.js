@@ -417,15 +417,18 @@ export class Supervisor {
       taskSummary = '(could not fetch kanban)';
     }
 
-    // Send ping via agent mail
+    // Send ping via agent mail (HMAC service-account path — no IDP session needed).
     const cfg = this._cfg;
     const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
     const hmacCfg = {
-      clientId: cfg.vibeClientId || 'vibe_b2d2aac0315549d9',
-      signingKey: cfg.vibeHmacKey || 'VOmsyIqL4NHGq1V1c4HUhjPLYqpFeNfx',
+      clientId: cfg.vibeClientId,
+      signingKey: cfg.vibeHmacKey,
     };
+    // Service-account mode requires an explicit user id so the cloud vibe-api
+    // can scope the operation. Without it the server rejects with USER_REQUIRED.
+    const userIdHeader = { 'X-Vibe-User-Id': String(cfg.vibeUserId ?? '0') };
 
     try {
       const sendPath = '/v1/agentmail/send';
@@ -433,6 +436,7 @@ export class Supervisor {
         method: 'POST',
         headers: {
           ...signVibeRequest('POST', sendPath, hmacCfg),
+          ...userIdHeader,
           'X-Vibe-Via': 'idp-proxy',
           'Content-Type': 'application/json',
         },
@@ -444,6 +448,12 @@ export class Supervisor {
           importance: 'normal',
         }),
       });
+
+      if (!sendRes.ok) {
+        const errText = await sendRes.text().catch(() => '(unreadable)');
+        console.error(`[Supervisor] Ping send failed: HTTP ${sendRes.status} — ${errText.slice(0, 400)}`);
+        return;
+      }
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
 
       // Mark ping as read so it doesn't clutter the lead agent's unread count
@@ -456,6 +466,7 @@ export class Supervisor {
           const inboxRes = await fetch(`${vibeApiUrl}${inboxPath}?page_size=1`, {
             headers: {
               ...signVibeRequest('GET', inboxPath, hmacCfg),
+              ...userIdHeader,
               'X-Vibe-Via': 'idp-proxy',
             },
           });
@@ -467,6 +478,7 @@ export class Supervisor {
               method: 'POST',
               headers: {
                 ...signVibeRequest('POST', readPath, hmacCfg),
+                ...userIdHeader,
                 'X-Vibe-Via': 'idp-proxy',
                 'Content-Type': 'application/json',
               },
