@@ -1,5 +1,5 @@
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
-export type LogModule = 'auth' | 'mail-proxy' | 'sse' | 'lifecycle' | 'party' | 'autonomy' | 'kanban' | 'chat' | 'server' | 'config' | 'shutdown';
+export type LogModule = 'auth' | 'mail-proxy' | 'sse' | 'lifecycle' | 'party' | 'autonomy' | 'kanban' | 'chat' | 'server' | 'config' | 'shutdown' | 'byok';
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = { error: 0, warn: 1, info: 2, debug: 3 };
 
@@ -9,6 +9,38 @@ interface LogEntry {
   module: LogModule;
   message: string;
   data?: Record<string, unknown>;
+}
+
+// Case-insensitive deny-list. Any `data` field whose key (at any nesting depth)
+// matches one of these is masked to '[REDACTED]' before emit. Protects the
+// BYOK privacy-copy claim on /privacy and the §11 audit envelope: provider
+// request/response bodies and auth material never reach stdout.
+const REDACT_FIELDS: ReadonlySet<string> = new Set([
+  'key',
+  'api_key',
+  'apikey',
+  'authorization',
+  'x-api-key',
+  'x-anthropic-api-key',
+  'x-moonshot-api-key',
+  'access_token',
+  'refresh_token',
+  'password',
+  'secret',
+  'client_secret',
+]);
+
+const REDACTED = '[REDACTED]' as const;
+
+function redact(value: unknown, depth = 0): unknown {
+  if (depth > 8) return value;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = REDACT_FIELDS.has(k.toLowerCase()) ? REDACTED : redact(v, depth + 1);
+  }
+  return out;
 }
 
 let currentLevel: LogLevel = 'info';
@@ -22,8 +54,11 @@ function shouldLog(level: LogLevel): boolean {
 }
 
 function emit(entry: LogEntry): void {
-  const line = JSON.stringify(entry);
-  if (entry.level === 'error') {
+  const safe: LogEntry = entry.data
+    ? { ...entry, data: redact(entry.data) as Record<string, unknown> }
+    : entry;
+  const line = JSON.stringify(safe);
+  if (safe.level === 'error') {
     process.stderr.write(line + '\n');
   } else {
     process.stdout.write(line + '\n');
