@@ -38,6 +38,7 @@ import documentRoutes from './routes/documents.js';
 import agentRoutes from './routes/agents.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
+import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
 
 import { validateConfig } from './lifecycle/configValidator.js';
 
@@ -73,7 +74,11 @@ export async function createApp(cfg) {
   
   // Auth routes - ACP API is the auth hub (mounted BEFORE localAuth so they're public)
   app.use('/v1/auth', authRoutes());
-  
+  // Magic-link email forwarder (Phase 1 hot-patch, backfilled from
+  // acp-stable-api e265ffd/8dccbbe for QAPert's ACP→IDP round-trip smoke).
+  // No /issue or /redeem in this repo; just the one thin /email pass-through.
+  app.use('/v1/auth/magic-link', magicLinkEmailRoutes());
+
   // Apply local auth middleware to all routes after this point
   app.use(localAuth(appConfig.acpLocalSecret || null, storage));
   
