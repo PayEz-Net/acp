@@ -4,6 +4,7 @@ import { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import type { Config } from '../../config.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
+import { resolveCliPath, cliMissingEnvelope } from '../contractors/cliResolver.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -56,6 +57,24 @@ export default function contractorRoutes(contractorService: ContractorService, c
       if (!profile_name || !assignment || !assigner) {
         res.status(400).json(error('INVALID_REQUEST', 'profile_name, assignment, and assigner are required', 'contractor_hire', (req as any).requestId));
         return;
+      }
+
+      // AC-1 (BAPert msg 283): pre-hire CLI discovery. If auto_spawn is enabled
+      // and the vendor CLI is not on PATH, fail loud BEFORE creating a contract
+      // row or conversation. Do NOT persist state we can't spawn.
+      if (auto_spawn !== false && process.env.ACP_SKIP_CLI_CHECK !== '1') {
+        const expectedCmd = process.env.ACP_CONTRACTOR_CMD || 'claude';
+        if (!resolveCliPath(expectedCmd)) {
+          const envelope = cliMissingEnvelope(expectedCmd);
+          res.status(400).json(error(
+            'onboarding.cli_missing',
+            `CLI not on PATH: ${expectedCmd}`,
+            'contractor_hire',
+            (req as any).requestId,
+            envelope.details,
+          ));
+          return;
+        }
       }
 
       const result = await contractorService.hire({

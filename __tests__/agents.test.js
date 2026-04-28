@@ -164,6 +164,41 @@ describe('POST /v1/agents/hire', () => {
     expect(res.body.data.name).toBe('DevOpsPert');
   });
 
+  test('creates agent from template_name with fallback fields', async () => {
+    mockFetchResponses.push(makeVibeResponse([])); // existing name check empty
+    // Pool query returns a matching template
+    mockFetchResponses.push(makeVibeResponse([
+      { data: JSON.stringify({ name: 'architect', display_name: 'Architect', description: 'Arch desc', model: 'opus', tools_json: ['Read'] }) },
+    ]));
+    mockFetchResponses.push(makeVibeResponse([
+      { id: 8, name: 'ArchPert', display_name: 'Architect', role: 'arch', is_active: true },
+    ]));
+
+    const res = await request(app)
+      .post('/v1/agents/hire')
+      .set(authHeaders())
+      .send({ name: 'ArchPert', template_name: 'architect', is_active: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.name).toBe('ArchPert');
+  });
+
+  test('falls back to body fields when template_name not found', async () => {
+    mockFetchResponses.push(makeVibeResponse([])); // existing check empty
+    mockFetchResponses.push(makeVibeResponse([])); // pool query returns nothing
+    mockFetchResponses.push(makeVibeResponse([
+      { id: 9, name: 'CustomPert', display_name: 'Custom', role: 'custom', is_active: true },
+    ]));
+
+    const res = await request(app)
+      .post('/v1/agents/hire')
+      .set(authHeaders())
+      .send({ name: 'CustomPert', template_name: 'nonexistent', is_active: true, role: 'custom' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.name).toBe('CustomPert');
+  });
+
   test('returns 409 when name exists', async () => {
     mockFetchResponses.push(makeVibeResponse([{ id: 1 }]));
     const res = await request(app)
@@ -196,6 +231,18 @@ describe('PUT /v1/agents/startup-order', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.updated).toBe(2);
+  });
+
+  test('returns 500 when VibeSQL update fails', async () => {
+    mockFetchResponses.push({ success: false, error: { message: 'plpgsql error' }, data: [] });
+
+    const res = await request(app)
+      .put('/v1/agents/startup-order')
+      .set(authHeaders())
+      .send({ order: [{ agent_id: 1, startup_order: 0 }] });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error.code).toBe('INTERNAL_ERROR');
   });
 
   test('rejects empty order array', async () => {
@@ -351,6 +398,16 @@ describe('GET /v1/agents/:identifier/profile', () => {
     const res = await request(app).get('/v1/agents/Aurum/profile').set(authHeaders());
     expect(res.status).toBe(200);
     expect(res.body.data.name).toBe('Aurum');
+  });
+
+  test('looks up by name with apostrophe without double-escaping', async () => {
+    mockFetchResponses.push(makeVibeResponse([
+      { id: 3, name: "O'Brien", display_name: "O'Brien", role: 'ops', identity_md: '# ID', is_active: true },
+    ]));
+
+    const res = await request(app).get("/v1/agents/O'Brien/profile").set(authHeaders());
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe("O'Brien");
   });
 
   test('falls back to storage for unknown agent', async () => {

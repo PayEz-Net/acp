@@ -4,6 +4,25 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 import { ProcessMonitor } from './processMonitor.js';
+import { resolveCliPath, cliMissingEnvelope } from './cliResolver.js';
+import { safeChildEnv } from './safeChildEnv.js';
+
+/**
+ * Thrown when a pre-spawn CLI discovery (AC-1) fails. Caller should catch
+ * this, surface `onboarding.cli_missing` to the user, and NOT persist any
+ * contract/team state.
+ */
+export class CliMissingError extends Error {
+  readonly code = 'onboarding.cli_missing';
+  readonly expected_cmd: string;
+  readonly install_url: string;
+  constructor(expected_cmd: string, install_url: string) {
+    super(`CLI not on PATH: ${expected_cmd}`);
+    this.name = 'CliMissingError';
+    this.expected_cmd = expected_cmd;
+    this.install_url = install_url;
+  }
+}
 
 const DEFAULT_MAX_CONCURRENT = 2;
 const DEFAULT_QUEUE_TIMEOUT_MIN = 30;
@@ -36,7 +55,7 @@ export class SessionManager {
     this.eventBus = eventBus;
     this.cfg = cfg;
     this.maxConcurrent = parseInt(process.env.ACP_MAX_CONTRACTORS || String(DEFAULT_MAX_CONCURRENT), 10);
-    this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'kimi';
+    this.contractorCmd = process.env.ACP_CONTRACTOR_CMD || 'claude';
     this.queueTimeoutMin = parseInt(process.env.ACP_QUEUE_TIMEOUT_MINUTES || String(DEFAULT_QUEUE_TIMEOUT_MIN), 10);
     this.processMonitor = new ProcessMonitor(storage, eventBus, cfg, () => this.drainQueue());
 
@@ -134,13 +153,28 @@ Do the work requested. Write your findings and results to stdout. When done, out
           '--prompt', `${profileContent}\n\n${taskPrompt}`,
         ];
 
+    // AC-1 (BAPert msg 283): pre-spawn PATH check. If the vendor CLI is not
+    // installed, fail loud before `spawn()` so the route handler can undo
+    // any contract state and return `onboarding.cli_missing`. This defends
+    // against the original failure mode where child.on('error') collapsed
+    // ENOENT into a generic exit-1 after the DB row was already live.
+    // Skippable in unit-test harnesses — set ACP_SKIP_CLI_CHECK=1.
+    if (process.env.ACP_SKIP_CLI_CHECK !== '1') {
+      const resolved = resolveCliPath(this.contractorCmd);
+      if (!resolved) {
+        const envelope = cliMissingEnvelope(this.contractorCmd);
+        throw new CliMissingError(envelope.details.expected_cmd, envelope.details.install_url);
+      }
+    }
+
+    // AC-2 (BAPert msg 283): narrow the subprocess env to an allowlist so a
+    // `--verbose` vendor CLI cannot echo ACP_LOCAL_SECRET / VAULT_API_TOKEN
+    // / VIBESQL_CONTAINER_SECRET into its stdout/stderr. `ACP_CONVERSATION_ID`
+    // is still injected — the CLI-side contract is unchanged.
     const child = spawn(this.contractorCmd, args, {
       cwd: workDir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ACP_CONVERSATION_ID: conversationId,
-      },
+      env: safeChildEnv({ ACP_CONVERSATION_ID: conversationId }),
       windowsHide: true,
     });
 
@@ -195,6 +229,16 @@ Do the work requested. Write your findings and results to stdout. When done, out
       this.processMonitor.hasRunningSession(row.contractor_name)
     ) {
       return; // Still at capacity
+    }
+
+    // AC-7 (BAPert msg 283): reattach recheck. If CLI was uninstalled since
+    // the original spawn, fail with cli_missing instead of stale reattach.
+    if (process.env.ACP_SKIP_CLI_CHECK !== '1') {
+      const resolved = resolveCliPath(this.contractorCmd);
+      if (!resolved) {
+        const envelope = cliMissingEnvelope(this.contractorCmd);
+        throw new CliMissingError(envelope.details.expected_cmd, envelope.details.install_url);
+      }
     }
 
     // Spawn it

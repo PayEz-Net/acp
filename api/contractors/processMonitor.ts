@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
+import { scrubOutput, buildDefaultScrubContext } from './outputScrubber.js';
 
 const RING_BUFFER_SIZE = 100;
 const SSE_THROTTLE_MS = 1000;
@@ -95,7 +96,16 @@ export class ProcessMonitor {
 
   private appendOutput(tracked: TrackedProcess, text: string, stream: 'stdout' | 'stderr'): void {
     const lines = text.split('\n').filter(l => l.length > 0);
-    for (const line of lines) {
+    for (const rawLine of lines) {
+      // AC-2 (BAPert msg 283): scrub secrets and home paths from captured
+      // output before it reaches SSE, DB, or logs. Fail-open: if scrubber
+      // throws, log and push raw line. Liveness > exactness.
+      let line = rawLine;
+      try {
+        line = scrubOutput(rawLine, buildDefaultScrubContext());
+      } catch (err) {
+        console.error('[ProcessMonitor] scrubOutput failed:', err);
+      }
       tracked.outputLines.push(line);
       // Ring buffer: trim to max size
       if (tracked.outputLines.length > RING_BUFFER_SIZE) {
@@ -319,7 +329,7 @@ export class ProcessMonitor {
     try {
       if (process.platform === 'win32') {
         const output = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: 'utf-8', timeout: 3000 });
-        return output.toLowerCase().includes('kimi');
+        return output.toLowerCase().includes('claude');
       } else {
         process.kill(pid, 0);
         return true;

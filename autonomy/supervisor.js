@@ -456,38 +456,13 @@ export class Supervisor {
       }
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
 
-      // Mark ping as read so it doesn't clutter the lead agent's unread count
-      try {
-        const sendData = await sendRes.json();
-        const messageId = sendData?.data?.message_id;
-        if (messageId) {
-          // Fetch inbox to find the inbox_id for this message
-          const inboxPath = `/v1/agentmail/inbox/${leadAgent}`;
-          const inboxRes = await fetch(`${vibeApiUrl}${inboxPath}?page_size=1`, {
-            headers: {
-              ...signVibeRequest('GET', inboxPath, hmacCfg),
-              ...userIdHeader,
-              'X-Vibe-Via': 'idp-proxy',
-            },
-          });
-          const inboxData = await inboxRes.json();
-          const entry = inboxData?.data?.messages?.find(m => m.message_id === messageId);
-          if (entry?.inbox_id) {
-            const readPath = `/v1/agentmail/inbox/${entry.inbox_id}/read`;
-            await fetch(`${vibeApiUrl}${readPath}`, {
-              method: 'POST',
-              headers: {
-                ...signVibeRequest('POST', readPath, hmacCfg),
-                ...userIdHeader,
-                'X-Vibe-Via': 'idp-proxy',
-                'Content-Type': 'application/json',
-              },
-            });
-          }
-        }
-      } catch {
-        // Non-critical — ping was sent, mark-read is best-effort
-      }
+      // NOTE: Do NOT auto-mark the ping as read here. The inbox-poll push
+      // channels (acp-mail-channel.js for Claude, the Kimi/Codex PTY poller
+      // in acp-desktop/src/main/pty.ts) only surface UNREAD mail. Marking
+      // the ping read immediately after send hides it from the channel
+      // push path, which is why "he got the mail but not the notification"
+      // happened. Leave it unread; the lead agent marks it read when they
+      // act on it, same as any normal mail.
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
     }

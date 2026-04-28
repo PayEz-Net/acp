@@ -100,7 +100,7 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
       const agents = (vsql.data || []).map(rowToCamel);
-      res.json(success({ agents, total: agents.length, active_count: agents.length }, 'agent_startup_config', (req as any).requestId));
+      res.json(success({ agents, active_count: agents.length }, 'agent_startup_config', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_startup_config', (req as any).requestId));
     }
@@ -178,7 +178,7 @@ export default function agentRoutes(_storage: any): Router {
       const trimmedName = name.trim();
 
       // Check if name already exists (including soft-deleted — unique constraint)
-      const existing = await queryVibeSql(`SELECT id FROM vibe_agents.agents WHERE name = ${escapeSql(trimmedName)}`);
+      const existing = await queryVibeSql(`SELECT id FROM vibe_agents.agents WHERE name = ${escapeSql(trimmedName)} AND deleted_at IS NULL`);
       if (existing.success && existing.data?.length) {
         res.status(409).json(error('CONFLICT', 'Agent with that name already exists', 'agent_hire', (req as any).requestId));
         return;
@@ -257,7 +257,11 @@ export default function agentRoutes(_storage: any): Router {
         `UPDATE vibe_agents.agents SET startup_order = ${escapeSql(parseInt(entry.startup_order, 10))}, updated_at = NOW() WHERE id = ${escapeSql(parseInt(entry.agent_id, 10))};`
       ).join('\n');
 
-      await queryVibeSql(`DO $$ BEGIN ${updates} END $$`);
+      const vsql = await queryVibeSql(`DO $$ BEGIN ${updates} END $$`);
+      if (!vsql.success) {
+        res.status(500).json(error('INTERNAL_ERROR', vsql.error?.message || 'Startup order update failed', 'agent_startup_order', (req as any).requestId));
+        return;
+      }
       res.json(success({ updated: order.length }, 'agent_startup_order', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_startup_order', (req as any).requestId));
@@ -372,8 +376,8 @@ export default function agentRoutes(_storage: any): Router {
           agentsCreated.push({ id: check.data[0].id, name: check.data[0].name, display_name: check.data[0].display_name });
         } else {
           const insert = await queryVibeSql(
-            `INSERT INTO vibe_agents.agents (name, display_name, role, is_active, capabilities, safety_rules)
-             VALUES (${escapeSql(agent.name)}, ${escapeSql(agent.display_name)}, ${escapeSql(agent.role)}, true, '{}'::jsonb, '[]'::jsonb)
+            `INSERT INTO vibe_agents.agents (name, display_name, role, is_active, capabilities, safety_rules, updated_at)
+             VALUES (${escapeSql(agent.name)}, ${escapeSql(agent.display_name)}, ${escapeSql(agent.role)}, true, '{}'::jsonb, '[]'::jsonb, NOW())
              RETURNING id, name, display_name`
           );
           if (insert.success && insert.data?.length) {
@@ -414,7 +418,7 @@ export default function agentRoutes(_storage: any): Router {
       } else {
         sql = `SELECT id, name, display_name, role, identity_md, role_md, philosophy_md, communication_md, response_pattern_md, expertise_json, is_active, capabilities, safety_rules
                FROM vibe_agents.agents
-               WHERE name = ${escapeSql(identifier.replace(/'/g, "''"))} AND is_active = true LIMIT 1`;
+               WHERE name = ${escapeSql(identifier)} AND is_active = true LIMIT 1`;
       }
 
       const vsqlRes = await queryVibeSql(sql);
