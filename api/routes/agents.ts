@@ -376,13 +376,10 @@ export default function agentRoutes(_storage: any): Router {
         isNewlyCreated = true;
       }
 
-      // Ensure 5 default agents exist in vibe_agents.agents
+      // Ensure 2 default agents exist in vibe_agents.agents (universal pair)
       const defaultAgents = [
-        { name: 'Aurum', display_name: 'Platform Architect and Operations', role: 'platform-architect' },
         { name: 'BAPert', display_name: 'Business Analyst and Product Strategist', role: 'team-lead' },
-        { name: 'NextPert', display_name: 'Next.js Frontend Specialist', role: 'frontend-developer' },
         { name: 'QAPert', display_name: 'QA Analyst Specialist', role: 'qa-analyst' },
-        { name: 'DotNetPert', display_name: '.NET Backend Specialist', role: 'backend-developer' },
       ];
 
       const agentsCreated: Array<{ id: number; name: string; display_name: string }> = [];

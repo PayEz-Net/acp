@@ -321,8 +321,8 @@ describe('POST /v1/agents/init-project', () => {
   test('creates project on first call (201)', async () => {
     mockFetchResponses.push(makeVibeResponse([])); // no existing project
     mockFetchResponses.push(makeVibeResponse([{ id: 42 }])); // create project
-    // 5 default agents exist
-    for (let i = 0; i < 5; i++) {
+    // 2 default agents exist (BAPert + QAPert)
+    for (let i = 0; i < 2; i++) {
       mockFetchResponses.push(makeVibeResponse([{ id: i + 1, name: `Agent${i}`, display_name: `Agent ${i}` }]));
     }
 
@@ -333,12 +333,12 @@ describe('POST /v1/agents/init-project', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.project_name).toBe('jon-project');
     expect(res.body.data.isNewlyCreated).toBe(true);
-    expect(res.body.data.agents).toHaveLength(5);
+    expect(res.body.data.agents).toHaveLength(2);
   });
 
   test('returns existing project on repeat (200)', async () => {
     mockFetchResponses.push(makeVibeResponse([{ id: 42, name: 'jon-project' }]));
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 2; i++) {
       mockFetchResponses.push(makeVibeResponse([{ id: i + 1, name: `Agent${i}`, display_name: `Agent ${i}` }]));
     }
 
@@ -353,7 +353,7 @@ describe('POST /v1/agents/init-project', () => {
   test('allows project_name override', async () => {
     mockFetchResponses.push(makeVibeResponse([]));
     mockFetchResponses.push(makeVibeResponse([{ id: 99 }]));
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 2; i++) {
       mockFetchResponses.push(makeVibeResponse([{ id: i + 1, name: `Agent${i}`, display_name: `Agent ${i}` }]));
     }
 
