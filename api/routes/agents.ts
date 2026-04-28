@@ -82,6 +82,19 @@ function getBearerEmail(req: Request): string | null {
   return null;
 }
 
+function getBearerIdentity(req: Request): { email: string | null; sub: string | null; clientId: number | null } {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return { email: null, sub: null, clientId: null };
+  const token = authHeader.slice(7);
+  const payload = decodeJwtPayload(token);
+  const email = payload && typeof payload.email === 'string' ? payload.email : null;
+  const sub = payload && typeof payload.sub === 'string' ? payload.sub : null;
+  // Some IDPs put client_id in the JWT as a string or number claim
+  const clientIdClaim = payload?.client_id ?? payload?.clientId ?? payload?.tenant;
+  const clientId = typeof clientIdClaim === 'number' ? clientIdClaim : typeof clientIdClaim === 'string' ? parseInt(clientIdClaim, 10) || null : null;
+  return { email, sub, clientId };
+}
+
 // ── Route factory ──────────────────────────────────────────────────────────
 
 export default function agentRoutes(_storage: any): Router {
@@ -323,7 +336,10 @@ export default function agentRoutes(_storage: any): Router {
   // POST /v1/agents/init-project
   router.post('/init-project', async (req: Request, res: Response) => {
     try {
-      const email = getBearerEmail(req);
+      const identity = getBearerIdentity(req);
+      const email = identity.email;
+      const userId = identity.sub ? parseInt(identity.sub, 10) : null;
+      const clientId = identity.clientId ?? parseInt(process.env.VIBE_CLIENT_ID || '8', 10);
       const { project_name } = req.body || {};
 
       let derivedName = project_name;
@@ -336,9 +352,9 @@ export default function agentRoutes(_storage: any): Router {
         derivedName = `${localPart}-project`;
       }
 
-      // Check for existing project in public.projects
+      // Check for existing project in vibe_projects.projects (unified with frontend)
       const existingProject = await queryVibeSql(
-        `SELECT id, name FROM public.projects WHERE name = ${escapeSql(derivedName)} LIMIT 1`
+        `SELECT id, name FROM vibe_projects.projects WHERE name = ${escapeSql(derivedName)} AND deleted_at IS NULL LIMIT 1`
       );
 
       let projectId: number;
@@ -348,7 +364,9 @@ export default function agentRoutes(_storage: any): Router {
         projectId = existingProject.data[0].id;
       } else {
         const createProject = await queryVibeSql(
-          `INSERT INTO public.projects (name, description, status) VALUES (${escapeSql(derivedName)}, ${escapeSql('Auto-provisioned project')}, 'active') RETURNING id`
+          `INSERT INTO vibe_projects.projects (name, description, is_active, client_id, created_by, updated_by)
+           VALUES (${escapeSql(derivedName)}, ${escapeSql('Auto-provisioned project')}, true, ${escapeSql(clientId)}, ${escapeSql(userId)}, ${escapeSql(userId)})
+           RETURNING id`
         );
         if (!createProject.success || !createProject.data?.length) {
           res.status(500).json(error('INTERNAL_ERROR', createProject.error?.message || 'Project creation failed', 'agent_init_project', (req as any).requestId));
