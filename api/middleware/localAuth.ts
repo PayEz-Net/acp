@@ -24,6 +24,7 @@ const PUBLIC_PATHS = [
   '/health',
   '/v1/auth/login',
   '/v1/auth/status',
+  '/v1/agents/init-project',
 ];
 
 export function localAuth(secret: string | null, storage?: AgentStorage) {
