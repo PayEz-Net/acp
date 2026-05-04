@@ -65,6 +65,50 @@ export default function authRoutes(): Router {
     }
   });
 
+  // POST /v1/auth/external-session — Persist a session built from
+  // externally-acquired IDP tokens (e.g. renderer OAuth flow that hit IDP
+  // directly). Reuses the same tokenManager session storage as /login so
+  // every downstream consumer (mail proxy, refresh, status) sees a unified
+  // session regardless of how the user signed in.
+  //
+  // Local-only gate (same shape as /v1/auth/token) — only the Electron main
+  // process should call this.
+  router.post('/external-session', async (req: Request, res: Response) => {
+    const clientIp = req.ip || req.socket.remoteAddress;
+    if (clientIp !== '127.0.0.1' && clientIp !== '::1' && !clientIp?.includes('::ffff:127.0.0.1')) {
+      res.status(403).json(error('FORBIDDEN', 'External-session endpoint only accessible locally', 'auth_external_session', (req as any).requestId));
+      return;
+    }
+
+    try {
+      const { access_token, refresh_token, user } = req.body || {};
+
+      if (!access_token || !user?.user_id || !user?.email) {
+        res.status(400).json(error('VALIDATION_ERROR', 'access_token + user.user_id + user.email required', 'auth_external_session', (req as any).requestId));
+        return;
+      }
+
+      // setSession derives expiresAt from the JWT's exp claim; the value
+      // we pass here is just a fallback in case decoding fails.
+      setSession({
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        expiresAt: new Date(Date.now() + 3600 * 1000),
+        userId: String(user.user_id),
+        email: user.email,
+      });
+
+      const session = getSession();
+      res.json(success({
+        user_id: session?.userId,
+        email: session?.email,
+        expires_at: session?.expiresAt,
+      }, 'auth_external_session', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'auth_external_session', (req as any).requestId));
+    }
+  });
+
   // POST /v1/auth/logout
   router.post('/logout', async (req: Request, res: Response) => {
     try {
