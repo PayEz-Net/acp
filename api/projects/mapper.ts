@@ -67,6 +67,33 @@ export interface CloudProjectMemberDto {
   is_active: boolean;
 }
 
+/**
+ * Cloud `ProjectTeamMemberDto` (Wave A `vibe_projects.project_team_members`,
+ * joined with `vibe_agents.agents` on agent_id) — per-project agent record
+ * with override fields. Distinct from `CloudProjectMemberDto` which is
+ * people-membership; this is the agent-team record.
+ */
+export interface CloudProjectTeamMemberDto {
+  agent_id: number;
+  agent_name: string;
+  agent_display_name: string | null;
+  canonical_role: string | null;
+  role: string | null;
+  runtime_override: RuntimeId | null;
+  work_dir_override: string | null;
+  position_hint: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null;
+  is_lead: boolean;
+  added_at: string;
+  added_by: number | null;
+}
+
+/**
+ * Wire shape for `GET /v1/projects/:id/team`. Pass-through of cloud DTO —
+ * no field renames or null-collapsing. FE settings panel + Wave C
+ * instantiation lifecycle both consume this shape directly.
+ */
+export type MappedProjectTeamMember = CloudProjectTeamMemberDto;
+
 export interface MappedProject {
   id: number;
   owner_user_id: number;
@@ -178,4 +205,30 @@ export function extractAndMapDetail(cloudPayload: unknown): {
   const project = data.project ? mapCloudProject(data.project) : null;
   const members = Array.isArray(data.members) ? data.members : [];
   return { project, members };
+}
+
+/**
+ * For `GET /v1/projects/:id/team` — returns the agent-team roster ordered
+ * by `is_lead DESC, agent_name ASC` (server-side per DotNetPert msg 987).
+ * Pass-through — null fields preserved on the wire so FE settings panel
+ * can render "inherits ..." italic for null override slots.
+ */
+export function extractAndMapTeam(cloudPayload: unknown): {
+  project_id: number | null;
+  team: MappedProjectTeamMember[];
+} {
+  const data = (cloudPayload as any)?.data ?? {};
+  const project_id = typeof data.project_id === 'number' ? data.project_id : null;
+  const team = Array.isArray(data.team) ? (data.team as MappedProjectTeamMember[]) : [];
+  return { project_id, team };
+}
+
+/**
+ * For `PUT /v1/projects/:id/team/:agent_id` writeback — extracts the
+ * single team_member echo. Cloud returns `{ team_member: ProjectTeamMemberDto }`.
+ */
+export function extractTeamMemberEcho(cloudPayload: unknown): MappedProjectTeamMember | null {
+  const data = (cloudPayload as any)?.data ?? {};
+  const tm = data.team_member;
+  return tm && typeof tm === 'object' ? (tm as MappedProjectTeamMember) : null;
 }

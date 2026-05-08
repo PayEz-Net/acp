@@ -1,19 +1,31 @@
 /**
- * Wave 2 + post-rename: in-memory soft cache for project sync surface.
- *
- * Two-slot store keyed by IDP user_id, both 60s TTL:
- *   - `list`    — full project list per developer
- *   - `current` — current-project pointer per developer
+ * Wave 2 + post-rename + Wave B Ship B: in-memory soft cache for project
+ * sync surface. Three slots:
+ *   - `list`    — full project list per developer (keyed by user_id)
+ *   - `current` — current-project pointer per developer (keyed by user_id)
+ *   - `team`    — per-project team roster (keyed by user_id:project_id —
+ *                  cloud auth-checks owner/member, so per-(user, project)
+ *                  caching avoids cross-user cache leaks even though the
+ *                  underlying team is project-scoped not user-scoped)
  *
  *   getFresh()  honors TTL — returns null past 60s.
  *   getStale()  ignores TTL — used as the cloud-unreachable fallback.
  *
- * Cache invalidation on writeback (POST→PUT bridge) clears `current` for
- * the user; `list` is left intact since switching focus doesn't change
- * membership.
+ * Cache invalidation:
+ *   - PUT /v1/projects/current writeback → clear `current` for user
+ *   - PUT /v1/projects/:id (project attrs) → clear `list` for user (if
+ *     name/description/is_active changed; mapper-shape changed too) +
+ *     `current` for user (if focused project) + `team` for user:projectId
+ *     (defensive — team_member_count may have changed)
+ *   - PUT /v1/projects/:id/team/:agent_id (team-member overrides) →
+ *     clear `team` for user:projectId
  */
 
-import type { MappedProject, CurrentProjectState } from './mapper.js';
+import type {
+  MappedProject,
+  CurrentProjectState,
+  MappedProjectTeamMember,
+} from './mapper.js';
 
 const TTL_MS = 60_000;
 
@@ -70,6 +82,77 @@ export const list = {
   clear(userId?: string): void {
     if (userId) listStore.delete(userId);
     else listStore.clear();
+  },
+};
+
+export interface ProjectTeamEntry {
+  project_id: number;
+  team: MappedProjectTeamMember[];
+  fetchedAt: string;
+}
+
+const teamStore = new Map<string, ProjectTeamEntry & { fetchedAtMs: number }>();
+
+function teamKey(userId: string, projectId: number): string {
+  return `${userId}:${projectId}`;
+}
+
+export const team = {
+  getFresh(userId: string, projectId: number): ProjectTeamEntry | null {
+    const entry = freshGet(teamStore, teamKey(userId, projectId));
+    if (!entry) return null;
+    return {
+      project_id: entry.project_id,
+      team: entry.team,
+      fetchedAt: entry.fetchedAt,
+    };
+  },
+  getStale(userId: string, projectId: number): ProjectTeamEntry | null {
+    const entry = staleGet(teamStore, teamKey(userId, projectId));
+    if (!entry) return null;
+    return {
+      project_id: entry.project_id,
+      team: entry.team,
+      fetchedAt: entry.fetchedAt,
+    };
+  },
+  set(
+    userId: string,
+    projectId: number,
+    teamRoster: MappedProjectTeamMember[],
+  ): ProjectTeamEntry {
+    const now = Date.now();
+    const entry = {
+      project_id: projectId,
+      team: teamRoster,
+      fetchedAt: new Date(now).toISOString(),
+      fetchedAtMs: now,
+    };
+    teamStore.set(teamKey(userId, projectId), entry);
+    return {
+      project_id: entry.project_id,
+      team: entry.team,
+      fetchedAt: entry.fetchedAt,
+    };
+  },
+  /**
+   * Clear scoped to (user, project). Pass projectId only to clear all users
+   * (used by PUT /v1/projects/:id when project attrs change — every user's
+   * cached team for that project is suspect).
+   */
+  clear(userId?: string, projectId?: number): void {
+    if (userId !== undefined && projectId !== undefined) {
+      teamStore.delete(teamKey(userId, projectId));
+      return;
+    }
+    if (projectId !== undefined) {
+      const suffix = `:${projectId}`;
+      for (const key of teamStore.keys()) {
+        if (key.endsWith(suffix)) teamStore.delete(key);
+      }
+      return;
+    }
+    teamStore.clear();
   },
 };
 

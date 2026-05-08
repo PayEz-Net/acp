@@ -46,6 +46,8 @@ import {
   extractAndMapList,
   extractAndMapCurrent,
   extractAndMapDetail,
+  extractAndMapTeam,
+  extractTeamMemberEcho,
   mapCloudProject,
   type MappedProject,
   type CurrentProjectState,
@@ -485,11 +487,11 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     ));
   });
 
-  // PATCH /v1/projects/:id — UPDATE retired.
+  // PATCH /v1/projects/:id — UPDATE retired (Phase 1 uses PUT, not PATCH).
   router.patch('/:id', (req: Request, res: Response) => {
     res.status(410).json(error(
       'GONE',
-      'Project update lives on idealvibe.online/dashboard/projects — ACP is read+switch only in Phase 1',
+      'Project update uses PUT /v1/projects/:id (not PATCH) — see Wave A.1 contract',
       'project_update',
       (req as any).requestId,
     ));
@@ -503,6 +505,183 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       'project_delete',
       (req as any).requestId,
     ));
+  });
+
+  // PUT /v1/projects/:id — proxy project-attribute writeback to cloud.
+  // Body subset of: name, description, is_active, runtime, target_stack,
+  // auth_method, repo_path, goal_summary, app_type, signin_choice,
+  // runtime_choice, repo_layout, stack_topology, compliance, advisor_output.
+  // Cloud validates enum CHECK constraints (400 INVALID_RUNTIME / etc) and
+  // owner-or-admin authz (403 PROJECT_FORBIDDEN). Field-omit = keep current.
+  router.put('/:id', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const userId = session.userId || '0';
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_put', (req as any).requestId));
+        return;
+      }
+
+      const { status, payload } = await callCloud(cfg, 'PUT', `${CLOUD_PROJECTS_PATH}/${id}`, undefined, req.body || {});
+
+      // Pass cloud error codes through with their original HTTP status —
+      // FE switches on the real validation / authz / not-found distinctions.
+      if (status === 400 || status === 403 || status === 404) {
+        const upstreamError = (payload as any)?.error ?? {};
+        const code = upstreamError.code || (status === 400 ? 'BAD_REQUEST' : status === 403 ? 'PROJECT_FORBIDDEN' : 'PROJECT_NOT_FOUND');
+        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
+        res.status(status).json(error(code, message, 'project_put', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_put', (req as any).requestId));
+        return;
+      }
+
+      // Invalidate caches that may reflect this project's pre-edit state.
+      // - list: editor's project list shape may have changed (name/desc/is_active)
+      // - current: editor's pointer may be at this project; defensive clear
+      // - team: project-wide team_member_count or related counts may shift;
+      //   clear globally for this project_id
+      cache.list.clear(userId);
+      cache.current.clear(userId);
+      cache.team.clear(undefined, id);
+
+      const data = (payload as any).data ?? {};
+      const cloudProject = data.project ?? data;
+      const mapped = cloudProject && typeof cloudProject === 'object' && cloudProject.id
+        ? mapCloudProject(cloudProject)
+        : null;
+
+      res.json(success({ project: mapped }, 'project_put', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_put');
+    }
+  });
+
+  // GET /v1/projects/:id/team — proxy agent-team roster.
+  // Returns ProjectTeamMemberDto[] ordered by `is_lead DESC, agent_name ASC`
+  // (server-side per DotNetPert msg 987). 60s soft cache keyed by user:project.
+  router.get('/:id/team', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const userId = session.userId || '0';
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_team_get', (req as any).requestId));
+        return;
+      }
+      const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
+
+      if (!forceRefreshFlag) {
+        const fresh = cache.team.getFresh(userId, id);
+        if (fresh) {
+          res.json(success({ project_id: fresh.project_id, team: fresh.team, source: 'cache', fetchedAt: fresh.fetchedAt }, 'project_team_get', (req as any).requestId));
+          return;
+        }
+      }
+
+      try {
+        const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${id}/team`);
+        if (status === 403) {
+          res.status(403).json(error('PROJECT_FORBIDDEN', 'Cross-tenant or non-member project access denied', 'project_team_get', (req as any).requestId));
+          return;
+        }
+        if (status === 404) {
+          res.status(404).json(error('NOT_FOUND', 'Project not found', 'project_team_get', (req as any).requestId));
+          return;
+        }
+        if (status < 200 || status >= 300 || !(payload as any)?.success) {
+          // Stale-cache fallback on non-2xx
+          const stale = cache.team.getStale(userId, id);
+          if (stale) {
+            res.json(success({
+              project_id: stale.project_id,
+              team: stale.team,
+              source: 'cache',
+              fetchedAt: stale.fetchedAt,
+              warning: `Cloud returned HTTP ${status}; serving last-known team`,
+            }, 'project_team_get', (req as any).requestId));
+            return;
+          }
+          const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+          res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_get', (req as any).requestId));
+          return;
+        }
+
+        const { project_id, team } = extractAndMapTeam(payload);
+        const entry = cache.team.set(userId, id, team);
+        res.json(success({
+          project_id: project_id ?? id,
+          team: entry.team,
+          source: 'cloud',
+          fetchedAt: entry.fetchedAt,
+        }, 'project_team_get', (req as any).requestId));
+      } catch (err: any) {
+        if (err instanceof NotAuthenticatedError) throw err;
+        const stale = cache.team.getStale(userId, id);
+        const reason = err?.name === 'AbortError' ? 'Cloud unreachable (timeout)' : `Cloud unreachable (${err?.message || 'error'})`;
+        if (stale) {
+          res.json(success({
+            project_id: stale.project_id,
+            team: stale.team,
+            source: 'cache',
+            fetchedAt: stale.fetchedAt,
+            warning: `${reason}; serving last-known team`,
+          }, 'project_team_get', (req as any).requestId));
+          return;
+        }
+        throw err;
+      }
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_team_get');
+    }
+  });
+
+  // PUT /v1/projects/:id/team/:agent_id — proxy team-member override
+  // writeback. Body subset of: role, runtime_override, work_dir_override,
+  // position_hint, is_lead. Cloud validates enums (400 INVALID_RUNTIME /
+  // INVALID_POSITION_HINT) and owner-or-admin authz (403). Field-omit +
+  // explicit-null both = keep current per DotNetPert msg 987.
+  router.put('/:id/team/:agent_id', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      const agentId = parseInt(req.params.agent_id as string, 10);
+      if (isNaN(id) || isNaN(agentId)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id and agent_id must be integers', 'project_team_put', (req as any).requestId));
+        return;
+      }
+
+      const { status, payload } = await callCloud(cfg, 'PUT', `${CLOUD_PROJECTS_PATH}/${id}/team/${agentId}`, undefined, req.body || {});
+
+      if (status === 400 || status === 403 || status === 404) {
+        const upstreamError = (payload as any)?.error ?? {};
+        const code = upstreamError.code || (status === 400 ? 'BAD_REQUEST' : status === 403 ? 'PROJECT_FORBIDDEN' : 'NOT_FOUND');
+        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
+        res.status(status).json(error(code, message, 'project_team_put', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_put', (req as any).requestId));
+        return;
+      }
+
+      // Team membership shape changed for this project — clear all cached
+      // copies (any user who fetched this project's team has stale data).
+      cache.team.clear(undefined, id);
+
+      const teamMember = extractTeamMemberEcho(payload);
+      res.json(success({ team_member: teamMember }, 'project_team_put', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_team_put');
+    }
   });
 
   // GET /v1/projects/:id — proxy to cloud detail (project + members).
