@@ -1,24 +1,19 @@
 /**
- * DRAFT — Wave 2 (gated on QAPert AC-pass).
- * Target path: acp-api/api/projects/cache.ts
+ * Wave 2 + post-rename: in-memory soft cache for project sync surface.
  *
- * REVISED 2026-05-08 post-QAPert: pointer enum renamed to
- * `active_project_state` and now `stored | unset | empty` (per spec §5.4).
+ * Two-slot store keyed by IDP user_id, both 60s TTL:
+ *   - `list`    — full project list per developer
+ *   - `current` — current-project pointer per developer
  *
- * Two-slot in-memory cache for the project sync surface:
- *   - `list`   — full project list per developer
- *   - `active` — active-project pointer per developer
- *
- * Both keyed by IDP user_id, both 60s TTL. Mirrors team/cache.ts:
  *   getFresh()  honors TTL — returns null past 60s.
  *   getStale()  ignores TTL — used as the cloud-unreachable fallback.
  *
- * Cache invalidation on writeback (POST→PUT bridge) clears `active` for
- * the user; `list` is left intact since switching active doesn't change
+ * Cache invalidation on writeback (POST→PUT bridge) clears `current` for
+ * the user; `list` is left intact since switching focus doesn't change
  * membership.
  */
 
-import type { MappedProject, ActiveProjectState } from './mapper.js';
+import type { MappedProject, CurrentProjectState } from './mapper.js';
 
 const TTL_MS = 60_000;
 
@@ -27,15 +22,15 @@ export interface ProjectListEntry {
   fetchedAt: string;
 }
 
-export interface ActiveProjectEntry {
-  active_project_id: number | null;
+export interface CurrentProjectEntry {
+  current_project_id: number | null;
   project: MappedProject | null;
-  active_project_state: ActiveProjectState;
+  current_project_state: CurrentProjectState;
   fetchedAt: string;
 }
 
 const listStore = new Map<string, ProjectListEntry & { fetchedAtMs: number }>();
-const activeStore = new Map<string, ActiveProjectEntry & { fetchedAtMs: number }>();
+const currentStore = new Map<string, CurrentProjectEntry & { fetchedAtMs: number }>();
 
 function freshGet<T extends { fetchedAtMs: number }>(
   store: Map<string, T>,
@@ -78,51 +73,51 @@ export const list = {
   },
 };
 
-export const active = {
-  getFresh(userId: string): ActiveProjectEntry | null {
-    const entry = freshGet(activeStore, userId);
+export const current = {
+  getFresh(userId: string): CurrentProjectEntry | null {
+    const entry = freshGet(currentStore, userId);
     if (!entry) return null;
     return {
-      active_project_id: entry.active_project_id,
+      current_project_id: entry.current_project_id,
       project: entry.project,
-      active_project_state: entry.active_project_state,
+      current_project_state: entry.current_project_state,
       fetchedAt: entry.fetchedAt,
     };
   },
-  getStale(userId: string): ActiveProjectEntry | null {
-    const entry = staleGet(activeStore, userId);
+  getStale(userId: string): CurrentProjectEntry | null {
+    const entry = staleGet(currentStore, userId);
     if (!entry) return null;
     return {
-      active_project_id: entry.active_project_id,
+      current_project_id: entry.current_project_id,
       project: entry.project,
-      active_project_state: entry.active_project_state,
+      current_project_state: entry.current_project_state,
       fetchedAt: entry.fetchedAt,
     };
   },
   set(
     userId: string,
     payload: {
-      active_project_id: number | null;
+      current_project_id: number | null;
       project: MappedProject | null;
-      active_project_state: ActiveProjectState;
+      current_project_state: CurrentProjectState;
     },
-  ): ActiveProjectEntry {
+  ): CurrentProjectEntry {
     const now = Date.now();
     const entry = {
       ...payload,
       fetchedAt: new Date(now).toISOString(),
       fetchedAtMs: now,
     };
-    activeStore.set(userId, entry);
+    currentStore.set(userId, entry);
     return {
-      active_project_id: entry.active_project_id,
+      current_project_id: entry.current_project_id,
       project: entry.project,
-      active_project_state: entry.active_project_state,
+      current_project_state: entry.current_project_state,
       fetchedAt: entry.fetchedAt,
     };
   },
   clear(userId?: string): void {
-    if (userId) activeStore.delete(userId);
-    else activeStore.clear();
+    if (userId) currentStore.delete(userId);
+    else currentStore.clear();
   },
 };

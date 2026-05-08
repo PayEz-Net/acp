@@ -1,29 +1,39 @@
 /**
- * DRAFT — Wave 2 (gated on QAPert AC-pass).
- * Target path: acp-api/api/routes/projects.ts (REWRITE — local Map retired)
+ * Wave 2 + post-rename: cloud proxy for `/v1/projects` + current-project pointer.
  *
- * REVISED 2026-05-08 post-QAPert: spec §5.4 + workorder Exception 3.
+ * Local-Map echo retired. acp-api now proxies vibe-publicapi via the bearer
+ * + HMAC envelope shared with team.ts / mailProxy.ts. Cloud surface (post
+ * DotNetPert msg 1008 rename + archive guard, image 661332fe30ac):
  *
- * Wave 2 swaps acp-api's `/v1/projects` from a local-Map echo to a thin
- * cloud proxy of vibe-publicapi (`/v1/projects` + `/v1/users/me/active-project`).
- * The POST→PUT method-bridge stays: FE issues `POST /v1/projects/active
- * {project_id}`; cloud expects `PUT /v1/users/me/active-project {project_id}`.
+ *   GET  /v1/projects?activeOnly=true&search=...        → list
+ *   GET  /v1/projects/:id                               → detail + members
+ *   GET  /v1/users/me/current-project                   → focus pointer
+ *   PUT  /v1/users/me/current-project { project_id }    → focus writeback
  *
- * **New endpoint:** `GET /v1/projects/sync` per spec §6.1 — unified envelope
- * with `projects[] + active_project_id + active_project_state + source`.
+ * FE-facing surface mirrors the cloud rename:
  *
- * **Behavioral revision:** `/v1/projects/active` GET returns 200 in ALL cases
- * (even when no active project is set). The legacy 404 is gone. Caller reads
- * `active_project_state` to drive UX:
+ *   GET  /v1/projects/sync                              → unified envelope
+ *                                                          (projects[] +
+ *                                                          current_project_id +
+ *                                                          current_project_state +
+ *                                                          source)
+ *   GET  /v1/projects                                   → list passthrough
+ *   GET  /v1/projects/:id                               → detail passthrough
+ *   GET  /v1/projects/current                           → focus pointer (200 always)
+ *   POST /v1/projects/current { project_id }            → focus writeback
+ *                                                          (POST→PUT bridge to cloud)
+ *
+ * Three-state focus enum is `stored | unset | empty` (spec §5.4):
  *   - 'stored' → render normally
  *   - 'unset'  → first-boot prompt picker (no auto-load — feedback_no_unjustified_fallback)
  *   - 'empty'  → create-CTA pointing at idealvibe.online
  *
- * Auth pattern reused from team.ts / mailProxy.ts: bearer + HMAC, 10s
- * timeout, single-flight refresh on 401 via tokenManager.forceRefresh.
+ * Archive guard (Wave A.1 rename ship): PUT to is_active=false project →
+ * 400 PROJECT_ARCHIVED; soft-deleted → 404 PROJECT_NOT_FOUND; cross-tenant →
+ * 403 PROJECT_FORBIDDEN. These error codes flow through unchanged from cloud.
  *
- * Local routes retired (POST/PATCH/DELETE return 410 GONE — CRUD lives on
- * idealvibe per spec §3 non-goals).
+ * POST /, PATCH /:id, DELETE /:id → 410 GONE (CRUD lives on idealvibe per
+ * spec §3 non-goals).
  */
 
 import { Router, type Request, type Response } from 'express';
@@ -34,16 +44,16 @@ import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager
 import { signVibeRequest } from '../auth/vibeHmac.js';
 import {
   extractAndMapList,
-  extractAndMapActive,
+  extractAndMapCurrent,
   extractAndMapDetail,
   type MappedProject,
-  type ActiveProjectState,
+  type CurrentProjectState,
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
 
 const PROXY_TIMEOUT_MS = 10_000;
 const CLOUD_PROJECTS_PATH = '/v1/projects';
-const CLOUD_ACTIVE_PROJECT_PATH = '/v1/users/me/active-project';
+const CLOUD_CURRENT_PROJECT_PATH = '/v1/users/me/current-project';
 
 class NotAuthenticatedError extends Error {
   constructor() {
@@ -152,10 +162,10 @@ interface ListResult {
   warning?: string;
 }
 
-interface ActiveResult {
-  active_project_id: number | null;
+interface CurrentResult {
+  current_project_id: number | null;
   project: MappedProject | null;
-  active_project_state: ActiveProjectState;
+  current_project_state: CurrentProjectState;
   source: 'cloud' | 'cache' | 'defaults';
   fetchedAt: string;
   warning?: string;
@@ -215,45 +225,45 @@ async function readList(
   }
 }
 
-async function readActive(
+async function readCurrent(
   cfg: Config,
   userId: string,
   forceRefreshFlag: boolean,
-): Promise<ActiveResult> {
+): Promise<CurrentResult> {
   if (!forceRefreshFlag) {
-    const fresh = cache.active.getFresh(userId);
+    const fresh = cache.current.getFresh(userId);
     if (fresh) {
       return {
-        active_project_id: fresh.active_project_id,
+        current_project_id: fresh.current_project_id,
         project: fresh.project,
-        active_project_state: fresh.active_project_state,
+        current_project_state: fresh.current_project_state,
         source: 'cache',
         fetchedAt: fresh.fetchedAt,
       };
     }
   }
   try {
-    const { status, payload } = await callCloud(cfg, 'GET', CLOUD_ACTIVE_PROJECT_PATH);
+    const { status, payload } = await callCloud(cfg, 'GET', CLOUD_CURRENT_PROJECT_PATH);
     if (status >= 200 && status < 300 && (payload as any)?.success) {
-      const mapped = extractAndMapActive(payload);
-      const entry = cache.active.set(userId, mapped);
+      const mapped = extractAndMapCurrent(payload);
+      const entry = cache.current.set(userId, mapped);
       return {
-        active_project_id: entry.active_project_id,
+        current_project_id: entry.current_project_id,
         project: entry.project,
-        active_project_state: entry.active_project_state,
+        current_project_state: entry.current_project_state,
         source: 'cloud',
         fetchedAt: entry.fetchedAt,
       };
     }
-    const stale = cache.active.getStale(userId);
+    const stale = cache.current.getStale(userId);
     if (stale) {
       return {
-        active_project_id: stale.active_project_id,
+        current_project_id: stale.current_project_id,
         project: stale.project,
-        active_project_state: stale.active_project_state,
+        current_project_state: stale.current_project_state,
         source: 'cache',
         fetchedAt: stale.fetchedAt,
-        warning: `Cloud returned HTTP ${status}; serving last-known active`,
+        warning: `Cloud returned HTTP ${status}; serving last-known current`,
       };
     }
     // No cache, cloud unhappy → conservative default: 'unset'. The FE will
@@ -262,31 +272,31 @@ async function readActive(
     // assuming 'empty' (would show create-CTA over a real-but-unreachable
     // user account).
     return {
-      active_project_id: null,
+      current_project_id: null,
       project: null,
-      active_project_state: 'unset',
+      current_project_state: 'unset',
       source: 'defaults',
       fetchedAt: new Date().toISOString(),
       warning: `Cloud returned HTTP ${status}; no cache available`,
     };
   } catch (err: any) {
     if (err instanceof NotAuthenticatedError) throw err;
-    const stale = cache.active.getStale(userId);
+    const stale = cache.current.getStale(userId);
     const reason = err?.name === 'AbortError' ? 'Cloud unreachable (timeout)' : `Cloud unreachable (${err?.message || 'error'})`;
     if (stale) {
       return {
-        active_project_id: stale.active_project_id,
+        current_project_id: stale.current_project_id,
         project: stale.project,
-        active_project_state: stale.active_project_state,
+        current_project_state: stale.current_project_state,
         source: 'cache',
         fetchedAt: stale.fetchedAt,
-        warning: `${reason}; serving last-known active`,
+        warning: `${reason}; serving last-known current`,
       };
     }
     return {
-      active_project_id: null,
+      current_project_id: null,
       project: null,
-      active_project_state: 'unset',
+      current_project_state: 'unset',
       source: 'defaults',
       fetchedAt: new Date().toISOString(),
       warning: `${reason}; no cache available`,
@@ -297,7 +307,7 @@ async function readActive(
 export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Router {
   const router = Router();
 
-  // GET /v1/projects/sync — spec §6.1 unified envelope.
+  // GET /v1/projects/sync — unified envelope.
   // Single round-trip from FE that wants the consolidated view. The two
   // internal reads share the cache layer, so the cloud sees at most two
   // calls regardless of which legacy endpoint the FE hits.
@@ -308,27 +318,27 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       const userId = session.userId || '0';
       const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
 
-      const [listR, activeR] = await Promise.all([
+      const [listR, currentR] = await Promise.all([
         readList(cfg, userId, req.query as Record<string, unknown>, forceRefreshFlag),
-        readActive(cfg, userId, forceRefreshFlag),
+        readCurrent(cfg, userId, forceRefreshFlag),
       ]);
 
       // Combined source resolution: if either side is cache/defaults,
       // surface that on the wire (the FE banner pattern). 'cloud' only when
       // both succeed live.
       const combinedSource: 'cloud' | 'cache' | 'defaults' =
-        listR.source === 'cloud' && activeR.source === 'cloud'
+        listR.source === 'cloud' && currentR.source === 'cloud'
           ? 'cloud'
-          : listR.source === 'defaults' || activeR.source === 'defaults'
+          : listR.source === 'defaults' || currentR.source === 'defaults'
             ? 'defaults'
             : 'cache';
-      const warning = listR.warning ?? activeR.warning;
+      const warning = listR.warning ?? currentR.warning;
 
       res.json(success(
         {
           projects: listR.projects,
-          active_project_id: activeR.active_project_id,
-          active_project_state: activeR.active_project_state,
+          current_project_id: currentR.current_project_id,
+          current_project_state: currentR.current_project_state,
           source: combinedSource,
           fetchedAt: listR.fetchedAt,
           ...(warning ? { warning } : {}),
@@ -364,75 +374,83 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     }
   });
 
-  // GET /v1/projects/active — active-project pointer.
-  // **Always returns 200** post-Wave-2 (no more 404 on null project). FE
-  // reads `active_project_state` and renders accordingly.
-  router.get('/active', async (req: Request, res: Response) => {
+  // GET /v1/projects/current — current-project pointer.
+  // Always returns 200 (no 404 on null project). FE reads
+  // `current_project_state` and renders accordingly.
+  router.get('/current', async (req: Request, res: Response) => {
     try {
       const session = getSession();
       if (!session) throw new NotAuthenticatedError();
       const userId = session.userId || '0';
       const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
-      const result = await readActive(cfg, userId, forceRefreshFlag);
+      const result = await readCurrent(cfg, userId, forceRefreshFlag);
       res.json(success(
         {
           project: result.project,
-          active_project_id: result.active_project_id,
-          active_project_state: result.active_project_state,
+          current_project_id: result.current_project_id,
+          current_project_state: result.current_project_state,
           source: result.source,
           fetchedAt: result.fetchedAt,
           ...(result.warning ? { warning: result.warning } : {}),
         },
-        'project_active',
+        'project_current',
         (req as any).requestId,
       ));
     } catch (err: any) {
-      sendProxyError(res, req, err, 'project_active');
+      sendProxyError(res, req, err, 'project_current');
     }
   });
 
-  // POST /v1/projects/active { project_id } — bridge to cloud PUT.
-  router.post('/active', async (req: Request, res: Response) => {
+  // POST /v1/projects/current { project_id } — bridge to cloud PUT.
+  // Cloud-side error codes (PROJECT_ARCHIVED 400, PROJECT_NOT_FOUND 404,
+  // PROJECT_FORBIDDEN 403) flow through with their original HTTP status.
+  router.post('/current', async (req: Request, res: Response) => {
     try {
       const session = getSession();
       if (!session) throw new NotAuthenticatedError();
       const userId = session.userId || '0';
       const { project_id } = req.body || {};
       if (project_id !== null && (project_id === undefined || isNaN(parseInt(String(project_id), 10)))) {
-        res.status(400).json(error('VALIDATION_ERROR', 'project_id required (integer or null to clear)', 'project_set_active', (req as any).requestId));
+        res.status(400).json(error('VALIDATION_ERROR', 'project_id required (integer or null to clear)', 'project_set_current', (req as any).requestId));
         return;
       }
       const idForCloud = project_id === null ? null : parseInt(String(project_id), 10);
 
       // POST → PUT bridge to cloud.
-      const { status, payload } = await callCloud(cfg, 'PUT', CLOUD_ACTIVE_PROJECT_PATH, undefined, { project_id: idForCloud });
+      const { status, payload } = await callCloud(cfg, 'PUT', CLOUD_CURRENT_PROJECT_PATH, undefined, { project_id: idForCloud });
 
-      if (status === 403) {
-        res.status(403).json(error('PROJECT_FORBIDDEN', 'Cross-tenant or cross-user project access denied', 'project_set_active', (req as any).requestId));
+      // Pass cloud error codes through with their original HTTP status so
+      // FE switches on the real archive guard / forbidden / not-found
+      // distinctions.
+      if (status === 400 || status === 403 || status === 404) {
+        const upstreamError = (payload as any)?.error ?? {};
+        const code = upstreamError.code || (status === 400 ? 'BAD_REQUEST' : status === 403 ? 'PROJECT_FORBIDDEN' : 'PROJECT_NOT_FOUND');
+        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
+        res.status(status).json(error(code, message, 'project_set_current', (req as any).requestId));
         return;
       }
       if (status < 200 || status >= 300 || !(payload as any)?.success) {
         const upstreamMsg = (payload as any)?.error?.message || `Cloud writeback returned HTTP ${status}`;
-        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_set_active', (req as any).requestId));
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_set_current', (req as any).requestId));
         return;
       }
 
-      // Invalidate active-pointer cache so the next sync sees the change
-      // immediately. List cache stays — switching active doesn't change
+      // Invalidate current-pointer cache so the next sync sees the change
+      // immediately. List cache stays — switching focus doesn't change
       // membership.
-      cache.active.clear(userId);
+      cache.current.clear(userId);
 
       const data = (payload as any).data ?? {};
       const cloudProject = data.project ?? null;
-      const active_project_id = typeof data.active_project_id === 'number' ? data.active_project_id : (idForCloud ?? null);
+      const current_project_id = typeof data.current_project_id === 'number' ? data.current_project_id : (idForCloud ?? null);
 
       // SSE emit — preserves existing FE listeners (useAcpSse →
       // projectStore.handleProjectSwitched → syncTeam force-refresh).
-      if (active_project_id) {
+      if (current_project_id) {
         eventBus.emit({
           event: 'project-switched',
           data: {
-            project_id: active_project_id,
+            project_id: current_project_id,
             project_name: cloudProject?.name || '',
           },
         });
@@ -452,14 +470,14 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       res.json(success(
         {
           project: mapped,
-          active_project_id,
-          active_project_state: 'stored' as ActiveProjectState,
+          current_project_id,
+          current_project_state: 'stored' as CurrentProjectState,
         },
-        'project_set_active',
+        'project_set_current',
         (req as any).requestId,
       ));
     } catch (err: any) {
-      sendProxyError(res, req, err, 'project_set_active');
+      sendProxyError(res, req, err, 'project_set_current');
     }
   });
 

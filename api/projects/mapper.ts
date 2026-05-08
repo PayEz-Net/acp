@@ -1,18 +1,13 @@
 /**
- * DRAFT — Wave 2 (gated on QAPert AC-pass).
- * Target path: acp-api/api/projects/mapper.ts
+ * Wave 2 + post-rename: cloud `ProjectDto` → wire shape.
  *
- * REVISED 2026-05-08 post-QAPert: enum is now `stored | unset | empty`
- * (no `fallback-first`). Per spec §5.4, cloud no longer returns a
- * first-project hint when the developer has projects but no
- * developer_active_project row — it returns null + state='unset' and the
- * FE prompts the user to pick. No silent auto-load. Memory rule
- * `feedback_no_unjustified_fallback` enforces.
- *
- * Cloud `ProjectDto` (from vibe-publicapi `/v1/projects`) → wire shape the
- * desktop renderer's `projectStore.Project` consumes. Identical-name fields
- * pass through; cloud `is_active` collapses to FE `status: 'active'` because
- * acp-api always queries `?activeOnly=true`.
+ * Three-state focus-pointer enum is `stored | unset | empty` (per spec §5.4):
+ *   stored — developer_current_project row exists, project loaded normally.
+ *   unset  — no row, but developer has ≥1 project — picker prompts.
+ *   empty  — developer has zero projects — create-CTA pointing at idealvibe.
+ * Cloud no longer returns a first-project hint when the row is absent — it
+ * returns null + state='unset' and the FE prompts the user to pick. Memory
+ * rule `feedback_no_unjustified_fallback` enforces.
  *
  * Cloud DTO reference (from DotNetPert wave1-deploy-nextpert.json):
  *   { id, owner_user_id, name, description: string|null, settings: unknown|null,
@@ -26,12 +21,9 @@
  *   - `description: null` from cloud → `undefined` on wire (FE expects optional)
  *   - `updated_at: null` from cloud → falls back to `created_at` (FE type is non-optional)
  *   - `agentProvider` — cloud has no analogue; mapper omits the field entirely.
- *     FE `applyProjectAgentProvider` becomes a no-op (memory rule
- *     `feedback_runtime_choice_vs_platform_llm`: runtime is config-driven, not
- *     project-driven). Confirm-and-delete in a follow-up sweep per workorder §1a.
  */
 
-export type ActiveProjectState = 'stored' | 'unset' | 'empty';
+export type CurrentProjectState = 'stored' | 'unset' | 'empty';
 
 export interface CloudProjectDto {
   id: number;
@@ -92,46 +84,36 @@ export function extractAndMapList(cloudPayload: unknown): MappedProject[] {
 }
 
 /**
- * Pull `data.{active_project_id, project, active_project_state}` out of the
- * cloud envelope.
+ * Pull `data.{current_project_id, project, current_project_state}` out of
+ * the cloud envelope (`/v1/users/me/current-project`).
  *
- * Compatibility: while cloud is mid-revision, accept either the new
- * `active_project_state` field OR the old `source` field with a translation
- * map. Once Wave 1 redeploys with the locked enum, the legacy branch is
- * unreachable — leave it for one release cycle and prune in a follow-up.
- *
- * Spec §5.4 enum: 'stored' | 'unset' | 'empty'.
- *
- * `active_project_id` is forced to null when state is 'unset' or 'empty' —
+ * `current_project_id` is forced to null when state is 'unset' or 'empty' —
  * the FE first-boot-prompt branch depends on the absence of a project_id
  * to render the picker. We do NOT pass through any cloud-supplied
  * fallback-first hint per `feedback_no_unjustified_fallback`.
  */
-export function extractAndMapActive(cloudPayload: unknown): {
-  active_project_id: number | null;
+export function extractAndMapCurrent(cloudPayload: unknown): {
+  current_project_id: number | null;
   project: MappedProject | null;
-  active_project_state: ActiveProjectState;
+  current_project_state: CurrentProjectState;
 } {
   const data = (cloudPayload as any)?.data ?? {};
 
   const stateRaw =
-    (typeof data.active_project_state === 'string' && data.active_project_state) ||
-    (typeof data.source === 'string' && data.source) ||
-    '';
-  const active_project_state: ActiveProjectState =
+    typeof data.current_project_state === 'string' ? data.current_project_state : '';
+  const current_project_state: CurrentProjectState =
     stateRaw === 'stored' ? 'stored'
     : stateRaw === 'empty' ? 'empty'
-    : stateRaw === 'unset' || stateRaw === 'fallback-first' ? 'unset'
     : 'unset';
 
   const project =
-    active_project_state === 'stored' && data.project ? mapCloudProject(data.project) : null;
-  const active_project_id =
-    active_project_state === 'stored' && typeof data.active_project_id === 'number'
-      ? data.active_project_id
+    current_project_state === 'stored' && data.project ? mapCloudProject(data.project) : null;
+  const current_project_id =
+    current_project_state === 'stored' && typeof data.current_project_id === 'number'
+      ? data.current_project_id
       : null;
 
-  return { active_project_id, project, active_project_state };
+  return { current_project_id, project, current_project_state };
 }
 
 /**
