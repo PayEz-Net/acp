@@ -215,7 +215,7 @@ export async function createApp(cfg) {
     app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
     app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
   }
-  app.use('/v1/projects', projectRoutes(storage, localEventBus));
+  app.use('/v1/projects', projectRoutes(localEventBus, appConfig));
   app.use('/v1/documents', documentRoutes(storage));
   // Team sync — soft-cached proxy of vibe-publicapi /v1/agentmail/agents?type=team.
   // Spec: idealvibe-phase1-acp-team-sync-spec-v1.md §6
