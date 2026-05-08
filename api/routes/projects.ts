@@ -46,6 +46,7 @@ import {
   extractAndMapList,
   extractAndMapCurrent,
   extractAndMapDetail,
+  mapCloudProject,
   type MappedProject,
   type CurrentProjectState,
 } from '../projects/mapper.js';
@@ -456,17 +457,10 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
         });
       }
 
-      const mapped = cloudProject ? {
-        id: cloudProject.id,
-        name: cloudProject.name,
-        description: cloudProject.description ?? undefined,
-        status: 'active' as const,
-        is_active: cloudProject.is_active,
-        created_at: cloudProject.created_at,
-        updated_at: cloudProject.updated_at ?? cloudProject.created_at,
-        member_count: cloudProject.member_count,
-        owner_user_id: cloudProject.owner_user_id,
-      } : null;
+      // Reuse the canonical mapper so writeback responses carry the same
+      // Wave A.1 enriched shape (12 attribute fields + counts) as GET reads.
+      // Hand-rolled inline mapping was missing fields and would drift.
+      const mapped = cloudProject ? mapCloudProject(cloudProject) : null;
       res.json(success(
         {
           project: mapped,

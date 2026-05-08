@@ -1,5 +1,5 @@
 /**
- * Wave 2 + post-rename: cloud `ProjectDto` → wire shape.
+ * Wave 2 + post-rename + Wave A.1 enriched: cloud `ProjectDto` → wire shape.
  *
  * Three-state focus-pointer enum is `stored | unset | empty` (per spec §5.4):
  *   stored — developer_current_project row exists, project loaded normally.
@@ -9,21 +9,26 @@
  * returns null + state='unset' and the FE prompts the user to pick. Memory
  * rule `feedback_no_unjustified_fallback` enforces.
  *
- * Cloud DTO reference (from DotNetPert wave1-deploy-nextpert.json):
- *   { id, owner_user_id, name, description: string|null, settings: unknown|null,
- *     is_active: boolean, created_at, updated_at: string|null, member_count }
+ * Wave A.1 (DotNetPert msg 1018, cloud image 6f57e773398c): ProjectDto now
+ * carries 12 enriched attribute fields total — Wave A's 5 (runtime,
+ * target_stack, auth_method, repo_path, goal_summary) + Wave A.1's 7
+ * (app_type, signin_choice, runtime_choice, repo_layout, stack_topology,
+ * compliance, advisor_output) — plus team_member_count alongside member_count.
  *
- * FE consumer reference (acp-desktop/src/renderer/stores/projectStore.ts):
- *   { id, name, description?, status: 'active'|'archived'|'completed',
- *     agentProvider?, created_at, updated_at }
- *
- * Drift-prone fields:
+ * Mapper preserves null/undefined fidelity:
  *   - `description: null` from cloud → `undefined` on wire (FE expects optional)
- *   - `updated_at: null` from cloud → falls back to `created_at` (FE type is non-optional)
- *   - `agentProvider` — cloud has no analogue; mapper omits the field entirely.
+ *   - `updated_at: null` → falls back to `created_at` (FE type non-optional)
+ *   - All Wave A/A.1 nullable fields → null preserved on wire (FE renders "—"
+ *     placeholders per Wave B settings panel spec §4.2 — distinct from "absent
+ *     in payload" which would be a cloud bug)
+ *   - `runtime` is NOT NULL at DB (CHECK-constrained); pass through directly
+ *   - `runtime_choice` is the user-team-runtime preference (Wave A.1 nullable)
+ *     vs `runtime` the project default (Wave A NOT NULL). Memory rule
+ *     `feedback_runtime_choice_vs_platform_llm` keeps these distinct.
  */
 
 export type CurrentProjectState = 'stored' | 'unset' | 'empty';
+export type RuntimeId = 'claude' | 'kimi' | 'codex';
 
 export interface CloudProjectDto {
   id: number;
@@ -35,6 +40,21 @@ export interface CloudProjectDto {
   created_at: string;
   updated_at: string | null;
   member_count: number;
+  team_member_count: number;
+  // Wave A enriched
+  runtime: RuntimeId;
+  target_stack: string | null;
+  auth_method: string | null;
+  repo_path: string | null;
+  goal_summary: string | null;
+  // Wave A.1 enriched
+  app_type: string | null;
+  signin_choice: string | null;
+  runtime_choice: RuntimeId | null;
+  repo_layout: string | null;
+  stack_topology: string | null;
+  compliance: unknown[] | null;
+  advisor_output: unknown | null;
 }
 
 export interface CloudProjectMemberDto {
@@ -57,6 +77,21 @@ export interface MappedProject {
   created_at: string;
   updated_at: string;
   member_count: number;
+  team_member_count: number;
+  // Wave A enriched
+  runtime: RuntimeId;
+  target_stack: string | null;
+  auth_method: string | null;
+  repo_path: string | null;
+  goal_summary: string | null;
+  // Wave A.1 enriched
+  app_type: string | null;
+  signin_choice: string | null;
+  runtime_choice: RuntimeId | null;
+  repo_layout: string | null;
+  stack_topology: string | null;
+  compliance: unknown[] | null;
+  advisor_output: unknown | null;
 }
 
 export function mapCloudProject(p: CloudProjectDto): MappedProject {
@@ -70,6 +105,21 @@ export function mapCloudProject(p: CloudProjectDto): MappedProject {
     created_at: p.created_at,
     updated_at: p.updated_at ?? p.created_at,
     member_count: p.member_count,
+    team_member_count: p.team_member_count,
+    // Wave A
+    runtime: p.runtime,
+    target_stack: p.target_stack ?? null,
+    auth_method: p.auth_method ?? null,
+    repo_path: p.repo_path ?? null,
+    goal_summary: p.goal_summary ?? null,
+    // Wave A.1
+    app_type: p.app_type ?? null,
+    signin_choice: p.signin_choice ?? null,
+    runtime_choice: p.runtime_choice ?? null,
+    repo_layout: p.repo_layout ?? null,
+    stack_topology: p.stack_topology ?? null,
+    compliance: Array.isArray(p.compliance) ? p.compliance : null,
+    advisor_output: p.advisor_output ?? null,
   };
 }
 
