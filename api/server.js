@@ -36,6 +36,7 @@ import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
 import documentRoutes from './routes/documents.js';
 import agentRoutes from './routes/agents.js';
+import teamRoutes from './routes/team.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
 import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
@@ -216,6 +217,9 @@ export async function createApp(cfg) {
   }
   app.use('/v1/projects', projectRoutes(storage, localEventBus));
   app.use('/v1/documents', documentRoutes(storage));
+  // Team sync — soft-cached proxy of vibe-publicapi /v1/agentmail/agents?type=team.
+  // Spec: idealvibe-phase1-acp-team-sync-spec-v1.md §6
+  app.use('/v1/team', teamRoutes(appConfig));
   // Agent profile lookup (minimal - full management in acp-api-noaccount)
   app.use('/v1/agents', agentRoutes(storage));
 
