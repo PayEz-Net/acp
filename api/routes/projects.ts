@@ -68,7 +68,7 @@ class NotAuthenticatedError extends Error {
 function buildAuthHeaders(
   cfg: Config,
   token: string,
-  method: 'GET' | 'POST' | 'PUT',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   signedPath: string,
 ): Record<string, string> {
   const hmacHeaders = signVibeRequest(method, signedPath, {
@@ -98,7 +98,7 @@ function buildQueryString(query: Record<string, unknown> | undefined): string {
 
 async function callCloud(
   cfg: Config,
-  method: 'GET' | 'POST' | 'PUT',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   query?: Record<string, unknown>,
   body?: unknown,
@@ -681,6 +681,109 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       res.json(success({ team_member: teamMember }, 'project_team_put', (req as any).requestId));
     } catch (err: any) {
       sendProxyError(res, req, err, 'project_team_put');
+    }
+  });
+
+  // POST /v1/projects/:id/team — add agent to project's team. Body
+  // `{ agent_id }`. Mirrors DotNetPert msg 1078 cloud surface (image
+  // f7045b2ff2df on vibe-publicapi_rosa:32786). Vital-thing add path
+  // for idealvibe-web's TeamMembershipModal; acp-desktop currently
+  // read-only via Ship D drawer but proxy lives here for desktop-side
+  // parity (Wave C/D may consume).
+  //   201 → { team_member }
+  //   409 ALREADY_MEMBER if agent_id already on team
+  //   404 AGENT_NOT_FOUND if agent_id doesn't exist in canonical roster
+  //   400 VALIDATION_ERROR on missing/non-integer agent_id
+  //   403 PROJECT_FORBIDDEN for non-owner/admin callers
+  router.post('/:id/team', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_team_post', (req as any).requestId));
+        return;
+      }
+      const agentId = (req.body || {}).agent_id;
+      if (typeof agentId !== 'number' || !Number.isFinite(agentId)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'agent_id (integer) is required in body', 'project_team_post', (req as any).requestId));
+        return;
+      }
+
+      const { status, payload } = await callCloud(cfg, 'POST', `${CLOUD_PROJECTS_PATH}/${id}/team`, undefined, { agent_id: agentId });
+
+      if (status === 400 || status === 403 || status === 404 || status === 409) {
+        const upstreamError = (payload as any)?.error ?? {};
+        const code = upstreamError.code
+          || (status === 400 ? 'VALIDATION_ERROR'
+            : status === 403 ? 'PROJECT_FORBIDDEN'
+            : status === 404 ? 'AGENT_NOT_FOUND'
+            : 'ALREADY_MEMBER');
+        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
+        res.status(status).json(error(code, message, 'project_team_post', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_post', (req as any).requestId));
+        return;
+      }
+
+      // Team membership shape changed project-wide — invalidate all cached
+      // team rosters for this project_id so the next GET fetches fresh.
+      cache.team.clear(undefined, id);
+
+      const teamMember = extractTeamMemberEcho(payload);
+      res.status(201).json(success({ team_member: teamMember }, 'project_team_post', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_team_post');
+    }
+  });
+
+  // DELETE /v1/projects/:id/team/:agent_id — remove agent from project.
+  // Cloud msg 1078 + msg 1080:
+  //   204 (empty)
+  //   400 CANNOT_REMOVE_LEAD if is_lead=true (FE pre-disables remove button
+  //                          for lead, this is the backstop)
+  //   404 NOT_ON_TEAM if agent isn't a current member
+  //   403 PROJECT_FORBIDDEN for non-owner/admin
+  router.delete('/:id/team/:agent_id', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      const agentId = parseInt(req.params.agent_id as string, 10);
+      if (isNaN(id) || isNaN(agentId)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id and agent_id must be integers', 'project_team_delete', (req as any).requestId));
+        return;
+      }
+
+      const { status, payload } = await callCloud(cfg, 'DELETE', `${CLOUD_PROJECTS_PATH}/${id}/team/${agentId}`);
+
+      if (status === 400 || status === 403 || status === 404) {
+        const upstreamError = (payload as any)?.error ?? {};
+        const code = upstreamError.code
+          || (status === 400 ? 'CANNOT_REMOVE_LEAD'
+            : status === 403 ? 'PROJECT_FORBIDDEN'
+            : 'NOT_ON_TEAM');
+        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
+        res.status(status).json(error(code, message, 'project_team_delete', (req as any).requestId));
+        return;
+      }
+      // 204 No Content is also success — callCloud normalizes to status 204
+      // with null payload. Treat both 2xx + payload-may-be-null as success.
+      if (status < 200 || status >= 300) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_team_delete', (req as any).requestId));
+        return;
+      }
+
+      // Team membership shape changed project-wide — invalidate caches.
+      cache.team.clear(undefined, id);
+
+      res.status(200).json(success({}, 'project_team_delete', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_team_delete');
     }
   });
 
