@@ -818,5 +818,119 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     }
   });
 
+  // GET /v1/projects/:id/lifecycle — proxy to cloud lifecycle state.
+  // Wave C runtime poller calls this every 10s to learn state
+  // transitions (INCOMPLETE/IDLE/RUNNING/PAUSED). Pass-through; cloud
+  // is canonical (DotNetPert msg 1142 8ae7a6597).
+  router.get('/:id/lifecycle', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_lifecycle_get', (req as any).requestId));
+        return;
+      }
+      const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${id}/lifecycle`);
+      if (status === 403) {
+        res.status(403).json(error('PROJECT_FORBIDDEN', 'Cross-tenant or cross-user project access denied', 'project_lifecycle_get', (req as any).requestId));
+        return;
+      }
+      if (status === 404) {
+        res.status(404).json(error('NOT_FOUND', 'Project not found', 'project_lifecycle_get', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_lifecycle_get', (req as any).requestId));
+        return;
+      }
+      res.json(success((payload as any).data ?? payload, 'project_lifecycle_get', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_lifecycle_get');
+    }
+  });
+
+  // POST /v1/projects/:id/lifecycle — proxy to cloud state machine
+  // (start / pause / restart). Body `{action}`. Wave C state machine
+  // gates on 8-cond predicate; surfaces INVALID_TRANSITION /
+  // INCOMPLETE_PROJECT errors verbatim. Used by main process when
+  // user triggers Start fleet via renderer IPC.
+  router.post('/:id/lifecycle', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      const action = (req.body || {}).action;
+      if (action !== 'start' && action !== 'pause' && action !== 'restart') {
+        res.status(400).json(error('VALIDATION_ERROR', "action must be 'start' | 'pause' | 'restart'", 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      const { status, payload } = await callCloud(cfg, 'POST', `${CLOUD_PROJECTS_PATH}/${id}/lifecycle`, undefined, { action });
+      if (status === 403) {
+        res.status(403).json(error('PROJECT_FORBIDDEN', 'Cross-tenant or cross-user project access denied', 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      if (status === 404) {
+        res.status(404).json(error('NOT_FOUND', 'Project not found', 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      if (status === 400) {
+        const code = (payload as any)?.error?.code || 'VALIDATION_ERROR';
+        const msg = (payload as any)?.error?.message || 'Lifecycle action rejected';
+        res.status(400).json(error(code, msg, 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_lifecycle_post', (req as any).requestId));
+        return;
+      }
+      res.json(success((payload as any).data ?? payload, 'project_lifecycle_post', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_lifecycle_post');
+    }
+  });
+
+  // GET /v1/projects/:id/boot-prompt/:agent_id — proxy to cloud Wave D
+  // boot-prompt assembly. Returns `{template_version, project_id,
+  // agent_id, agent_name, boot_prompt, assembled_at}`. The boot_prompt
+  // is the system prompt passed verbatim to the LLM on spawn.
+  router.get('/:id/boot-prompt/:agent_id', async (req: Request, res: Response) => {
+    try {
+      const session = getSession();
+      if (!session) throw new NotAuthenticatedError();
+      const id = parseInt(req.params.id as string, 10);
+      const agentId = parseInt(req.params.agent_id as string, 10);
+      if (isNaN(id) || isNaN(agentId)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id and agent_id must be integers', 'project_boot_prompt_get', (req as any).requestId));
+        return;
+      }
+      const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${id}/boot-prompt/${agentId}`);
+      if (status === 403) {
+        res.status(403).json(error('FORBIDDEN', 'Access denied', 'project_boot_prompt_get', (req as any).requestId));
+        return;
+      }
+      if (status === 404) {
+        const code = (payload as any)?.error?.code || 'NOT_FOUND';
+        const msg = (payload as any)?.error?.message || 'Project or agent not on team';
+        res.status(404).json(error(code, msg, 'project_boot_prompt_get', (req as any).requestId));
+        return;
+      }
+      if (status < 200 || status >= 300 || !(payload as any)?.success) {
+        const upstreamMsg = (payload as any)?.error?.message || `Cloud returned HTTP ${status}`;
+        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_boot_prompt_get', (req as any).requestId));
+        return;
+      }
+      res.json(success((payload as any).data ?? payload, 'project_boot_prompt_get', (req as any).requestId));
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'project_boot_prompt_get');
+    }
+  });
+
   return router;
 }
