@@ -1,58 +1,66 @@
 /**
- * In-memory soft cache for team sync results.
+ * In-memory soft cache for /v1/team/sync.
  *
- * Keyed by IDP user_id so a user-switch (login/logout/login-as-other) does
- * not return another user's team. 60s TTL by default; force_refresh=true on
- * the route bypasses the TTL check entirely.
+ * Keyed by (userId, projectId) — the IDP-issued userId from the active session
+ * plus the project the team belongs to. Holds the last successful cloud fetch
+ * for the TTL window so repeated boots / project switches inside a minute
+ * don't re-hit the cloud.
  *
- * On cloud-unreachable, the route falls through to the cached entry even
- * past TTL — the entry is still present until explicitly cleared, and the
- * route signals staleness via `source: 'cache'` + a warning string.
+ * Doubles as the cloud-down fallback: when the cloud call fails we serve the
+ * last entry regardless of TTL and tag the response with `warning`.
+ *
+ * v1.5 — re-keyed from `userId` to `(userId, projectId)` per BAPert spec §3.3.
+ * A user with multiple projects gets independent cache entries; project-switch
+ * doesn't invalidate the prior project's roster.
  */
+import type { NormalizedAgent } from './mapper.js';
 
-import type { MappedAgent } from './mapper.js';
-
-export interface TeamCacheEntry {
-  agents: MappedAgent[];
-  fetchedAt: string; // ISO 8601
+interface CacheEntry {
+  agents: NormalizedAgent[];
+  fetchedAt: string;
+  fetchedAtMs: number;
 }
 
 const TTL_MS = 60_000;
 
-const store = new Map<string, TeamCacheEntry & { fetchedAtMs: number }>();
+const entries = new Map<string, CacheEntry>();
 
-export function getFresh(userId: string): TeamCacheEntry | null {
-  const entry = store.get(userId);
-  if (!entry) return null;
-  if (Date.now() - entry.fetchedAtMs > TTL_MS) return null;
-  return { agents: entry.agents, fetchedAt: entry.fetchedAt };
+function key(userId: string, projectId: number): string {
+  return `${userId}:${projectId}`;
 }
 
-/**
- * Returns whatever is in the cache for this user — even if it's past TTL.
- * Used as the cloud-unreachable fallback.
- */
-export function getStale(userId: string): TeamCacheEntry | null {
-  const entry = store.get(userId);
-  if (!entry) return null;
-  return { agents: entry.agents, fetchedAt: entry.fetchedAt };
+export function getFresh(userId: string, projectId: number): CacheEntry | undefined {
+  const e = entries.get(key(userId, projectId));
+  if (!e) return undefined;
+  if (Date.now() - e.fetchedAtMs > TTL_MS) return undefined;
+  return e;
 }
 
-export function set(userId: string, agents: MappedAgent[]): TeamCacheEntry {
+export function getStale(userId: string, projectId: number): CacheEntry | undefined {
+  return entries.get(key(userId, projectId));
+}
+
+export function set(userId: string, projectId: number, agents: NormalizedAgent[]): CacheEntry {
   const now = Date.now();
-  const entry = {
+  const entry: CacheEntry = {
     agents,
     fetchedAt: new Date(now).toISOString(),
     fetchedAtMs: now,
   };
-  store.set(userId, entry);
-  return { agents: entry.agents, fetchedAt: entry.fetchedAt };
+  entries.set(key(userId, projectId), entry);
+  return entry;
 }
 
-export function clear(userId?: string): void {
-  if (userId) {
-    store.delete(userId);
+export function clear(userId?: string, projectId?: number): void {
+  if (userId !== undefined && projectId !== undefined) {
+    entries.delete(key(userId, projectId));
+  } else if (userId !== undefined) {
+    // Clear all entries for this user (any project)
+    const prefix = `${userId}:`;
+    for (const k of entries.keys()) {
+      if (k.startsWith(prefix)) entries.delete(k);
+    }
   } else {
-    store.clear();
+    entries.clear();
   }
 }

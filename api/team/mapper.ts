@@ -1,17 +1,15 @@
 /**
- * Cloud `Agent` → ACP-side normalized shape.
+ * Cloud agent → normalized shape that the renderer consumes.
  *
- * Per spec §6.1 the renderer applies local prefs (color/position/workDir/
- * provider). The mapper's job is just to normalize the wire shape coming
- * back from the cloud agentmail/agents endpoint into the camelCased fields
- * the renderer's reconcile step expects.
+ * Cloud carries identity (name, display_name, role_preset, is_coordinator,
+ * expertise_tags, startup_order, is_active). The renderer's agentReconcile()
+ * layers local UI prefs (position, color, workDir, provider) on top of this —
+ * the mapper just normalizes snake_case → camelCase and drops fields the grid
+ * doesn't render (identity_prompt, role_md, etc.).
  *
- * Cloud shape (from PayEz.Vibe.Public.Api/Controllers/V1/AgentMailController.cs):
- *   { id, name, display_name, description?, is_active, tenant_id?, created_at,
- *     identity_prompt?, role_md?, ... }
- *
- * The renderer treats the result as `MappedAgent` and merges with
- * `agentPrefs` keyed by `name` to produce the final `AgentConfig[]`.
+ * v1.5 — extended for ACP dynamic team loading (BAPert spec §3.4):
+ * preserves role_preset / is_coordinator / startup_order / expertise_tags
+ * so the renderer can surface chip rendering + grid ordering correctly.
  */
 
 export interface CloudAgent {
@@ -20,39 +18,52 @@ export interface CloudAgent {
   display_name?: string;
   description?: string;
   is_active?: boolean;
+  agent_type?: string;
   tenant_id?: string;
   created_at?: string;
-  // Inline profile fields are ignored for grid rendering.
-  [k: string]: unknown;
+
+  // §3.4 — canonical agent_profiles document fields
+  role_preset?: string;
+  is_coordinator?: boolean;
+  startup_order?: number;
+  expertise_tags?: string[];
+
+  // additional profile fields ignored
 }
 
-export interface MappedAgent {
+export interface NormalizedAgent {
   id: number;
   name: string;
   displayName: string;
-  description: string;
+  description?: string;
   isActive: boolean;
-  agentType: 'team';
+  agentType?: string;
+
+  // §3.4 — propagated to renderer for grid + chip rendering
+  rolePreset?: string;
+  isCoordinator?: boolean;
+  startupOrder?: number;
+  expertiseTags?: string[];
 }
 
-export function mapCloudAgent(a: CloudAgent): MappedAgent {
+export function normalizeAgent(a: CloudAgent): NormalizedAgent {
   return {
     id: a.id,
     name: a.name,
     displayName: a.display_name || a.name,
-    description: a.description ?? '',
+    description: a.description,
     isActive: a.is_active !== false,
-    agentType: 'team',
+    agentType: a.agent_type,
+    rolePreset: a.role_preset,
+    isCoordinator: a.is_coordinator === true,
+    startupOrder: a.startup_order,
+    expertiseTags: Array.isArray(a.expertise_tags) ? a.expertise_tags : undefined,
   };
 }
 
-/**
- * Pull the agents array out of the cloud envelope and map each one. The
- * cloud responds with the standard envelope `{ success, data: { agents } }`.
- */
-export function extractAndMap(cloudPayload: unknown): MappedAgent[] {
-  const data = (cloudPayload as any)?.data;
-  const agents = data?.agents;
+export function normalizeAgents(agents: CloudAgent[] | undefined | null): NormalizedAgent[] {
   if (!Array.isArray(agents)) return [];
-  return agents.map(mapCloudAgent);
+  return agents
+    .filter((a): a is CloudAgent => a != null && typeof a.name === 'string')
+    .map(normalizeAgent);
 }
