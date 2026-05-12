@@ -1,9 +1,148 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { config } from '../../config.js';
+import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
+import { signVibeRequest } from '../auth/vibeHmac.js';
 
 const VIBESQL_URL = process.env.VIBESQL_URL || 'http://10.0.0.93:52411';
 const VIBESQL_SECRET = process.env.VIBESQL_SECRET || 'ContainersSuperDevSecret';
+const PROFILE_PROXY_TIMEOUT_MS = 10_000;
+
+// ─── Cloud profile proxy ───────────────────────────────────────────────────
+//
+// Legacy `vibe_agents.agents` real table was retired when the
+// documents-canonical model landed (per feedback_vibe_storage_convention
+// + project_vibe_agents_storage_planes). Profile data now lives in
+// vibe.documents agent_profiles collection, exposed via cloud
+// /v1/agents/{id}/profile. This handler proxies to cloud and maps the
+// snake_case wire shape to the camelCase shape Kimi/Claude
+// agent-onboarding skills consume.
+//
+// Cloud accepts numeric id only on /profile. For name lookups we
+// resolve id first via /v1/agentmail/agents and cache the mapping
+// for the process lifetime (canonical agent roster rarely changes).
+
+const nameToIdCache = new Map<string, number>();
+let nameToIdCachePopulatedAt = 0;
+const NAME_TO_ID_TTL_MS = 5 * 60 * 1000; // 5 min — refresh occasionally so new agents resolve
+
+function buildCloudAuthHeaders(token: string, signedPath: string): Record<string, string> {
+  const hmacHeaders = signVibeRequest('GET', signedPath, {
+    clientId: config.vibeClientId,
+    signingKey: config.vibeHmacKey,
+  });
+  return {
+    ...hmacHeaders,
+    'Authorization': `Bearer ${token}`,
+    'X-Vibe-Via': 'idp-proxy',
+    'X-Vibe-User-Id': config.vibeUserId || '0',
+    'Content-Type': 'application/json',
+  };
+}
+
+async function cloudFetch(signedPath: string): Promise<{ status: number; body: any } | { error: string }> {
+  let token = await ensureValidToken(config.idpUrl);
+  if (!token) return { error: 'NO_SESSION' };
+
+  const url = `${config.vibeApiUrl}${signedPath}`;
+  const doFetch = async (bearer: string) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: buildCloudAuthHeaders(bearer, signedPath),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let body: any = null;
+      try { body = text ? JSON.parse(text) : null; } catch { /* leave null */ }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  let attempt = await doFetch(token);
+  if (attempt.status === 401) {
+    const refreshed = await forceRefresh(config.idpUrl);
+    if (!refreshed) return { error: 'NO_SESSION' };
+    attempt = await doFetch(refreshed);
+  }
+  return attempt;
+}
+
+async function resolveAgentNameToId(name: string): Promise<number | null> {
+  const cached = nameToIdCache.get(name);
+  if (cached !== undefined && Date.now() - nameToIdCachePopulatedAt < NAME_TO_ID_TTL_MS) {
+    return cached;
+  }
+
+  const result = await cloudFetch('/v1/agentmail/agents');
+  if ('error' in result) return null;
+  if (result.status < 200 || result.status >= 300) return null;
+  const agents = result.body?.data?.agents;
+  if (!Array.isArray(agents)) return null;
+
+  // Repopulate cache from this fetch — single roundtrip covers all canonical
+  // agents, no point caching just the one we asked for.
+  nameToIdCache.clear();
+  for (const a of agents) {
+    if (a && typeof a.id === 'number' && typeof a.name === 'string') {
+      nameToIdCache.set(a.name, a.id);
+    }
+  }
+  nameToIdCachePopulatedAt = Date.now();
+  return nameToIdCache.get(name) ?? null;
+}
+
+interface CloudProfileShape {
+  id?: number;
+  agent_id?: number;
+  identity_md?: string | null;
+  role_md?: string | null;
+  philosophy_md?: string | null;
+  communication_md?: string | null;
+  response_pattern_md?: string | null;
+  expertise_json?: unknown;
+  capabilities?: unknown;
+  safety_rules?: unknown;
+  version?: number;
+}
+
+function mapCloudProfile(
+  cloudProfile: CloudProfileShape,
+  meta: { name: string; displayName?: string; role?: string },
+): Record<string, unknown> {
+  // Mirrors the renderer/skill-side expected shape (camelCase). Empty
+  // string defaults so consumer template substitution doesn't error on
+  // null. expertise_json/capabilities/safety_rules can come back as
+  // either a parsed object or a JSON string depending on upstream
+  // serialization; tolerate both.
+  const parseLoose = (v: unknown): unknown => {
+    if (v == null) return null;
+    if (typeof v === 'string') {
+      try { return JSON.parse(v); } catch { return v; }
+    }
+    return v;
+  };
+  return {
+    name: meta.name,
+    displayName: meta.displayName || meta.name,
+    role: meta.role || 'agent',
+    identityMd: cloudProfile.identity_md || '',
+    roleMd: cloudProfile.role_md || '',
+    philosophyMd: cloudProfile.philosophy_md || '',
+    communicationMd: cloudProfile.communication_md || '',
+    responsePatternMd: cloudProfile.response_pattern_md || '',
+    expertiseJson: parseLoose(cloudProfile.expertise_json) || {},
+    capabilities: parseLoose(cloudProfile.capabilities) || {},
+    safetyRules: parseLoose(cloudProfile.safety_rules) || [],
+    isActive: true,
+    program: 'claude-code',
+    model: 'claude-sonnet-4-6',
+  };
+}
 
 // ── SQL helpers ────────────────────────────────────────────────────────────
 
@@ -415,7 +554,19 @@ export default function agentRoutes(_storage: any): Router {
     }
   });
 
-  // GET /v1/agents/:name/profile  (existing — enhanced for dual-mode)
+  // GET /v1/agents/:identifier/profile — proxies to cloud agent profile
+  // doc-store (post-2026-05-12 cloud-canonical refactor).
+  //
+  // identifier: numeric id  → direct proxy to cloud /v1/agents/{id}/profile
+  // identifier: name        → resolve name→id via cloud /v1/agentmail/agents,
+  //                           then proxy
+  //
+  // The legacy vibe_agents.agents real table was retired with the
+  // documents-canonical migration. Direct VibeSQL queries against it
+  // returned `relation "vibe_agents.agents" does not exist` and the
+  // handler dropped to a thin-shape fallback that broke the Kimi
+  // agent-onboarding skill. Cloud has the canonical doc-store data
+  // and accepts numeric id on /profile.
   router.get('/:identifier/profile', async (req: Request, res: Response) => {
     try {
       const identifier = req.params.identifier;
@@ -424,47 +575,92 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      let sql: string;
       const isNumericId = /^\d+$/.test(identifier);
+      let agentId: number | null = null;
+      let resolvedName = '';
+
       if (isNumericId) {
-        sql = `SELECT id, name, display_name, role, identity_md, role_md, philosophy_md, communication_md, response_pattern_md, expertise_json, is_active, capabilities, safety_rules
-               FROM vibe_agents.agents
-               WHERE id = ${escapeSql(parseInt(identifier, 10))} AND is_active = true LIMIT 1`;
+        agentId = parseInt(identifier, 10);
+        // We don't have the name yet; lookup via cache or roster after we
+        // fetch the profile. Cheaper to just include it in the mapper
+        // fallback as "<id>" if roster lookup misses.
       } else {
-        sql = `SELECT id, name, display_name, role, identity_md, role_md, philosophy_md, communication_md, response_pattern_md, expertise_json, is_active, capabilities, safety_rules
-               FROM vibe_agents.agents
-               WHERE name = ${escapeSql(identifier)} AND is_active = true LIMIT 1`;
+        resolvedName = identifier;
+        agentId = await resolveAgentNameToId(identifier);
+        if (agentId === null) {
+          console.warn(`[agent_profile] Could not resolve name "${identifier}" to id via cloud /v1/agentmail/agents — falling back to SessionManager thin shape`);
+          const basic = await _storage.getAgentProfileFromGlobal(identifier);
+          if (basic) {
+            res.json(success(basic, 'agent_profile', (req as any).requestId));
+            return;
+          }
+          res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
+          return;
+        }
       }
 
-      const vsqlRes = await queryVibeSql(sql);
-      if (!vsqlRes.success || !vsqlRes.data?.length) {
-        // Fallback to SessionManager for basic info
-        const basic = await _storage.getAgentProfileFromGlobal(identifier);
+      // Pull the agent metadata (name + display_name) from the cached
+      // roster so the response carries the right name/display_name even
+      // when only the id was on the wire.
+      let displayName: string | undefined;
+      if (!resolvedName && agentId !== null) {
+        for (const [n, id] of nameToIdCache.entries()) {
+          if (id === agentId) { resolvedName = n; break; }
+        }
+        if (!resolvedName) {
+          // Populate the cache by force-fetching the roster.
+          await resolveAgentNameToId('___populate-only___');
+          for (const [n, id] of nameToIdCache.entries()) {
+            if (id === agentId) { resolvedName = n; break; }
+          }
+        }
+      }
+
+      const profileResult = await cloudFetch(`/v1/agents/${agentId}/profile`);
+      if ('error' in profileResult) {
+        console.warn(`[agent_profile] Cloud unreachable for /v1/agents/${agentId}/profile (${profileResult.error}) — thin fallback`);
+        const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
           res.json(success(basic, 'agent_profile', (req as any).requestId));
           return;
         }
-        res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
+        res.status(503).json(error('UPSTREAM_UNAVAILABLE', `Cloud unreachable: ${profileResult.error}`, 'agent_profile', (req as any).requestId));
         return;
       }
 
-      const agent = vsqlRes.data[0];
-      const profile = {
-        name: agent.name,
-        displayName: agent.display_name || agent.name,
-        role: agent.role || 'agent',
-        identityMd: agent.identity_md || '',
-        roleMd: agent.role_md || '',
-        philosophyMd: agent.philosophy_md || '',
-        communicationMd: agent.communication_md || '',
-        responsePatternMd: agent.response_pattern_md || '',
-        expertiseJson: agent.expertise_json ? (typeof agent.expertise_json === 'string' ? JSON.parse(agent.expertise_json) : agent.expertise_json) : {},
-        capabilities: agent.capabilities ? (typeof agent.capabilities === 'string' ? JSON.parse(agent.capabilities) : agent.capabilities) : {},
-        safetyRules: agent.safety_rules ? (typeof agent.safety_rules === 'string' ? JSON.parse(agent.safety_rules) : agent.safety_rules) : [],
-        isActive: true,
-        program: 'claude-code',
-        model: 'claude-sonnet-4-6',
-      };
+      if (profileResult.status === 404) {
+        res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found in cloud doc-store`, 'agent_profile', (req as any).requestId));
+        return;
+      }
+
+      if (profileResult.status < 200 || profileResult.status >= 300) {
+        console.warn(`[agent_profile] Cloud returned HTTP ${profileResult.status} for agent ${agentId} — thin fallback`);
+        const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
+        if (basic) {
+          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          return;
+        }
+        res.status(profileResult.status).json(error('UPSTREAM_ERROR', `Cloud returned HTTP ${profileResult.status}`, 'agent_profile', (req as any).requestId));
+        return;
+      }
+
+      const cloudProfile: CloudProfileShape | undefined = profileResult.body?.data?.profile;
+      const responseAgentName: string | undefined = profileResult.body?.data?.agent_name;
+      if (!cloudProfile) {
+        console.warn(`[agent_profile] Cloud response missing data.profile for agent ${agentId} — thin fallback`);
+        const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
+        if (basic) {
+          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          return;
+        }
+        res.status(502).json(error('UPSTREAM_BAD_SHAPE', 'Cloud response missing profile data', 'agent_profile', (req as any).requestId));
+        return;
+      }
+
+      const profile = mapCloudProfile(cloudProfile, {
+        name: resolvedName || responseAgentName || String(agentId),
+        displayName: displayName,
+      });
 
       res.json(success(profile, 'agent_profile', (req as any).requestId));
     } catch (err: any) {
