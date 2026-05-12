@@ -48,7 +48,15 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
   // POST /v1/lifecycle/agents/:name/spawn
   router.post('/:name/spawn', async (req: Request, res: Response) => {
     const name = req.params.name as string;
-    const { workDir, autoReport } = req.body || {};
+    const { workDir, autoReport, runtime } = req.body || {};
+
+    // Project-driven runtime — renderer reads activeProject.runtime_choice
+    // and POSTs it here. Forwarded as-is to the Electron callback server;
+    // pty.ts validates + falls back to settings.agentProvider on unknown
+    // values. Per feedback_runtime_choice_vs_platform_llm.
+    const validRuntime = (runtime === 'claude' || runtime === 'kimi' || runtime === 'codex')
+      ? runtime
+      : undefined;
 
     try {
       const state = backoff.getOrCreate(name);
@@ -64,6 +72,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         agentName: name,
         workDir: workDir || undefined,
         autoReport: state.autoReport,
+        ...(validRuntime ? { runtime: validRuntime } : {}),
       });
 
       // 409 = agent already running — reuse existing terminalId
