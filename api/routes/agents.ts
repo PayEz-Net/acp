@@ -114,30 +114,32 @@ function mapCloudProfile(
   cloudProfile: CloudProfileShape,
   meta: { name: string; displayName?: string; role?: string },
 ): Record<string, unknown> {
-  // Mirrors the renderer/skill-side expected shape (camelCase). Empty
-  // string defaults so consumer template substitution doesn't error on
-  // null. expertise_json/capabilities/safety_rules can come back as
-  // either a parsed object or a JSON string depending on upstream
-  // serialization; tolerate both.
-  const parseLoose = (v: unknown): unknown => {
-    if (v == null) return null;
-    if (typeof v === 'string') {
-      try { return JSON.parse(v); } catch { return v; }
-    }
-    return v;
-  };
+  // v1 schema collapse (Jon directive 2026-05-12): the 5-field
+  // psychological breakdown (identity_md / role_md / philosophy_md /
+  // communication_md / response_pattern_md) is OUT for launch. The
+  // schema is `properties + one free-text profile`. Users can put
+  // whatever attributes they want in the free-text profile.
+  //
+  // For backward-tolerance during the cloud schema cleanup, we
+  // concatenate any non-empty content across the legacy fields into
+  // a single `profile` paragraph blob. In practice today only
+  // identity_md is populated for canonical agents — so `profile`
+  // ends up = identity_md content. Order matches the original
+  // breakdown sequence so any author who DID fill multiple fields
+  // gets a sensible read.
+  const sections = [
+    cloudProfile.identity_md,
+    cloudProfile.role_md,
+    cloudProfile.philosophy_md,
+    cloudProfile.communication_md,
+    cloudProfile.response_pattern_md,
+  ].filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const profile = sections.join('\n\n');
   return {
     name: meta.name,
     displayName: meta.displayName || meta.name,
     role: meta.role || 'agent',
-    identityMd: cloudProfile.identity_md || '',
-    roleMd: cloudProfile.role_md || '',
-    philosophyMd: cloudProfile.philosophy_md || '',
-    communicationMd: cloudProfile.communication_md || '',
-    responsePatternMd: cloudProfile.response_pattern_md || '',
-    expertiseJson: parseLoose(cloudProfile.expertise_json) || {},
-    capabilities: parseLoose(cloudProfile.capabilities) || {},
-    safetyRules: parseLoose(cloudProfile.safety_rules) || [],
+    profile,
     isActive: true,
     program: 'claude-code',
     model: 'claude-sonnet-4-6',
