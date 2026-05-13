@@ -263,7 +263,7 @@ export default function agentRoutes(_storage: any): Router {
   // PATCH /v1/agents/:id/activation
   router.patch('/:id/activation', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_activation', (req as any).requestId));
         return;
@@ -301,7 +301,7 @@ export default function agentRoutes(_storage: any): Router {
   // DELETE /v1/agents/:id — soft delete
   router.delete('/:id', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_delete', (req as any).requestId));
         return;
@@ -425,7 +425,7 @@ export default function agentRoutes(_storage: any): Router {
   // PUT /v1/agents/:id/capabilities
   router.put('/:id/capabilities', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_capabilities', (req as any).requestId));
         return;
@@ -451,7 +451,7 @@ export default function agentRoutes(_storage: any): Router {
   // PUT /v1/agents/:id/safety-rules
   router.put('/:id/safety-rules', async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) {
         res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_safety_rules', (req as any).requestId));
         return;

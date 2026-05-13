@@ -1,3 +1,9 @@
+/**
+ * @param {any} data
+ * @param {string} operationCode
+ * @param {string} requestId
+ * @param {Record<string, any>} [extras]
+ */
 export function success(data, operationCode, requestId, extras = {}) {
   const now = new Date().toISOString();
   return {
@@ -14,6 +20,13 @@ export function success(data, operationCode, requestId, extras = {}) {
   };
 }
 
+/**
+ * @param {string} code
+ * @param {string} message
+ * @param {string} operationCode
+ * @param {string} requestId
+ * @param {any} [details]
+ */
 export function error(code, message, operationCode, requestId, details = null) {
   const now = new Date().toISOString();
   return {
