@@ -47,10 +47,15 @@ export const config = {
   port: parseInt(process.env.PORT ?? '', 10) || 3001,
   host: '127.0.0.1',
   idpUrl: process.env.IDP_URL || 'http://10.0.0.93:32785',
+  // De-conflated: acp-api's cloud Vibe API endpoint is its OWN concern,
+  // NOT the same as acp-stable's ACP_API_URL (= the local acp-api backend
+  // at 127.0.0.1:3001). Reading ACP_API_URL here cross-wired the two: an
+  // ACP_API_URL=<prod AKS> meant for nothing leaked in and sent dev-93-
+  // minted tokens to prod → 401. Use the dedicated VIBE_API_URL (see
+  // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
   vibeClientId: required('VIBE_CLIENT_ID'),
   vibeHmacKey: required('VIBE_HMAC_KEY'),
-  vibeUserId: process.env.VIBE_USER_ID || '0',
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',
   acpCallbackPort: parseInt(process.env.ACP_CALLBACK_PORT ?? '', 10) || 40030,
   acpAgents: (process.env.ACP_AGENTS || 'DotNetPert,BAPert,NextPert,QAPert,Aurum').split(',').map(a => a.trim()),

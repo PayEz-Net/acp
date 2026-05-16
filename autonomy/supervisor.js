@@ -426,9 +426,6 @@ export class Supervisor {
       clientId: cfg.vibeClientId,
       signingKey: cfg.vibeHmacKey,
     };
-    // Service-account mode requires an explicit user id so the cloud vibe-api
-    // can scope the operation. Without it the server rejects with USER_REQUIRED.
-    const userIdHeader = { 'X-Vibe-User-Id': String(cfg.vibeUserId ?? '0') };
 
     try {
       const sendPath = '/v1/agentmail/send';
@@ -436,7 +433,6 @@ export class Supervisor {
         method: 'POST',
         headers: {
           ...signVibeRequest('POST', sendPath, hmacCfg),
-          ...userIdHeader,
           'X-Vibe-Via': 'idp-proxy',
           'Content-Type': 'application/json',
         },

@@ -79,7 +79,6 @@ function buildAuthHeaders(
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Vibe-Via': 'idp-proxy',
-    'X-Vibe-User-Id': cfg.vibeUserId || '0',
     'Content-Type': 'application/json',
   };
 }

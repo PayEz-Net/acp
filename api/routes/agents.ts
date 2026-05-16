@@ -35,7 +35,6 @@ function buildCloudAuthHeaders(token: string, signedPath: string): Record<string
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Vibe-Via': 'idp-proxy',
-    'X-Vibe-User-Id': config.vibeUserId || '0',
     'Content-Type': 'application/json',
   };
 }
@@ -244,10 +243,24 @@ export default function agentRoutes(_storage: any): Router {
   // GET /v1/agents/startup-config
   router.get('/startup-config', async (req: Request, res: Response) => {
     try {
-      const sql = `SELECT id, name, display_name, role, model, expertise_json, agent_type, is_active, startup_order, capabilities, safety_rules
-                   FROM vibe_agents.agents
-                   WHERE is_active = true AND deleted_at IS NULL
-                   ORDER BY startup_order ASC, name ASC`;
+      const sql = `SELECT
+        (data->>'id')::int AS id,
+        data->>'name' AS name,
+        data->>'display_name' AS display_name,
+        data->>'role' AS role,
+        data->>'model' AS model,
+        data->>'expertise_json' AS expertise_json,
+        data->>'agent_type' AS agent_type,
+        COALESCE((data->>'is_active')::boolean, true) AS is_active,
+        COALESCE((data->>'startup_order')::int, 0) AS startup_order,
+        data->>'capabilities' AS capabilities,
+        data->>'safety_rules' AS safety_rules
+      FROM vibe.documents
+      WHERE collection = 'vibe_agents'
+        AND table_name = 'agent_profiles'
+        AND COALESCE((data->>'is_active')::boolean, true) = true
+        AND data->>'deleted_at' IS NULL
+      ORDER BY COALESCE((data->>'startup_order')::int, 0) ASC, data->>'name' ASC`;
       const vsql = await queryVibeSql(sql);
       if (!vsql.success) {
         res.status(500).json(error('INTERNAL_ERROR', vsql.error?.message || 'VibeSQL query failed', 'agent_startup_config', (req as any).requestId));
