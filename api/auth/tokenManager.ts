@@ -45,6 +45,39 @@ function decodeJwtExp(token: string): Date | null {
   }
 }
 
+// The IDP mints refresh tokens bound to the login-time context, carried in a
+// `binding_data` claim shaped: v1|<ip>|<device>|<user-agent>|<client>. On
+// refresh the IDP recomputes the binding from the REQUEST's UA / device /
+// forwarded-IP and strict-compares. The renderer's OAuth call carried these
+// implicitly (browser context); the bare node-side refresh call carries none
+// -> "Invalid token binding" / INVALID_REFRESH_TOKEN. Replay exactly what the
+// token was minted with, read from the token itself (no guessing, version-
+// proof). Any parse failure -> {} so refresh proceeds unchanged (guard, not
+// a value default).
+function bindingHeadersFromRefreshToken(token: string): Record<string, string> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return {};
+  try {
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+    const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+    const bd: unknown = payload?.binding_data;
+    if (typeof bd !== 'string' || !bd.includes('|')) return {};
+    const f = bd.split('|');
+    // v1 | ip | device | user-agent (kept as the slice in case it has '|') | client
+    const ip = f[1];
+    const device = f[2];
+    const ua = f.slice(3, f.length - 1).join('|');
+    const h: Record<string, string> = {};
+    if (ua) h['User-Agent'] = ua;
+    if (device) h['X-Device-Id'] = device;
+    if (ip) h['X-Forwarded-For'] = ip;
+    return h;
+  } catch {
+    return {};
+  }
+}
+
 export function setSession(session: TokenSession): void {
   // If the caller passed an access token, prefer the JWT's own exp claim.
   const jwtExp = decodeJwtExp(session.accessToken);
@@ -94,11 +127,16 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
     const refreshTokenValue = currentSession!.refreshToken!;
 
     try {
+      // Replay the EXACT binding context the refresh token was minted with
+      // (same stuff the OAuth login presented; the server recomputes binding
+      // from these). Without it the IDP sees a different fingerprint -> reject.
+      const bindingHeaders = bindingHeadersFromRefreshToken(refreshTokenValue);
       const response = await fetch(`${idpUrl}/api/ExternalAuth/refresh`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Client-Id': 'idealvibe_online',
+          ...bindingHeaders,
         },
         body: JSON.stringify({ refresh_token: refreshTokenValue }),
       });
