@@ -27,10 +27,12 @@ let nameToIdCachePopulatedAt = 0;
 const NAME_TO_ID_TTL_MS = 5 * 60 * 1000; // 5 min — refresh occasionally so new agents resolve
 
 function buildCloudAuthHeaders(token: string, signedPath: string): Record<string, string> {
-  const hmacHeaders = signVibeRequest('GET', signedPath, {
+  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
+    ? signVibeRequest('GET', signedPath, {
     clientId: config.vibeClientId,
     signingKey: config.vibeHmacKey,
-  });
+  })
+    : {};
   return {
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,

@@ -110,10 +110,12 @@ export class UpstreamSseManager {
     if (!token) {
       throw new Error('NO_SESSION');
     }
-    const hmac = signVibeRequest('GET', path, {
+    const hmac = process.env.VIBE_AUTH_MODE === 'hmac'
+      ? signVibeRequest('GET', path, {
       clientId: this.cfg.vibeClientId,
       signingKey: this.cfg.vibeHmacKey,
-    });
+    })
+      : {};
     return {
       ...hmac,
       'Authorization': `Bearer ${token}`,
