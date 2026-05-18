@@ -25,10 +25,12 @@ function buildAuthHeaders(
   token: string,
   signedPath: string,
 ): Record<string, string> {
-  const hmacHeaders = signVibeRequest('GET', signedPath, {
+  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
+    ? signVibeRequest('GET', signedPath, {
     clientId: cfg.vibeClientId,
     signingKey: cfg.vibeHmacKey,
-  });
+  })
+    : {};
   return {
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
