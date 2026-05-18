@@ -4,15 +4,13 @@ import type { Config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
 import * as teamCache from '../team/cache.js';
-import { normalizeAgents, type CloudAgent, type NormalizedAgent } from '../team/mapper.js';
+import { type NormalizedAgent } from '../team/mapper.js';
 
-// v1.5 (BAPert spec §3.2 + §3.3): upstream switched from
-// /v1/agentmail/agents?type=team (legacy per-user roster) to
-// /v1/agents/startup-config?project_id=X (canonical project-scoped read,
-// pulls from vibe.documents/agent_profiles per Option 3 documents-canonical
-// model). Cache re-keyed (userId, projectId) — single-user multi-project
-// machines no longer thrash the cache on project switch.
-const STARTUP_CONFIG_PATH = '/v1/agents/startup-config';
+// v1.6 (Jon directive 2026-05-16): upstream /v1/agents/startup-config
+// returns duplicate agent_profiles rows from vibe.documents. Switched to
+// /v1/projects/:id/team which pulls from vibe_projects.project_team_members
+// and returns exactly one row per agent. Same cache key (userId, projectId).
+const PROJECT_TEAM_PATH = '/v1/projects';
 const PROXY_TIMEOUT_MS = 10_000;
 
 class NotAuthenticatedError extends Error {
@@ -50,10 +48,9 @@ interface CloudFetchFailure {
 }
 
 async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<CloudFetchResult | CloudFetchFailure> {
-  // GET /v1/agents/startup-config?project_id=X — canonical project-scoped read.
-  // The HMAC signed path includes the query string so the cloud-side signature
-  // verification matches our exact request URL.
-  const signedPath = `${STARTUP_CONFIG_PATH}?project_id=${projectId}`;
+  // GET /v1/projects/:id/team — canonical project-scoped team read.
+  // Returns one row per agent from project_team_members (no doc-store dupes).
+  const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
 
   let token = await ensureValidToken(cfg.idpUrl);
@@ -97,12 +94,27 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
     return { ok: false, reason: 'http_error', detail: `HTTP ${attempt.status}` };
   }
 
-  const cloudAgents: CloudAgent[] | undefined = attempt.body?.data?.agents;
-  if (!Array.isArray(cloudAgents)) {
-    return { ok: false, reason: 'parse_error', detail: 'response missing data.agents array' };
+  const team = attempt.body?.data?.team;
+  if (!Array.isArray(team)) {
+    return { ok: false, reason: 'parse_error', detail: 'response missing data.team array' };
   }
 
-  return { ok: true, agents: normalizeAgents(cloudAgents) };
+  // Map ProjectTeamMember → NormalizedAgent (shape the renderer expects).
+  const agents: NormalizedAgent[] = team
+    .filter((m: any) => m && typeof m.agent_id === 'number' && typeof m.agent_name === 'string')
+    .map((m: any) => ({
+      id: m.agent_id,
+      name: m.agent_name,
+      displayName: m.agent_display_name || m.agent_name,
+      isActive: true,
+      rolePreset: m.canonical_role || m.role || undefined,
+      isCoordinator: m.is_lead === true,
+      // project_team_members doesn't carry these; grid falls back gracefully
+      startupOrder: undefined,
+      expertiseTags: undefined,
+    }));
+
+  return { ok: true, agents };
 }
 
 interface SyncPayload {
