@@ -36,6 +36,7 @@ function buildCloudAuthHeaders(token: string, signedPath: string): Record<string
   return {
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
+    'X-Client-Id': String(config.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };
@@ -495,7 +496,7 @@ export default function agentRoutes(_storage: any): Router {
       const identity = getBearerIdentity(req);
       const email = identity.email;
       const userId = identity.sub ? parseInt(identity.sub, 10) : null;
-      const clientId = identity.clientId ?? parseInt(process.env.VIBE_CLIENT_ID || '8', 10);
+      const clientId = identity.clientId ?? config.vibeIdealVibeClientNum;
       const { project_name } = req.body || {};
 
       let derivedName = project_name;

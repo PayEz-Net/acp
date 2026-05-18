@@ -34,6 +34,7 @@ function buildAuthHeaders(
   return {
     ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
+    'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };

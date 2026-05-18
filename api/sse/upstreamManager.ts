@@ -119,6 +119,7 @@ export class UpstreamSseManager {
     return {
       ...hmac,
       'Authorization': `Bearer ${token}`,
+      'X-Client-Id': String(this.cfg.vibeIdealVibeClientNum),
       'X-Vibe-Via': 'idp-proxy',
     };
   }

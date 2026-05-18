@@ -55,6 +55,12 @@ export const config = {
   // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
   vibeClientId: required('VIBE_CLIENT_ID'),
+  // Non-secret NUMERIC IdealVibe tenant id (cloud's authoritative
+  // enumeration: 2 PayEz API, 8 Ideal Resume Online, 9 Ideal Vibe - Online).
+  // ACP IS the IdealVibe product => 9. Single explicit baked source for the
+  // bearer X-Client-Id header (NOT the vibe_ HMAC string above; NO env/||
+  // fallback — C1).
+  vibeIdealVibeClientNum: 9,
   vibeHmacKey: process.env.VIBE_AUTH_MODE === 'hmac'
     ? required('VIBE_HMAC_KEY')
     : process.env.VIBE_HMAC_KEY,
