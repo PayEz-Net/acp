@@ -55,7 +55,9 @@ export const config = {
   // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
   vibeClientId: required('VIBE_CLIENT_ID'),
-  vibeHmacKey: required('VIBE_HMAC_KEY'),
+  vibeHmacKey: process.env.VIBE_AUTH_MODE === 'hmac'
+    ? required('VIBE_HMAC_KEY')
+    : process.env.VIBE_HMAC_KEY,
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',
   acpCallbackPort: parseInt(process.env.ACP_CALLBACK_PORT ?? '', 10) || 40030,
   acpAgents: (process.env.ACP_AGENTS || 'DotNetPert,BAPert,NextPert,QAPert,Aurum').split(',').map(a => a.trim()),

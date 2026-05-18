@@ -33,7 +33,7 @@ import { createHmac } from 'crypto';
 
 export interface VibeHmacConfig {
   clientId: string;
-  signingKey: string; // base64-encoded 32-byte key
+  signingKey: string | undefined; // base64-encoded 32-byte key; undefined in bearer mode (guarded at the chokepoint in signVibeRequest)
 }
 
 export interface VibeHmacHeaders {
@@ -70,6 +70,19 @@ export function signVibeRequest(
   pathWithPossibleQuery: string,
   cfg: VibeHmacConfig,
 ): VibeHmacHeaders {
+  // Decision-C single-authority chokepoint guard. bearer/no-session has no
+  // signing key; throw the canonical NOT_AUTHENTICATED contract error BEFORE
+  // any sign attempt. .code='NOT_AUTHENTICATED' -> response.js ERROR_STATUS
+  // -> the existing global errorHandler renders 401 + error() body for EVERY
+  // VIBE route (single authority, zero per-route copies). The early throw
+  // narrows cfg.signingKey to string for computeVibeHmacSignature below —
+  // the GUARD narrows; no !, no `as`, no ||. Plain Error + .code only (the 3
+  // NotAuthenticatedError classes diverge / team.ts is out of scope).
+  if (!cfg.signingKey) {
+    const e: NodeJS.ErrnoException = new Error('No active IDP session — user must log in via POST /v1/auth/login');
+    e.code = 'NOT_AUTHENTICATED';
+    throw e;
+  }
   const qIdx = pathWithPossibleQuery.indexOf('?');
   const path = qIdx === -1 ? pathWithPossibleQuery : pathWithPossibleQuery.slice(0, qIdx);
   const timestamp = Math.floor(Date.now() / 1000).toString();
