@@ -133,7 +133,7 @@ export default function authRoutes(): Router {
   // POST /v1/auth/refresh - Force token refresh
   router.post('/refresh', async (req: Request, res: Response) => {
     try {
-      const refreshed = await ensureValidToken(config.idpUrl);
+      const refreshed = await ensureValidToken(config.idpUrl, 'route@/v1/auth/refresh');
       if (!refreshed) {
         res.status(401).json(error('REFRESH_FAILED', 'Token refresh failed', 'auth_refresh', (req as any).requestId));
         return;
@@ -162,7 +162,7 @@ export default function authRoutes(): Router {
       return;
     }
 
-    const token = await ensureValidToken(config.idpUrl);
+    const token = await ensureValidToken(config.idpUrl, 'route@/v1/auth');
     
     res.json(success({
       is_authenticated: !!token,
@@ -183,7 +183,7 @@ export default function authRoutes(): Router {
       return;
     }
 
-    const token = await ensureValidToken(config.idpUrl);
+    const token = await ensureValidToken(config.idpUrl, 'route@/v1/auth');
     if (!token) {
       res.status(401).json(error('NOT_AUTHENTICATED', 'No valid token', 'auth_token', (req as any).requestId));
       return;

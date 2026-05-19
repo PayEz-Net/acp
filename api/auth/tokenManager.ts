@@ -11,6 +11,8 @@
  * ensureValidToken() can actually trigger a refresh before upstream rejects.
  */
 
+import { authRc } from './authRcLog.js';
+
 interface TokenSession {
   accessToken: string;
   refreshToken?: string;
@@ -28,6 +30,100 @@ let currentSession: TokenSession | null = null;
 // retries) need a refresh simultaneously, they must all await the same
 // in-flight promise and share its result.
 let inflightRefresh: Promise<boolean> | null = null;
+
+// ---- WO-1 Deliverable A: terminal-dead state -------------------------------
+// The IDP issues single-use refresh tokens. On an explicit non-retryable
+// rejection (INVALID_REFRESH_TOKEN / retryable:false) the session is DEAD —
+// retrying only feeds the 401-storm. We latch a MODULE-LEVEL terminal flag
+// (must survive currentSession being cleared), short-circuit every refresh
+// path to ZERO IDP calls, and fire AUTH_SESSION_DEAD exactly once.
+let sessionTerminallyDead = false;
+let terminalReason: { code: string; message: string; ts: string } | null = null;
+
+// Secondary anti-storm net ONLY (spec §2.4): bounded CONSECUTIVE ambiguous
+// failures (network / 5xx / unparseable). A transient blip must NOT kill a
+// live session (counter resets on any success), but an unbounded ambiguous
+// loop must still be capped. PRIMARY trigger is always the explicit
+// retryable:false signal below — this is just the backstop.
+let consecutiveAmbiguousFailures = 0;
+const MAX_REFRESH_FAILURES = 8;
+
+function newCid(): string {
+  return 'rc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// sidecar→renderer one-shot emitter (AUTH_SESSION_DEAD). Injected by
+// server.js so tokenManager stays pure / free of an SSE/express import
+// (no circular dep; unit-testable in isolation).
+type TerminalDeadEmitter = (reason: { code: string; message: string; ts: string }) => void;
+let terminalDeadEmitter: TerminalDeadEmitter | null = null;
+export function setTerminalDeadEmitter(fn: TerminalDeadEmitter | null): void {
+  terminalDeadEmitter = fn;
+}
+
+/**
+ * Detect the IDP's terminal (non-retryable) refresh rejection.
+ *
+ * CRITICAL (live repro 0HNLL0I52K5RP): the IDP DOUBLE-WRAPS. The outer body
+ * is JSON with error.code = "UNAUTHORIZED" (HTTP 401). The REAL signal is a
+ * .NET `ToString()`-style stringified object embedded INSIDE error.message:
+ *   { success = False, error = { code = INVALID_REFRESH_TOKEN ...
+ *     retryable = False ... } }
+ * Note `=` and spaces, NOT JSON `:`/quotes. So we SCAN THE RAW TEXT — we do
+ * NOT assume a parseable nested JSON object. Tolerant of `=` or `:`,
+ * optional quotes, and spacing. Exported for the verbatim-payload unit test.
+ */
+export function parseIdpTerminalSignal(rawBody: string): {
+  terminal: boolean;
+  code: string | null;
+  message: string;
+} {
+  const body = typeof rawBody === 'string' ? rawBody : '';
+  const hasInvalidRefresh = /INVALID_REFRESH_TOKEN/i.test(body);
+  // matches:  retryable = False  |  "retryable":false  |  retryable: false
+  const nonRetryable = /retryable\s*[:=]\s*"?false"?/i.test(body);
+  const terminal = hasInvalidRefresh || nonRetryable;
+  let code: string | null = null;
+  if (hasInvalidRefresh) {
+    code = 'INVALID_REFRESH_TOKEN';
+  } else {
+    const m = body.match(/code\s*[:=]\s*"?([A-Z][A-Z0-9_]{2,})"?/);
+    if (m) code = m[1];
+  }
+  return { terminal, code, message: body.slice(0, 300) };
+}
+
+/** Latch terminal-dead, clear the session, fire AUTH_SESSION_DEAD ONCE. */
+function markTerminallyDead(code: string, message: string, cid: string, trigger?: string): void {
+  if (sessionTerminallyDead) return; // idempotent — emit exactly once
+  sessionTerminallyDead = true;
+  terminalReason = { code, message, ts: new Date().toISOString() };
+  clearSession();
+  authRc({
+    phase: 'outcome',
+    cid,
+    trigger,
+    detail: {
+      result: 'terminal-dead',
+      code,
+      idp_message: message,
+      clearSession: true,
+      auth_session_dead_fired: true,
+    },
+  });
+  try {
+    terminalDeadEmitter?.({ ...terminalReason });
+  } catch {
+    /* a broken emitter must NEVER break the auth path */
+  }
+}
+
+export function isSessionTerminallyDead(): boolean {
+  return sessionTerminallyDead;
+}
+export function getTerminalReason(): { code: string; message: string; ts: string } | null {
+  return terminalReason;
+}
 
 function decodeJwtExp(token: string): Date | null {
   const parts = token.split('.');
@@ -79,6 +175,24 @@ function bindingHeadersFromRefreshToken(token: string): Record<string, string> {
 }
 
 export function setSession(session: TokenSession): void {
+  // [A §2.5] A freshly-pushed session (fresh login / external-session
+  // re-seed) RESETS terminal-dead — post-re-login must work WITHOUT a
+  // sidecar restart. Both /v1/auth/login and /v1/auth/external-session
+  // funnel through here, so this is the single correct reset point.
+  if (sessionTerminallyDead || consecutiveAmbiguousFailures > 0) {
+    authRc({
+      phase: 'reset',
+      detail: {
+        was_terminal: sessionTerminallyDead,
+        prior_code: terminalReason?.code ?? null,
+        cleared_ambiguous: consecutiveAmbiguousFailures,
+      },
+    });
+  }
+  sessionTerminallyDead = false;
+  terminalReason = null;
+  consecutiveAmbiguousFailures = 0;
+
   // If the caller passed an access token, prefer the JWT's own exp claim.
   const jwtExp = decodeJwtExp(session.accessToken);
   currentSession = {
@@ -106,19 +220,47 @@ export function isTokenValid(): boolean {
   return currentSession.expiresAt > soon;
 }
 
-export async function refreshToken(idpUrl: string): Promise<boolean> {
-  // Single-flight: if a refresh is already in progress, await its result
-  // rather than launching a parallel call that'll burn the single-use
-  // refresh_token. Every caller in the same microsecond window shares one
-  // upstream round-trip and one outcome.
+export async function refreshToken(idpUrl: string, trigger: string = 'unspecified'): Promise<boolean> {
+  // [A §2.3] SHORT-CIRCUIT — a terminally-dead session makes ZERO IDP
+  // calls. This is the stop-the-bleed guard: it runs BEFORE the in-flight
+  // check so a dead session never even joins a refresh.
+  if (sessionTerminallyDead) {
+    authRc({
+      phase: 'short-circuit',
+      trigger,
+      detail: { result: 'short-circuited', code: terminalReason?.code ?? null, reason: 'session already terminal — no IDP call' },
+    });
+    return false;
+  }
+
+  // Single-flight (UNCHANGED — guardrail §0): concurrent callers share one
+  // upstream round-trip. Sequential re-attempts are NOT covered here — that
+  // is exactly the storm the terminal-dead latch above halts.
   if (inflightRefresh) {
+    authRc({ phase: 'dedup', trigger, detail: { dedup: 'awaiting in-flight' } });
     return inflightRefresh;
   }
 
   if (!currentSession?.refreshToken) {
     console.warn('[Auth] refresh skipped: no refresh token in session');
+    authRc({ phase: 'outcome', trigger, detail: { result: 'failed', code: 'NO_REFRESH_TOKEN', transient: false } });
     return false;
   }
+
+  const cid = newCid();
+  const exp = currentSession.expiresAt;
+  authRc({ phase: 'attempt', cid, trigger, detail: {} });
+  authRc({
+    phase: 'token-state',
+    cid,
+    trigger,
+    detail: {
+      // redacted by construction: ISO exp + seconds + booleans only
+      access_exp: exp ? exp.toISOString() : null,
+      sec_to_expiry: exp ? Math.round((exp.getTime() - Date.now()) / 1000) : null,
+      has_refresh_token: !!currentSession.refreshToken,
+    },
+  });
 
   inflightRefresh = (async (): Promise<boolean> => {
     // Re-read currentSession inside the promise — by the time we actually
@@ -131,7 +273,8 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
       // (same stuff the OAuth login presented; the server recomputes binding
       // from these). Without it the IDP sees a different fingerprint -> reject.
       const bindingHeaders = bindingHeadersFromRefreshToken(refreshTokenValue);
-      const response = await fetch(`${idpUrl}/api/ExternalAuth/refresh`, {
+      const url = `${idpUrl}/api/ExternalAuth/refresh`;
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -141,9 +284,55 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
         body: JSON.stringify({ refresh_token: refreshTokenValue }),
       });
 
+      // [D §5.4 / §6.4] Full outbound request line + status — closes the
+      // layer-2 black hole AT THE SIDECAR END. Binding header PRESENCE only
+      // (values redacted).
+      authRc({
+        phase: 'outbound',
+        cid,
+        trigger,
+        detail: {
+          request: `POST ${url}`,
+          status: response.status,
+          binding_headers_present: {
+            'User-Agent': 'User-Agent' in bindingHeaders,
+            'X-Device-Id': 'X-Device-Id' in bindingHeaders,
+            'X-Forwarded-For': 'X-Forwarded-For' in bindingHeaders,
+          },
+        },
+      });
+
       if (!response.ok) {
         const errBody = await response.text().catch(() => '(unreadable)');
         console.error(`[Auth] refresh failed: IDP returned ${response.status} — ${errBody.slice(0, 500)}`);
+
+        // [A §2.2] PRIMARY trigger: explicit non-retryable IDP signal,
+        // scanned out of the double-wrapped .NET ToString() message string.
+        const sig = parseIdpTerminalSignal(errBody);
+        if (sig.terminal) {
+          markTerminallyDead(sig.code ?? 'INVALID_REFRESH_TOKEN', sig.message, cid, trigger);
+          return false;
+        }
+
+        // [A §2.4] Transient (HTTP error WITHOUT the explicit signal):
+        // NOT terminal. Bounded secondary anti-storm net only.
+        consecutiveAmbiguousFailures += 1;
+        authRc({
+          phase: 'outcome',
+          cid,
+          trigger,
+          detail: {
+            result: 'failed',
+            code: `HTTP_${response.status}`,
+            retryable: true,
+            transient: true,
+            idp_message: errBody.slice(0, 300),
+            ambiguous_failures: consecutiveAmbiguousFailures,
+          },
+        });
+        if (consecutiveAmbiguousFailures >= MAX_REFRESH_FAILURES) {
+          markTerminallyDead('MAX_REFRESH_FAILURES', `bounded anti-storm net: ${consecutiveAmbiguousFailures} consecutive ambiguous failures`, cid, trigger);
+        }
         return false;
       }
 
@@ -152,6 +341,11 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
       const accessToken = payload?.access_token;
       if (!accessToken) {
         console.error('[Auth] refresh failed: IDP response had no access_token', { bodyKeys: Object.keys(body || {}), payloadKeys: Object.keys(payload || {}) });
+        consecutiveAmbiguousFailures += 1;
+        authRc({ phase: 'outcome', cid, trigger, detail: { result: 'failed', code: 'NO_ACCESS_TOKEN', transient: true, ambiguous_failures: consecutiveAmbiguousFailures } });
+        if (consecutiveAmbiguousFailures >= MAX_REFRESH_FAILURES) {
+          markTerminallyDead('MAX_REFRESH_FAILURES', 'bounded anti-storm net: repeated no-access_token', cid, trigger);
+        }
         return false;
       }
 
@@ -163,11 +357,25 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
         userId: payload?.user?.userId || currentSession!.userId,
         email: payload?.user?.email || currentSession!.email,
       };
+      consecutiveAmbiguousFailures = 0; // any success resets the backstop
       console.log(`[Auth] refresh ok, expires ${currentSession.expiresAt.toISOString()}`);
+      authRc({ phase: 'outcome', cid, trigger, detail: { result: 'refreshed', new_exp: currentSession.expiresAt.toISOString() } });
 
       return true;
     } catch (err: any) {
+      // [A §2.4] Network error / exception = TRANSIENT, never terminal. A
+      // blip must not kill a live session.
       console.error(`[Auth] refresh threw: ${err?.message || err}`);
+      consecutiveAmbiguousFailures += 1;
+      authRc({
+        phase: 'outcome',
+        cid,
+        trigger,
+        detail: { result: 'failed', code: 'NETWORK_OR_THROW', transient: true, error: String(err?.message || err).slice(0, 200), ambiguous_failures: consecutiveAmbiguousFailures },
+      });
+      if (consecutiveAmbiguousFailures >= MAX_REFRESH_FAILURES) {
+        markTerminallyDead('MAX_REFRESH_FAILURES', 'bounded anti-storm net: repeated network/throw', cid, trigger);
+      }
       return false;
     } finally {
       inflightRefresh = null;
@@ -177,11 +385,16 @@ export async function refreshToken(idpUrl: string): Promise<boolean> {
   return inflightRefresh;
 }
 
-export async function ensureValidToken(idpUrl: string): Promise<string | null> {
+export async function ensureValidToken(idpUrl: string, trigger: string = 'unspecified'): Promise<string | null> {
+  // [A §2.3] Short-circuit before any session/IDP work.
+  if (sessionTerminallyDead) {
+    authRc({ phase: 'short-circuit', trigger, detail: { result: 'short-circuited', via: 'ensureValidToken', code: terminalReason?.code ?? null } });
+    return null;
+  }
   if (!currentSession) return null;
 
   if (!isTokenValid() && currentSession.refreshToken) {
-    const refreshed = await refreshToken(idpUrl);
+    const refreshed = await refreshToken(idpUrl, trigger);
     if (!refreshed) return null;
   }
 
@@ -193,9 +406,15 @@ export async function ensureValidToken(idpUrl: string): Promise<string | null> {
  * cloud returns 401 despite our local check saying the token is valid —
  * the IDP session may have been invalidated out-of-band.
  */
-export async function forceRefresh(idpUrl: string): Promise<string | null> {
+export async function forceRefresh(idpUrl: string, trigger: string = 'unspecified'): Promise<string | null> {
+  // [A §2.3] Short-circuit — without this, mailProxy's forceRefresh-on-401
+  // retry (the storm's loudest caller) keeps hammering the IDP.
+  if (sessionTerminallyDead) {
+    authRc({ phase: 'short-circuit', trigger, detail: { result: 'short-circuited', via: 'forceRefresh', code: terminalReason?.code ?? null } });
+    return null;
+  }
   if (!currentSession?.refreshToken) return null;
-  const ok = await refreshToken(idpUrl);
+  const ok = await refreshToken(idpUrl, trigger);
   if (!ok) return null;
   return currentSession?.accessToken ?? null;
 }

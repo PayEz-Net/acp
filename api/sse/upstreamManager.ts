@@ -106,7 +106,7 @@ export class UpstreamSseManager {
   }
 
   private async buildStreamAuthHeaders(path: string): Promise<Record<string, string>> {
-    const token = await ensureValidToken(this.cfg.idpUrl);
+    const token = await ensureValidToken(this.cfg.idpUrl, 'ensureValidToken@sse');
     if (!token) {
       throw new Error('NO_SESSION');
     }

@@ -39,6 +39,8 @@ import agentRoutes from './routes/agents.js';
 import teamRoutes from './routes/team.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
+import authDiagRoutes from './routes/authDiag.js';
+import { setTerminalDeadEmitter } from './auth/tokenManager.js';
 import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
 
 import { validateConfig } from './lifecycle/configValidator.js';
@@ -111,6 +113,20 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
+  // WO-1 Deliverable C seam: sidecar = SOLE terminal-dead authority (§9
+  // Option A). Inject the one-shot AUTH_SESSION_DEAD emitter so tokenManager
+  // can push to the renderer over the EXISTING SSE stream without importing
+  // express/SSE (no circular dep; tokenManager stays unit-testable).
+  // tokenManager guards idempotency — this fires exactly once per dead session.
+  setTerminalDeadEmitter((reason) => {
+    console.error(`[Auth] session terminally dead (${reason.code}) — emitting AUTH_SESSION_DEAD once`);
+    localEventBus.emitAuthSessionDead({
+      code: reason.code,
+      message: reason.message,
+      ts: reason.ts,
+    });
+  });
+
   // Contractor service — disabled by default (not stable yet)
   const contractorService = appConfig.enableContractors 
     ? new ContractorService(storage, localEventBus, appConfig)
@@ -139,6 +155,10 @@ export async function createApp(cfg) {
   // SSE — upstream (mail from cloud) + local (party/autonomy) events → downstream fan-out
   const upstreamSse = new UpstreamSseManager(appConfig);
   app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus));
+
+  // WO-1 Deliverable D §5.6 — queryable [AuthRC] ring-buffer surface.
+  // Authenticated (mounted after localAuth) — renderer/diagnostics only.
+  app.use('/v1/auth-rc', authDiagRoutes());
 
   // Agent lifecycle — spawn/kill/restart via Electron callback, crash-loop backoff
   const backoffManager = new BackoffManager();

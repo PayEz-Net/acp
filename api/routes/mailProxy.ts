@@ -65,7 +65,7 @@ async function proxyToCloud(
   const qs = query ? buildQueryString(query) : '';
   const url = `${cfg.vibeApiUrl}${AGENTMAIL_BASE}${path}${qs}`;
 
-  let token = await ensureValidToken(cfg.idpUrl);
+  let token = await ensureValidToken(cfg.idpUrl, 'ensureValidToken@mail');
   if (!token) {
     throw new NotAuthenticatedError();
   }
@@ -117,7 +117,7 @@ async function proxyToCloud(
     return firstAttempt;
   }
 
-  const refreshed = await forceRefresh(cfg.idpUrl);
+  const refreshed = await forceRefresh(cfg.idpUrl, 'forceRefresh-on-401@mail');
   if (!refreshed) {
     throw new NotAuthenticatedError();
   }
