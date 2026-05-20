@@ -9,11 +9,13 @@
  * redacted-by-construction (presence/shape only) and unit-testable in
  * isolation. tokenManager writes; authDiag route reads.
  *
- * Repeat-aggregation (spec §5.5): an identical failing OUTCOME (same IDP
- * code) does NOT emit 300 lines — it collapses into a single rolling
- * counter ("INVALID_REFRESH_TOKEN x47 in 50s") flushed on code-change,
- * terminal-dead, or buffer read. Keeps the terminal sequence < 10 lines
- * (acceptance §6.1).
+ * Repeat-aggregation (spec §5.5; extended in WO-2A): identical failing
+ * OUTCOMEs (same IDP code) AND identical SHORT-CIRCUITs (same dead-state
+ * code) collapse into a single rolling counter, namespaced by phase
+ * ("short-circuited:INVALID_REFRESH_TOKEN x47 in 50s"), flushed on
+ * code-change, terminal-dead, or buffer read. Keeps the terminal sequence
+ * < 10 lines (acceptance §6.1) and bounds the post-dead storm to FIRST
+ * occurrence + rolling summary (WO-2A acceptance).
  */
 
 export type AuthRcPhase =
@@ -36,8 +38,14 @@ export interface AuthRcEntry {
 const RING_MAX = 200;
 const ring: AuthRcEntry[] = [];
 
-// Rolling aggregation of identical repeated failures.
-let aggCode: string | null = null;
+// Rolling aggregation of identical repeated events.
+// [WO-2A] aggKey is the phase-namespaced collapse key:
+//   'outcome:<code>'        (existing — failing IDP outcomes)
+//   'short-circuit:<code>'  (new — dead-state short-circuits)
+// Namespacing prevents a transient HTTP_503 outcome storm and a
+// post-dead INVALID_REFRESH_TOKEN short-circuit storm from colliding
+// into a single ambiguous aggregate.
+let aggKey: string | null = null;
 let aggCount = 0;
 let aggFirstMs = 0;
 let aggLastTrigger: string | undefined;
@@ -58,57 +66,77 @@ function fmt(e: AuthRcEntry): string {
   return `[AuthRC] ${head} ${body}`;
 }
 
-/** Flush the rolling identical-failure aggregate as one summary entry/line. */
+/** Flush the rolling identical-event aggregate as one summary entry/line. */
 function flushAggregate(reason: 'code-change' | 'terminal' | 'read'): void {
-  if (aggCount <= 0 || aggCode == null) return;
+  if (aggCount <= 0 || aggKey == null) return;
+  // [WO-2A] Split phase-namespaced key. indexOf(':') (not split) so a code
+  // that ever contains ':' isn't truncated. detail.result stays
+  // 'failed-aggregate' for parser back-compat; detail.code is the bare
+  // IDP code; detail.phase_source is the new structured discriminator
+  // (BAPert Q3 ruling).
+  const sep = aggKey.indexOf(':');
+  const phaseSource = aggKey.slice(0, sep) as 'outcome' | 'short-circuit';
+  const code = aggKey.slice(sep + 1);
   const windowSec = Math.round((Date.now() - aggFirstMs) / 1000);
   const halted = reason === 'terminal';
+  const noteVerb = phaseSource === 'short-circuit' ? 'short-circuited:' : '';
   const entry: AuthRcEntry = {
     ts: new Date().toISOString(),
     phase: 'outcome',
     trigger: aggLastTrigger,
     detail: {
       result: 'failed-aggregate',
-      code: aggCode,
+      code,
+      phase_source: phaseSource,
       repeats: aggCount,
       window_sec: windowSec,
-      note: `${aggCode} x${aggCount} in ${windowSec}s${halted ? ' — HALTED' : ''}`,
+      note: `${noteVerb}${code} x${aggCount} in ${windowSec}s${halted ? ' — HALTED' : ''}`,
     },
   };
   pushRing(entry);
+  // Aggregate is an error-class summary regardless of source phase
+  // (BAPert Q1 ruling: preserve existing channel split — first occurrence
+  // routes per its source phase, aggregate stays on console.error).
   console.error(fmt(entry));
-  aggCode = null;
+  aggKey = null;
   aggCount = 0;
   aggFirstMs = 0;
   aggLastTrigger = undefined;
 }
 
 /**
- * Record one [AuthRC] event. Repeated identical failing outcomes are
- * aggregated rather than logged line-by-line.
+ * Record one [AuthRC] event. Repeated identical failing outcomes AND
+ * repeated identical short-circuits are aggregated (phase-namespaced)
+ * rather than logged line-by-line. WO-2A: extends the aggregator from
+ * outcome-only to (outcome|short-circuit) × code.
  */
 export function authRc(entry: Omit<AuthRcEntry, 'ts'>): void {
-  const isRepeatableFailure =
-    entry.phase === 'outcome' &&
-    (entry.detail?.result === 'failed') &&
-    typeof entry.detail?.code === 'string';
+  // [WO-2A] Repeatable iff (outcome+failed+code) OR (short-circuit+code).
+  // The key namespace stops a transient HTTP_503 outcome run and a
+  // post-dead INVALID_REFRESH_TOKEN short-circuit run from being collapsed
+  // into one ambiguous aggregate.
+  const repeatableKey: string | null =
+    (entry.phase === 'outcome' && entry.detail?.result === 'failed' && typeof entry.detail?.code === 'string')
+      ? `outcome:${entry.detail.code as string}`
+    : (entry.phase === 'short-circuit' && typeof entry.detail?.code === 'string')
+      ? `short-circuit:${entry.detail.code as string}`
+    : null;
 
-  if (isRepeatableFailure) {
-    const code = entry.detail.code as string;
-    if (aggCode === code) {
+  if (repeatableKey) {
+    if (aggKey === repeatableKey) {
       aggCount += 1;
       aggLastTrigger = entry.trigger ?? aggLastTrigger;
       return; // collapse — do not emit a line per repeat
     }
-    // a different code (or first failure) — flush any prior run, start new
+    // a different key (or first occurrence) — flush any prior run, start new
     flushAggregate('code-change');
-    aggCode = code;
+    aggKey = repeatableKey;
     aggCount = 1;
     aggFirstMs = Date.now();
     aggLastTrigger = entry.trigger;
     // fall through: emit the FIRST occurrence so the storm's onset is visible
   } else if (aggCount > 0 && entry.phase === 'outcome') {
-    // a non-failed outcome ends the run — summarize what came before
+    // a non-failed outcome ends an in-flight run — summarize what came before
     flushAggregate('code-change');
   }
 
@@ -145,7 +173,7 @@ export function getAuthRc(limit = 50): AuthRcEntry[] {
 /** Test/diagnostic helper — clears ring + aggregation state. */
 export function _resetAuthRc(): void {
   ring.length = 0;
-  aggCode = null;
+  aggKey = null;
   aggCount = 0;
   aggFirstMs = 0;
   aggLastTrigger = undefined;

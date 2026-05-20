@@ -114,7 +114,18 @@ describe('terminal-dead + short-circuit (Deliverable A, acceptance §6.1)', () =
     const terminal = rc.filter((e) => e.detail?.result === 'terminal-dead');
     const shorted = rc.filter((e) => e.phase === 'short-circuit');
     expect(terminal.length).toBe(1);
-    expect(shorted.length).toBeGreaterThanOrEqual(3);
+    // [WO-2A] Identical-code short-circuits now collapse to FIRST + aggregate.
+    // The 3 short-circuited calls above (refresh/ensure/force, same code)
+    // yield 1 ring short-circuit + 1 failed-aggregate summary. Was `>= 3`
+    // (the pre-WO-2A un-aggregated behavior); the test's intent — "short-
+    // circuit observable in ring" — is preserved by both assertions.
+    expect(shorted.length).toBe(1);
+    const scAgg = rc.filter(
+      (e) => e.detail?.result === 'failed-aggregate' && e.detail?.phase_source === 'short-circuit',
+    );
+    expect(scAgg.length).toBe(1);
+    expect(scAgg[0].detail.code).toBe('INVALID_REFRESH_TOKEN');
+    expect(scAgg[0].detail.repeats).toBe(3);
     expect(rc.length).toBeLessThan(15);
   });
 
@@ -145,5 +156,81 @@ describe('terminal-dead + short-circuit (Deliverable A, acceptance §6.1)', () =
       email: 'dev@example.com',
     });
     expect(isSessionTerminallyDead()).toBe(false);
+  });
+});
+
+// ── WO-2A — aggregator collapses repeated short-circuits (post-dead storm).
+// Acceptance: after latch, ensureValidToken x100 yields ring delta ≤ 2
+// (first short-circuit + rolling aggregate) and console split warn=1 +
+// error=1 (BAPert Q1 ruling: existing channel split preserved; total
+// post-latch emissions = 2, matching WO §ACCEPTANCE intent).
+describe('aggregator collapses repeated short-circuits (WO-2A)', () => {
+  let warnSpy;
+  let errorSpy;
+
+  beforeEach(() => {
+    _resetAuthRc();
+    clearSession();
+    setTerminalDeadEmitter(null);
+  });
+
+  afterEach(() => {
+    if (warnSpy) warnSpy.mockRestore();
+    if (errorSpy) errorSpy.mockRestore();
+    warnSpy = undefined;
+    errorSpy = undefined;
+  });
+
+  test('post-latch: ensureValidToken x100 → ring delta ≤ 2, console warn=1 + error=1', async () => {
+    global.fetch = jest.fn(async () =>
+      mockFetchResponse({ ok: false, status: 401, text: LIVE_REPRO_401_BODY }),
+    );
+    seedSession();
+
+    // 1) Engage the latch via the real IDP-call path (one fetch, one terminal-dead outcome).
+    expect(await refreshToken('https://idp.test', 'test')).toBe(false);
+    expect(isSessionTerminallyDead()).toBe(true);
+
+    // 2) Snapshot ring length pre-storm — we measure the DELTA (the storm's footprint),
+    //    not the absolute ring (which still contains attempt/token-state/outbound/terminal-dead).
+    const ringBefore = getAuthRc(200).length;
+
+    // 3) Spy on consoles AFTER latch so we count only post-dead emissions.
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    // 4) The storm: 100 identical short-circuited ensureValidToken calls.
+    for (let i = 0; i < 100; i++) {
+      const t = await ensureValidToken('https://idp.test', 'mail');
+      expect(t).toBeNull();
+    }
+
+    // 5) Pull (also triggers flushAggregate('read') so the aggregate becomes visible).
+    const rcAfter = getAuthRc(200);
+    const delta = rcAfter.slice(ringBefore);
+
+    // Ring footprint: exactly the FIRST short-circuit + the rolling aggregate.
+    expect(delta.length).toBeLessThanOrEqual(2);
+
+    const firstSc = delta.find((e) => e.phase === 'short-circuit');
+    expect(firstSc).toBeDefined();
+    expect(firstSc.detail.code).toBe('INVALID_REFRESH_TOKEN');
+
+    const agg = delta.find((e) => e.detail?.result === 'failed-aggregate');
+    expect(agg).toBeDefined();
+    expect(agg.phase).toBe('outcome'); // back-compat: parsers keying on phase==='outcome' still work
+    expect(agg.detail.code).toBe('INVALID_REFRESH_TOKEN');
+    expect(agg.detail.phase_source).toBe('short-circuit');
+    expect(agg.detail.repeats).toBe(100); // first occurrence + 99 collapsed = 100 total
+    expect(agg.detail.note).toMatch(/^short-circuited:INVALID_REFRESH_TOKEN x100 in \d+s$/);
+
+    // Console split per BAPert Q1 ruling:
+    //   warn=1 (first short-circuit, via existing line-127 dispatch)
+    //   error=1 (aggregate flush, via existing line-79 dispatch)
+    // Total post-latch console emissions = 2, satisfying WO §ACCEPTANCE intent
+    // ("console.warn called exactly 2 times total") while preserving the
+    // existing channel semantics (aggregate flush is error-class).
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
   });
 });
