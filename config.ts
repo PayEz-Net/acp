@@ -46,7 +46,7 @@ function required(name: string): string {
 export const config = {
   port: parseInt(process.env.PORT ?? '', 10) || 3001,
   host: '127.0.0.1',
-  idpUrl: process.env.IDP_URL || 'http://10.0.0.93:32785',
+  idpUrl: required('IDP_URL'),
   // De-conflated: acp-api's cloud Vibe API endpoint is its OWN concern,
   // NOT the same as acp-stable's ACP_API_URL (= the local acp-api backend
   // at 127.0.0.1:3001). Reading ACP_API_URL here cross-wired the two: an
