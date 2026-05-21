@@ -42,6 +42,7 @@ import authRoutes from './routes/auth.js';
 import authDiagRoutes from './routes/authDiag.js';
 import { setTerminalDeadEmitter } from './auth/tokenManager.js';
 import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
+import keyRoutes from './routes/keys.js';
 
 import { validateConfig } from './lifecycle/configValidator.js';
 
@@ -249,7 +250,8 @@ export async function createApp(cfg) {
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
-  
+  app.use('/v1/keys', keyRoutes(appConfig));
+
   // CLI proxy routes - forward to IDP
   app.use(cliProxyRoutes(appConfig));
 

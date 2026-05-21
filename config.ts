@@ -86,6 +86,10 @@ export const config = {
   vibesqlUrl: process.env.VIBESQL_URL || '',
   vibesqlDirectUrl: process.env.VIBESQL_DIRECT_URL || '',
   vibesqlContainerSecret: process.env.VIBESQL_CONTAINER_SECRET || '',
+
+  // Free-tier key system (soft launch)
+  licenseJwtSecret: process.env.LICENSE_JWT_SECRET || '',
+  adminApiToken: process.env.ADMIN_API_TOKEN || '',
 };
 
 export type Config = typeof config;
