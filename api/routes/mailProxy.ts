@@ -3,8 +3,9 @@ import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
-import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
+import * as projectsCache from '../projects/cache.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -35,6 +36,33 @@ function buildAuthHeaders(
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };
+}
+
+/**
+ * Resolve the active session's current project_id from acp-api's projects
+ * cache. Server-derived from the same source LifecycleHub on the desktop uses
+ * (GET /v1/projects/current → `cache.current`), so the sidecar's view stays
+ * lock-step with the renderer's.
+ *
+ * Used by POST /send to stamp the outgoing mail body with `project_id` so the
+ * cloud can enforce project-scoped isolation (WO-agent-mail-project-isolation
+ * §Sidecar). GET /inbox + GET /messages do NOT use this — the cloud derives
+ * project_id from auth on the read side and filters there (single source of
+ * truth on the server; sidecar adds no belt-and-suspenders filter).
+ *
+ * Prefer fresh (60s TTL); fall back to stale for resilience inside a desktop
+ * session. Project switches always relaunch the app (project-switch.ts), so a
+ * stale entry within a single session is identical to fresh by construction.
+ * Returns null when no session or no cached current — the call site logs and
+ * forwards without project_id; the cloud will respond per its enforcement
+ * policy (400 if client-supplied is required, 401/403 if server-derived).
+ */
+function resolveCurrentProjectId(): number | null {
+  const session = getSession();
+  if (!session?.userId) return null;
+  const entry = projectsCache.current.getFresh(session.userId)
+    ?? projectsCache.current.getStale(session.userId);
+  return entry?.current_project_id ?? null;
 }
 
 /**
@@ -169,6 +197,8 @@ export default function mailProxyRoutes(
 
   // POST /v1/mail/send -> idealvibe.online/v1/agentmail/send
   // v2: Validates recipients (no more hiring side-effect — use POST /v1/contractors/hire)
+  // WO-agent-mail-project-isolation §Sidecar: stamp project_id from session's
+  // cached current-project before forwarding. Cloud-side enforces.
   router.post('/send', async (req: Request, res: Response) => {
     try {
       const { from_agent, to, subject } = req.body || {};
@@ -186,8 +216,23 @@ export default function mailProxyRoutes(
         }
       }
 
+      // Sidecar attach (WO-agent-mail-project-isolation §Sidecar): stamp the
+      // active project_id derived from acp-api's projects cache onto the
+      // outgoing body. Server-derived overrides any client-supplied value
+      // because the sidecar is closer to the auth boundary than the renderer.
+      // Cloud-side enforcement is the final say (per WO §Cloud API).
+      const projectId = resolveCurrentProjectId();
+      const forwardBody: Record<string, unknown> = { ...(req.body ?? {}) };
+      if (projectId != null) {
+        forwardBody.project_id = projectId;
+      } else {
+        console.warn(
+          `[mailProxy] POST /send: no current_project_id in cache — forwarding without it (cloud will enforce). from=${from_agent ?? '?'} to=${Array.isArray(to) ? to.join(',') : '?'}`,
+        );
+      }
+
       // Proxy to cloud
-      const cloudResult = await proxyToCloud(cfg, '/send', 'POST', undefined, req.body);
+      const cloudResult = await proxyToCloud(cfg, '/send', 'POST', undefined, forwardBody);
       res.status(cloudResult.status).json(cloudResult.data);
 
       // Post-send hooks
