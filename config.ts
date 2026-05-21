@@ -75,7 +75,6 @@ export const config = {
   execTimeoutMs: parseInt(process.env.EXEC_TIMEOUT_MS ?? '', 10) || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
-  redisUrl: process.env.REDIS_URL || 'redis://10.0.0.93:6379',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',
   enableContractors: process.env.ENABLE_CONTRACTORS === 'true', // Disabled by default - not stable yet
   partyTickMs: parseInt(process.env.PARTY_TICK_MS ?? '', 10) || 5000,
