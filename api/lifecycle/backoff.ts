@@ -93,6 +93,17 @@ export class BackoffManager {
       state.stabilityTimer = null;
     }
 
+    // Intentional stop: the kill/stop route sets status='stopped' BEFORE
+    // tearing down the PTY. On Windows a user-initiated kill exits non-zero
+    // (STATUS_CONTROL_C_EXIT = -1073741510), which the exitCode-only logic
+    // below would misclassify as a crash and auto-restart — the "stop then
+    // it respawns" bug. Honor the recorded intent: never resurrect an agent
+    // the user explicitly stopped. A genuine crash leaves status at
+    // 'ready'/'busy'/'idle', so this guard only catches deliberate stops.
+    if (state.status === 'stopped') {
+      return { shouldRestart: false, delay: 0 };
+    }
+
     // Clean exit
     if (exitCode === 0) {
       state.status = 'stopped';
