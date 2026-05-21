@@ -82,6 +82,8 @@ export async function createApp(cfg) {
   // acp-stable-api e265ffd/8dccbbe for QAPert's ACP→IDP round-trip smoke).
   // No /issue or /redeem in this repo; just the one thin /email pass-through.
   app.use('/v1/auth/magic-link', magicLinkEmailRoutes());
+  // License key routes — validate is public, revoke has its own admin gate
+  app.use('/v1/keys', keyRoutes(appConfig));
 
   // Apply local auth middleware to all routes after this point
   app.use(localAuth(appConfig.acpLocalSecret || null, storage));
@@ -250,7 +252,6 @@ export async function createApp(cfg) {
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
-  app.use('/v1/keys', keyRoutes(appConfig));
 
   // CLI proxy routes - forward to IDP
   app.use(cliProxyRoutes(appConfig));

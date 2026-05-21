@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS vibe.license_keys (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   key_hash      VARCHAR(64) NOT NULL UNIQUE,
   key_prefix    VARCHAR(8)  NOT NULL,
+  hash_version  VARCHAR(8)  NOT NULL DEFAULT 'v1',
   tier          VARCHAR(32) NOT NULL DEFAULT 'free_year',
   status        VARCHAR(16) NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','redeemed','revoked','expired')),

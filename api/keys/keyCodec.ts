@@ -1,14 +1,19 @@
-import { createHash, randomInt } from 'crypto';
+import { createHash, createHmac, randomInt } from 'crypto';
 
 /**
  * Crockford-safe alphabet for premium-feel keys.
  * Deliberately omits 0, O, 1, I, L to avoid transcription ambiguity.
  */
-const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+export const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const PREFIX = 'ACP-SL-';
 const BODY_LENGTH = 12; // 3 groups of 4 in presentation
 
+/**
+ * Generate a single random char from ALPHABET using crypto.randomInt.
+ * Rejection sampling avoids modulo bias when alphabet length isn't a power of 2.
+ */
 function randomChar(): string {
+  // randomInt is inclusive-exclusive: [0, ALPHABET.length)
   return ALPHABET[randomInt(0, ALPHABET.length)];
 }
 
@@ -25,17 +30,19 @@ export function generateKey(): string {
  * Normalize a user-supplied key for hashing:
  * - Upper-case
  * - Strip hyphens and whitespace
+ *
+ * Canonical pre-image: the full normalized string including ACPSL prefix.
  */
 export function normalizeKey(key: string): string {
   return key.toUpperCase().replace(/[-\s]/g, '');
 }
 
 /**
- * Compute the SHA-256 hash of a normalized key.
- * We never store plaintext keys.
+ * Compute HMAC-SHA256(key, pepper) for storage.
+ * The pepper is a server-side secret so a DB-only leak cannot be brute-forced.
  */
-export function hashKey(normalized: string): string {
-  return createHash('sha256').update(normalized, 'utf8').digest('hex');
+export function hashKey(normalized: string, pepper: string): string {
+  return createHmac('sha256', pepper).update(normalized, 'utf8').digest('hex');
 }
 
 /**

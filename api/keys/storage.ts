@@ -37,6 +37,7 @@ export interface LicenseKeyRow {
   revoked_at: string | null;
   revoke_reason: string | null;
   created_at: string;
+  hash_version: string;
 }
 
 export async function findKeyByHash(keyHash: string): Promise<LicenseKeyRow | null> {
@@ -58,12 +59,14 @@ export async function revokeKey(id: string, reason: string): Promise<boolean> {
   return result.success && Array.isArray(result.data) && result.data.length > 0;
 }
 
-export async function insertKeys(rows: Array<{ key_hash: string; key_prefix: string; expires_at: string }>): Promise<number> {
+export async function insertKeys(
+  rows: Array<{ key_hash: string; key_prefix: string; expires_at: string; hash_version: string }>,
+): Promise<number> {
   if (rows.length === 0) return 0;
   const values = rows
-    .map((r) => `(${escapeSql(r.key_hash)}, ${escapeSql(r.key_prefix)}, ${escapeSql(r.expires_at)})`)
+    .map((r) => `(${escapeSql(r.key_hash)}, ${escapeSql(r.key_prefix)}, ${escapeSql(r.expires_at)}, ${escapeSql(r.hash_version)})`)
     .join(', ');
-  const sql = `INSERT INTO vibe.license_keys (key_hash, key_prefix, expires_at) VALUES ${values} ON CONFLICT (key_hash) DO NOTHING RETURNING id`;
+  const sql = `INSERT INTO vibe.license_keys (key_hash, key_prefix, expires_at, hash_version) VALUES ${values} ON CONFLICT (key_hash) DO NOTHING RETURNING id`;
   const result = await queryVibeSql(sql);
   if (!result.success) {
     throw new Error(result.error?.message || 'VibeSQL insert failed');

@@ -88,7 +88,7 @@ export const config = {
   vibesqlContainerSecret: process.env.VIBESQL_CONTAINER_SECRET || '',
 
   // Free-tier key system (soft launch)
-  licenseJwtSecret: process.env.LICENSE_JWT_SECRET || '',
+  licenseKeyPepper: process.env.LICENSE_KEY_PEPPER || '',
   adminApiToken: process.env.ADMIN_API_TOKEN || '',
 };
 

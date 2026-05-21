@@ -2,10 +2,11 @@ import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { config, type Config } from '../../config.js';
 import { looksLikeKey, normalizeKey, hashKey, keyPrefix } from '../keys/keyCodec.js';
-import { mintLicenseJwt } from '../keys/keyJwt.js';
 import { findKeyByHash, redeemKey } from '../keys/storage.js';
+import { requireAdmin, isValidUuid } from '../keys/adminAuth.js';
+import { RateLimiter } from '../keys/rateLimit.js';
 
-const JWT_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+const rateLimiter = new RateLimiter();
 
 export default function keyRoutes(cfg: Config = config): Router {
   const router = Router();
@@ -13,8 +14,15 @@ export default function keyRoutes(cfg: Config = config): Router {
   // POST /v1/keys/validate — public (added to PUBLIC_PATHS in localAuth.ts)
   router.post('/validate', async (req: Request, res: Response) => {
     try {
-      const { key } = req.body || {};
       const requestId = (req as any).requestId;
+      const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+
+      if (!rateLimiter.check(clientIp)) {
+        res.status(429).json(error('RATE_LIMITED', 'Too many validation attempts', 'keys_validate', requestId));
+        return;
+      }
+
+      const { key } = req.body || {};
 
       if (!key || typeof key !== 'string') {
         res.status(400).json(error('VALIDATION_ERROR', 'key is required', 'keys_validate', requestId));
@@ -26,8 +34,13 @@ export default function keyRoutes(cfg: Config = config): Router {
         return;
       }
 
+      if (!cfg.licenseKeyPepper) {
+        res.status(500).json(error('INTERNAL_ERROR', 'License key pepper not configured', 'keys_validate', requestId));
+        return;
+      }
+
       const normalized = normalizeKey(key);
-      const keyHash = hashKey(normalized);
+      const keyHash = hashKey(normalized, cfg.licenseKeyPepper);
       const row = await findKeyByHash(keyHash);
 
       if (!row) {
@@ -56,23 +69,12 @@ export default function keyRoutes(cfg: Config = config): Router {
         }
       }
 
-      const iat = Math.floor(Date.now() / 1000);
-      const offlineJwt = mintLicenseJwt(
-        {
-          sub: row.id,
-          tier: row.tier,
-          iat,
-          exp: iat + JWT_TTL_SECONDS,
-        },
-        cfg.licenseJwtSecret,
-      );
-
+      // Boutique cache contract: client stores {key, lastValidated, expiresAt}
       res.status(200).json(success({
         valid: true,
         keyId: row.id,
         tier: row.tier,
         expiresAt: row.expires_at,
-        offlineJwt,
       }, 'keys_validate', requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'keys_validate', (req as any).requestId));
@@ -83,20 +85,17 @@ export default function keyRoutes(cfg: Config = config): Router {
   router.post('/:id/revoke', async (req: Request, res: Response) => {
     try {
       const requestId = (req as any).requestId;
-      const rawAdminToken = req.headers['x-admin-token'];
-      const adminToken = Array.isArray(rawAdminToken) ? rawAdminToken[0] : rawAdminToken;
 
-      if (!cfg.adminApiToken) {
-        res.status(500).json(error('INTERNAL_ERROR', 'Admin token not configured', 'keys_revoke', requestId));
-        return;
-      }
-
-      if (!adminToken || adminToken !== cfg.adminApiToken) {
-        res.status(403).json(error('FORBIDDEN', 'Invalid admin token', 'keys_revoke', requestId));
+      if (!requireAdmin(req, res, cfg.adminApiToken)) {
         return;
       }
 
       const id = req.params.id as string;
+      if (!isValidUuid(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be a valid UUID', 'keys_revoke', requestId));
+        return;
+      }
+
       const { reason } = req.body || {};
 
       const { revokeKey } = await import('../keys/storage.js');

@@ -25,7 +25,6 @@ const PUBLIC_PATHS = [
   '/v1/auth/login',
   '/v1/auth/status',
   '/v1/agents/init-project',
-  '/v1/keys/validate',
 ];
 
 export function localAuth(secret: string | null, storage?: AgentStorage) {

@@ -1,18 +1,19 @@
 import { jest } from '@jest/globals';
 import { createApp } from '../api/server.js';
-import { generateKey, normalizeKey, hashKey, looksLikeKey } from '../api/keys/keyCodec.js';
-import { mintLicenseJwt, verifyLicenseJwt } from '../api/keys/keyJwt.js';
+import { generateKey, normalizeKey, hashKey, looksLikeKey, ALPHABET } from '../api/keys/keyCodec.js';
+import { RateLimiter } from '../api/keys/rateLimit.js';
 
 let request;
 let app;
 
-const TEST_SECRET = 'test-secret-must-be-at-least-32-bytes-long';
 const ADMIN_TOKEN = 'admin-test-token';
 const LOCAL_SECRET = 'test-local-secret';
+const PEPPER = 'test-pepper-must-be-long-and-random-in-prod';
 
 beforeAll(async () => {
   const supertest = await import('supertest');
   request = supertest.default;
+
   app = await createApp({
     vibesqlUrl: 'http://localhost:0',
     vibeApiUrl: 'http://localhost:0',
@@ -29,7 +30,7 @@ beforeAll(async () => {
     autonomyMaxRuntimeHours: 4,
     escalationSensitivity: 2,
     port: 0,
-    licenseJwtSecret: TEST_SECRET,
+    licenseKeyPepper: PEPPER,
     adminApiToken: ADMIN_TOKEN,
     acpLocalSecret: LOCAL_SECRET,
   });
@@ -42,6 +43,11 @@ beforeEach(() => {
 // ── keyCodec unit tests ───────────────────────────────────────────────────
 
 describe('keyCodec', () => {
+  test('ALPHABET has 31 chars (not 30)', () => {
+    expect(ALPHABET).toHaveLength(31);
+    expect(new Set(ALPHABET).size).toBe(31);
+  });
+
   test('generateKey produces canonical format', () => {
     const key = generateKey();
     expect(key).toMatch(/^ACP-SL-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
@@ -59,11 +65,17 @@ describe('keyCodec', () => {
     expect(normalizeKey('ACP SL ABCD EFGH JKMN')).toBe('ACPSLABCDEFGHJKMN');
   });
 
-  test('hashKey is deterministic SHA-256', () => {
-    const a = hashKey('ACPSLABCDEFGHIJKM');
-    const b = hashKey('ACPSLABCDEFGHIJKM');
+  test('hashKey is deterministic HMAC-SHA256', () => {
+    const a = hashKey('ACPSLABCDEFGHJKMN', PEPPER);
+    const b = hashKey('ACPSLABCDEFGHJKMN', PEPPER);
     expect(a).toBe(b);
     expect(a).toHaveLength(64);
+  });
+
+  test('hashKey changes with different pepper', () => {
+    const a = hashKey('ACPSLABCDEFGHJKMN', 'pepper-a');
+    const b = hashKey('ACPSLABCDEFGHJKMN', 'pepper-b');
+    expect(a).not.toBe(b);
   });
 
   test('looksLikeKey rejects bad formats', () => {
@@ -72,38 +84,38 @@ describe('keyCodec', () => {
     expect(looksLikeKey('hello-world')).toBe(false);
     expect(looksLikeKey('')).toBe(false);
   });
+
+  test('canonical pre-image: generator and validator agree', () => {
+    const key = generateKey();
+    const normalized = normalizeKey(key);
+    expect(looksLikeKey(key)).toBe(true);
+    expect(hashKey(normalized, PEPPER)).toBeTruthy();
+  });
 });
 
-// ── keyJwt unit tests ─────────────────────────────────────────────────────
+// ── RateLimiter unit tests ────────────────────────────────────────────────
 
-describe('keyJwt', () => {
-  test('mint + verify round-trip', () => {
-    const now = Math.floor(Date.now() / 1000);
-    const jwt = mintLicenseJwt({ sub: 'key-1', tier: 'free_year', iat: now, exp: now + 1000 }, TEST_SECRET);
-    expect(typeof jwt).toBe('string');
-    expect(jwt.split('.')).toHaveLength(3);
-
-    const payload = verifyLicenseJwt(jwt, TEST_SECRET);
-    expect(payload).toEqual({ sub: 'key-1', tier: 'free_year', iat: now, exp: now + 1000 });
+describe('RateLimiter', () => {
+  test('allows requests up to max', () => {
+    const limiter = new RateLimiter(3, 60_000);
+    expect(limiter.check('1.2.3.4')).toBe(true);
+    expect(limiter.check('1.2.3.4')).toBe(true);
+    expect(limiter.check('1.2.3.4')).toBe(true);
+    expect(limiter.check('1.2.3.4')).toBe(false);
   });
 
-  test('verify rejects expired JWT', () => {
-    const jwt = mintLicenseJwt({ sub: 'key-1', tier: 'free_year', iat: 1000, exp: 1001 }, TEST_SECRET);
-    const payload = verifyLicenseJwt(jwt, TEST_SECRET);
-    expect(payload).toBeNull();
+  test('resets after window', async () => {
+    const limiter = new RateLimiter(1, 1);
+    expect(limiter.check('1.2.3.4')).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(limiter.check('1.2.3.4')).toBe(true); // window expired
   });
 
-  test('verify rejects tampered signature', () => {
-    const now = Math.floor(Date.now() / 1000);
-    const jwt = mintLicenseJwt({ sub: 'key-1', tier: 'free_year', iat: now, exp: now + 1000 }, TEST_SECRET);
-    const tampered = jwt.slice(0, -5) + 'XXXXX';
-    expect(verifyLicenseJwt(tampered, TEST_SECRET)).toBeNull();
-  });
-
-  test('verify rejects wrong secret', () => {
-    const now = Math.floor(Date.now() / 1000);
-    const jwt = mintLicenseJwt({ sub: 'key-1', tier: 'free_year', iat: now, exp: now + 1000 }, TEST_SECRET);
-    expect(verifyLicenseJwt(jwt, 'wrong-secret')).toBeNull();
+  test('tracks per-ip', () => {
+    const limiter = new RateLimiter(1, 60_000);
+    expect(limiter.check('1.2.3.4')).toBe(true);
+    expect(limiter.check('5.6.7.8')).toBe(true);
+    expect(limiter.check('1.2.3.4')).toBe(false);
   });
 });
 
@@ -115,15 +127,6 @@ function mockVibeSqlResponse(data, success = true) {
     status: 200,
     json: async () => ({ success, data }),
     text: async () => JSON.stringify({ success, data }),
-  };
-}
-
-function mockVibeSqlError(message) {
-  return {
-    ok: false,
-    status: 500,
-    json: async () => ({ success: false, error: { message } }),
-    text: async () => JSON.stringify({ success: false, error: { message } }),
   };
 }
 
@@ -148,14 +151,15 @@ describe('POST /v1/keys/validate', () => {
     expect(res.body.data.error).toBe('invalid');
   });
 
-  test('active key → valid:true + JWT', async () => {
+  test('active key → valid:true + cache contract', async () => {
     const key = 'ACP-SL-T7K9-M2VQ-8HJM';
     const normalized = normalizeKey(key);
-    const keyHash = hashKey(normalized);
+    const keyHash = hashKey(normalized, PEPPER);
     const row = {
       id: '550e8400-e29b-41d4-a716-446655440000',
       key_hash: keyHash,
       key_prefix: 'T7K9',
+      hash_version: 'v1',
       tier: 'free_year',
       status: 'active',
       redeemed_by: null,
@@ -169,8 +173,8 @@ describe('POST /v1/keys/validate', () => {
     let callCount = 0;
     jest.spyOn(global, 'fetch').mockImplementation(async () => {
       callCount++;
-      if (callCount === 1) return mockVibeSqlResponse([row]); // SELECT
-      if (callCount === 2) return mockVibeSqlResponse([{ id: row.id }]); // UPDATE
+      if (callCount === 1) return mockVibeSqlResponse([row]);
+      if (callCount === 2) return mockVibeSqlResponse([{ id: row.id }]);
       return mockVibeSqlResponse([]);
     });
 
@@ -179,21 +183,19 @@ describe('POST /v1/keys/validate', () => {
     expect(res.body.data.valid).toBe(true);
     expect(res.body.data.keyId).toBe(row.id);
     expect(res.body.data.tier).toBe('free_year');
-    expect(res.body.data.offlineJwt).toBeTruthy();
-
-    const payload = verifyLicenseJwt(res.body.data.offlineJwt, TEST_SECRET);
-    expect(payload).not.toBeNull();
-    expect(payload.sub).toBe(row.id);
+    expect(res.body.data.expiresAt).toBe(row.expires_at);
+    expect(res.body.data.offlineJwt).toBeUndefined();
   });
 
-  test('redeemed key → refresh JWT (no already_redeemed)', async () => {
+  test('redeemed key → refresh allowed', async () => {
     const key = 'ACP-SL-T7K9-M2VQ-8HJM';
     const normalized = normalizeKey(key);
-    const keyHash = hashKey(normalized);
+    const keyHash = hashKey(normalized, PEPPER);
     const row = {
       id: '550e8400-e29b-41d4-a716-446655440000',
       key_hash: keyHash,
       key_prefix: 'T7K9',
+      hash_version: 'v1',
       tier: 'free_year',
       status: 'redeemed',
       redeemed_by: null,
@@ -209,17 +211,44 @@ describe('POST /v1/keys/validate', () => {
     const res = await request(app).post('/v1/keys/validate').send({ key });
     expect(res.status).toBe(200);
     expect(res.body.data.valid).toBe(true);
-    expect(res.body.data.offlineJwt).toBeTruthy();
+  });
+
+  test('expired redeemed key does NOT refresh (B8)', async () => {
+    const key = 'ACP-SL-T7K9-M2VQ-8HJM';
+    const normalized = normalizeKey(key);
+    const keyHash = hashKey(normalized, PEPPER);
+    const row = {
+      id: '550e8400-e29b-41d4-a716-446655440000',
+      key_hash: keyHash,
+      key_prefix: 'T7K9',
+      hash_version: 'v1',
+      tier: 'free_year',
+      status: 'redeemed',
+      redeemed_by: null,
+      redeemed_at: '2026-05-21T10:00:00Z',
+      expires_at: '2025-01-01T00:00:00Z',
+      revoked_at: null,
+      revoke_reason: null,
+      created_at: '2024-01-01T00:00:00Z',
+    };
+
+    jest.spyOn(global, 'fetch').mockResolvedValue(mockVibeSqlResponse([row]));
+
+    const res = await request(app).post('/v1/keys/validate').send({ key });
+    expect(res.status).toBe(200);
+    expect(res.body.data.valid).toBe(false);
+    expect(res.body.data.error).toBe('expired');
   });
 
   test('revoked key → valid:false revoked', async () => {
     const key = 'ACP-SL-T7K9-M2VQ-8HJM';
     const normalized = normalizeKey(key);
-    const keyHash = hashKey(normalized);
+    const keyHash = hashKey(normalized, PEPPER);
     const row = {
       id: '550e8400-e29b-41d4-a716-446655440000',
       key_hash: keyHash,
       key_prefix: 'T7K9',
+      hash_version: 'v1',
       tier: 'free_year',
       status: 'revoked',
       redeemed_by: null,
@@ -238,14 +267,15 @@ describe('POST /v1/keys/validate', () => {
     expect(res.body.data.error).toBe('revoked');
   });
 
-  test('expired key → valid:false expired', async () => {
+  test('expired active key → valid:false expired', async () => {
     const key = 'ACP-SL-T7K9-M2VQ-8HJM';
     const normalized = normalizeKey(key);
-    const keyHash = hashKey(normalized);
+    const keyHash = hashKey(normalized, PEPPER);
     const row = {
       id: '550e8400-e29b-41d4-a716-446655440000',
       key_hash: keyHash,
       key_prefix: 'T7K9',
+      hash_version: 'v1',
       tier: 'free_year',
       status: 'active',
       redeemed_by: null,
@@ -266,23 +296,30 @@ describe('POST /v1/keys/validate', () => {
 });
 
 describe('POST /v1/keys/:id/revoke', () => {
-  test('missing admin token → 403', async () => {
+  test('missing admin token → 401', async () => {
     const res = await request(app)
       .post('/v1/keys/550e8400-e29b-41d4-a716-446655440000/revoke')
-      .set('Authorization', `Bearer ${LOCAL_SECRET}`)
       .send({});
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('FORBIDDEN');
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('UNAUTHORIZED');
   });
 
-  test('wrong admin token → 403', async () => {
+  test('wrong admin token → 401', async () => {
     const res = await request(app)
       .post('/v1/keys/550e8400-e29b-41d4-a716-446655440000/revoke')
-      .set('Authorization', `Bearer ${LOCAL_SECRET}`)
-      .set('X-Admin-Token', 'wrong')
+      .set('Authorization', 'Bearer wrong')
       .send({});
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('FORBIDDEN');
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  test('invalid UUID → 400', async () => {
+    const res = await request(app)
+      .post('/v1/keys/not-a-uuid/revoke')
+      .set('Authorization', `Bearer ${ADMIN_TOKEN}`)
+      .send({ reason: 'test' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
 
   test('valid admin token + existing key → 200 revoked', async () => {
@@ -290,8 +327,7 @@ describe('POST /v1/keys/:id/revoke', () => {
 
     const res = await request(app)
       .post('/v1/keys/550e8400-e29b-41d4-a716-446655440000/revoke')
-      .set('Authorization', `Bearer ${LOCAL_SECRET}`)
-      .set('X-Admin-Token', ADMIN_TOKEN)
+      .set('Authorization', `Bearer ${ADMIN_TOKEN}`)
       .send({ reason: 'test' });
 
     expect(res.status).toBe(200);
@@ -303,8 +339,7 @@ describe('POST /v1/keys/:id/revoke', () => {
 
     const res = await request(app)
       .post('/v1/keys/550e8400-e29b-41d4-a716-446655440000/revoke')
-      .set('Authorization', `Bearer ${LOCAL_SECRET}`)
-      .set('X-Admin-Token', ADMIN_TOKEN)
+      .set('Authorization', `Bearer ${ADMIN_TOKEN}`)
       .send({ reason: 'test' });
 
     expect(res.status).toBe(404);
