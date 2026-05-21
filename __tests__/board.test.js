@@ -64,7 +64,9 @@ describe('moveTask', () => {
     storage.getTask.mockResolvedValue({ ...sampleTask });
     const result = await moveTask(storage, 1, 'in_progress');
     expect(result.status).toBe('in_progress');
-    expect(storage.updateTask).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'in_progress' }));
+    const call = storage.updateTask.mock.calls[0];
+    expect(call[0]).toBe(1);
+    expect(call[1]).toMatchObject({ status: 'in_progress' });
   });
 
   test('sets completedAt when moving to done', async () => {
@@ -93,7 +95,9 @@ describe('assignTask', () => {
     storage.getTask.mockResolvedValue({ ...sampleTask });
     const result = await assignTask(storage, 1, 'DotNetPert');
     expect(result.assignedTo).toBe('DotNetPert');
-    expect(storage.updateTask).toHaveBeenCalledWith(1, expect.objectContaining({ assignedTo: 'DotNetPert' }));
+    const call = storage.updateTask.mock.calls[0];
+    expect(call[0]).toBe(1);
+    expect(call[1]).toMatchObject({ assignedTo: 'DotNetPert' });
   });
 });
 

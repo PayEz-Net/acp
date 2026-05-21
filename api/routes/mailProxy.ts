@@ -176,9 +176,18 @@ export default function mailProxyRoutes(
   const router = Router();
 
   // GET /v1/mail/inbox/:agent -> idealvibe.online/v1/agentmail/inbox/:agent
+  // WO-agent-mail-project-isolation: stamp project_id from session cache so
+  // the cloud filters inbox to the active project only.
   router.get('/inbox/:agent', async (req: Request, res: Response) => {
     try {
-      const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', req.query as Record<string, any>);
+      const projectId = resolveCurrentProjectId();
+      const query: Record<string, any> = { ...(req.query as Record<string, any>) };
+      if (projectId != null) {
+        query.project_id = projectId;
+      } else {
+        console.warn(`[mailProxy] GET /inbox/${req.params.agent}: no current_project_id in cache — forwarding without project filter`);
+      }
+      const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', query);
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_inbox');
@@ -188,7 +197,12 @@ export default function mailProxyRoutes(
   // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
   router.get('/messages/:message_id', async (req: Request, res: Response) => {
     try {
-      const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', req.query as Record<string, any>);
+      const projectId = resolveCurrentProjectId();
+      const query: Record<string, any> = { ...(req.query as Record<string, any>) };
+      if (projectId != null) {
+        query.project_id = projectId;
+      }
+      const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', query);
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_read');
@@ -268,8 +282,13 @@ export default function mailProxyRoutes(
     try {
       const agentName = req.params.agent;
       
-      // First, fetch all messages for the agent
-      const inboxResult = await proxyToCloud(cfg, `/inbox/${agentName}`, 'GET', { page: 1, page_size: 100 });
+      // First, fetch all messages for the agent (project-scoped)
+      const projectId = resolveCurrentProjectId();
+      const inboxQuery: Record<string, any> = { page: 1, page_size: 100 };
+      if (projectId != null) {
+        inboxQuery.project_id = projectId;
+      }
+      const inboxResult = await proxyToCloud(cfg, `/inbox/${agentName}`, 'GET', inboxQuery);
       
       const inboxData = inboxResult.data as any;
       if (inboxResult.status !== 200 || !inboxData?.success) {

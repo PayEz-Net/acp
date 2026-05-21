@@ -370,15 +370,36 @@ export class SessionManager {
       milestone: row.milestone,
       filesChanged: Array.isArray(row.files_changed) ? row.files_changed : (typeof row.files_changed === 'string' ? JSON.parse(row.files_changed) : []),
       blockers: row.blockers,
+      projectId: row.project_id ?? null,
       created_at: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at,
     };
   }
 
-  async createTask(task) {
+  async createTask(task, projectId) {
     const now = new Date().toISOString();
-    const sql = `INSERT INTO vibe.kanban_tasks (title, description, status, priority, assigned_to, created_by, spec_path, milestone, files_changed, blockers, created_at, updated_at, completed_at) VALUES (${this._escapeSql(task.title)}, ${this._escapeSql(task.description)}, ${this._escapeSql(task.status || 'backlog')}, ${this._escapeSql(task.priority || 'medium')}, ${this._escapeSql(task.assignedTo)}, ${this._escapeSql(task.createdBy)}, ${this._escapeSql(task.specPath)}, ${this._escapeSql(task.milestone)}, ${this._escapeSql(JSON.stringify(task.filesChanged || []))}::jsonb, ${this._escapeSql(task.blockers)}, ${this._escapeSql(now)}, ${this._escapeSql(now)}, NULL) RETURNING id`;
+    const cols = ['title', 'description', 'status', 'priority', 'assigned_to', 'created_by', 'spec_path', 'milestone', 'files_changed', 'blockers', 'created_at', 'updated_at', 'completed_at'];
+    const vals = [
+      this._escapeSql(task.title),
+      this._escapeSql(task.description),
+      this._escapeSql(task.status || 'backlog'),
+      this._escapeSql(task.priority || 'medium'),
+      this._escapeSql(task.assignedTo),
+      this._escapeSql(task.createdBy),
+      this._escapeSql(task.specPath),
+      this._escapeSql(task.milestone),
+      `${this._escapeSql(JSON.stringify(task.filesChanged || []))}::jsonb`,
+      this._escapeSql(task.blockers),
+      this._escapeSql(now),
+      this._escapeSql(now),
+      'NULL',
+    ];
+    if (projectId != null) {
+      cols.push('project_id');
+      vals.push(this._escapeSql(projectId));
+    }
+    const sql = `INSERT INTO vibe.kanban_tasks (${cols.join(', ')}) VALUES (${vals.join(', ')}) RETURNING id`;
     const result = await this._queryVibeSql(sql);
     if (!result.success || !result.data || result.data.length === 0) {
       throw new Error(result.error?.message || 'Failed to create kanban task');
@@ -386,8 +407,11 @@ export class SessionManager {
     return result.data[0].id;
   }
 
-  async getTask(id) {
-    const sql = `SELECT * FROM vibe.kanban_tasks WHERE id = ${Number(id)}`;
+  async getTask(id, projectId) {
+    let sql = `SELECT * FROM vibe.kanban_tasks WHERE id = ${Number(id)}`;
+    if (projectId != null) {
+      sql += ` AND project_id = ${this._escapeSql(projectId)}`;
+    }
     const result = await this._queryVibeSql(sql);
     if (!result.success || !result.data || result.data.length === 0) return null;
     return this._rowToTask(result.data[0]);
@@ -395,6 +419,9 @@ export class SessionManager {
 
   async listTasks(filter = {}) {
     let sql = 'SELECT * FROM vibe.kanban_tasks WHERE 1=1';
+    if (filter.projectId != null) {
+      sql += ` AND project_id = ${this._escapeSql(filter.projectId)}`;
+    }
     if (filter.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
       const statusList = statuses.map(s => this._escapeSql(s)).join(',');
@@ -409,7 +436,7 @@ export class SessionManager {
     return result.data.map(r => this._rowToTask(r));
   }
 
-  async updateTask(id, updates) {
+  async updateTask(id, updates, projectId) {
     const sets = [];
     if (updates.status !== undefined) sets.push(`status = ${this._escapeSql(updates.status)}`);
     if (updates.priority !== undefined) sets.push(`priority = ${this._escapeSql(updates.priority)}`);
@@ -422,8 +449,12 @@ export class SessionManager {
     if (updates.filesChanged !== undefined) sets.push(`files_changed = ${this._escapeSql(JSON.stringify(updates.filesChanged))}::jsonb`);
     if (updates.updatedAt !== undefined) sets.push(`updated_at = ${this._escapeSql(updates.updatedAt)}`);
     if (updates.completedAt !== undefined) sets.push(`completed_at = ${updates.completedAt ? this._escapeSql(updates.completedAt) : 'NULL'}`);
-    if (sets.length === 0) return this.getTask(id);
-    const sql = `UPDATE vibe.kanban_tasks SET ${sets.join(', ')} WHERE id = ${Number(id)} RETURNING *`;
+    if (sets.length === 0) return this.getTask(id, projectId);
+    let sql = `UPDATE vibe.kanban_tasks SET ${sets.join(', ')} WHERE id = ${Number(id)}`;
+    if (projectId != null) {
+      sql += ` AND project_id = ${this._escapeSql(projectId)}`;
+    }
+    sql += ' RETURNING *';
     const result = await this._queryVibeSql(sql);
     if (!result.success || !result.data || result.data.length === 0) return null;
     return this._rowToTask(result.data[0]);
@@ -462,10 +493,10 @@ export class SessionManager {
       updateDocument: (id, updates) => self.updateDocument(id, updates),
       deleteDocument: (id) => self.deleteDocument(id),
       // Kanban tasks — forwards to the in-memory Phase 1 stub above.
-      createTask: (data) => self.createTask(data),
-      getTask: (id) => self.getTask(id),
+      createTask: (data, projectId) => self.createTask(data, projectId),
+      getTask: (id, projectId) => self.getTask(id, projectId),
       listTasks: (filter) => self.listTasks(filter),
-      updateTask: (id, updates) => self.updateTask(id, updates),
+      updateTask: (id, updates, projectId) => self.updateTask(id, updates, projectId),
       // Autonomy state + standup entries — forwards to the stubs above.
       getAutonomyState: () => self.getAutonomyState(),
       updateAutonomyState: (partial) => self.updateAutonomyState(partial),

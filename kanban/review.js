@@ -1,7 +1,7 @@
 import { getTask } from './board.js';
 
-export async function reviewTask(storage, mailSender, id, action, opts = {}) {
-  const task = await getTask(storage, id);
+export async function reviewTask(storage, mailSender, id, action, opts = {}, projectId) {
+  const task = await getTask(storage, id, projectId);
 
   if (task.status !== 'review') {
     const err = new Error(`Task ${id} is not in review (current: ${task.status})`);
@@ -14,7 +14,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}) {
 
   if (action === 'approve') {
     const updates = { status: 'done', completedAt: now, updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || null };
-    await storage.updateTask(id, updates);
+    await storage.updateTask(id, updates, projectId);
     if (mailSender && task.assignedTo) {
       await mailSender(storage, {
         from: reviewer,
@@ -38,7 +38,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}) {
 
   if (action === 'reject') {
     const updates = { status: 'in_progress', updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || 'Rejected — needs rework' };
-    await storage.updateTask(id, updates);
+    await storage.updateTask(id, updates, projectId);
     if (mailSender && task.assignedTo) {
       await mailSender(storage, {
         from: reviewer,
@@ -53,7 +53,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}) {
 
   if (action === 'comment') {
     const updates = { updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || '' };
-    await storage.updateTask(id, updates);
+    await storage.updateTask(id, updates, projectId);
     return { ...task, ...updates };
   }
 

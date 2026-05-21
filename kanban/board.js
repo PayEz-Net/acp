@@ -11,7 +11,7 @@ const TRANSITIONS = {
 
 export { VALID_STATUSES, VALID_PRIORITIES, TRANSITIONS };
 
-export async function createTask(storage, task) {
+export async function createTask(storage, task, projectId) {
   if (!task.title) {
     const err = new Error('Task title is required');
     err.code = 'INVALID_REQUEST';
@@ -28,11 +28,11 @@ export async function createTask(storage, task) {
     milestone: task.milestone || null,
     filesChanged: task.filesChanged || [],
     blockers: task.blockers || null,
-  });
+  }, projectId);
 }
 
-export async function getTask(storage, id) {
-  const task = await storage.getTask(id);
+export async function getTask(storage, id, projectId) {
+  const task = await storage.getTask(id, projectId);
   if (!task) {
     const err = new Error(`Task ${id} not found`);
     err.code = 'TASK_NOT_FOUND';
@@ -41,12 +41,15 @@ export async function getTask(storage, id) {
   return task;
 }
 
-export async function listTasks(storage, filter = {}) {
+export async function listTasks(storage, filter = {}, projectId) {
+  if (projectId != null) {
+    filter.projectId = projectId;
+  }
   return storage.listTasks(filter);
 }
 
-export async function moveTask(storage, id, newStatus) {
-  const task = await getTask(storage, id);
+export async function moveTask(storage, id, newStatus, projectId) {
+  const task = await getTask(storage, id, projectId);
   const allowed = TRANSITIONS[task.status] || [];
   if (!allowed.includes(newStatus)) {
     const err = new Error(`Cannot move task from "${task.status}" to "${newStatus}". Allowed: ${allowed.join(', ') || 'none'}`);
@@ -55,12 +58,12 @@ export async function moveTask(storage, id, newStatus) {
   }
   const updates = { status: newStatus, updatedAt: new Date().toISOString() };
   if (newStatus === 'done') updates.completedAt = new Date().toISOString();
-  await storage.updateTask(id, updates);
+  await storage.updateTask(id, updates, projectId);
   return { ...task, ...updates };
 }
 
-export async function assignTask(storage, id, agentName, { requireUnassigned = false } = {}) {
-  const task = await getTask(storage, id);
+export async function assignTask(storage, id, agentName, { requireUnassigned = false } = {}, projectId) {
+  const task = await getTask(storage, id, projectId);
   // F-3: Optimistic lock for self-assignment race condition
   if (requireUnassigned && task.assignedTo) {
     const err = new Error(`Task ${id} is already assigned to ${task.assignedTo}`);
@@ -68,6 +71,6 @@ export async function assignTask(storage, id, agentName, { requireUnassigned = f
     throw err;
   }
   const updates = { assignedTo: agentName, updatedAt: new Date().toISOString() };
-  await storage.updateTask(id, updates);
+  await storage.updateTask(id, updates, projectId);
   return { ...task, ...updates };
 }

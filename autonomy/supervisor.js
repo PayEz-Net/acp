@@ -379,7 +379,8 @@ export class Supervisor {
     let taskSummary = '';
     let headlines = '';
     try {
-      const tasks = await this._storage.listTasks();
+      const activeProjectId = await this._storage.getActiveProjectId();
+      const tasks = await this._storage.listTasks(activeProjectId != null ? { projectId: activeProjectId } : {});
       const byStatus = {};
       for (const t of tasks) {
         byStatus[t.status] = (byStatus[t.status] || 0) + 1;

@@ -24,7 +24,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       if (!req.body.createdBy && (req as any).agentName) {
         req.body.createdBy = (req as any).agentName;
       }
-      const id = await createTask(storage, req.body);
+      const projectId = await storage.getActiveProjectId();
+      const id = await createTask(storage, req.body, projectId);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       localEventBus?.emit({
         event: 'kanban-update',
@@ -46,7 +47,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo;
       if (req.query.milestone) filter.milestone = req.query.milestone;
       if (req.query.priority) filter.priority = req.query.priority;
-      const tasks = await listTasks(storage, filter);
+      const projectId = await storage.getActiveProjectId();
+      const tasks = await listTasks(storage, filter, projectId);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(success(tasks, 'kanban_list', (req as any).requestId, {
         performance: { response_time_ms: elapsed },
@@ -59,7 +61,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
   router.get('/tasks/:id', async (req: Request, res: Response, next) => {
     try {
       (req as any).operationCode = 'kanban_get';
-      const task = await getTask(storage, parseInt(req.params.id as string, 10));
+      const projectId = await storage.getActiveProjectId();
+      const task = await getTask(storage, parseInt(req.params.id as string, 10), projectId);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(success(task, 'kanban_get', (req as any).requestId, {
         performance: { response_time_ms: elapsed },
@@ -78,7 +81,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
         err.code = 'INVALID_REQUEST';
         throw err;
       }
-      const task = await moveTask(storage, parseInt(req.params.id as string, 10), status);
+      const projectId = await storage.getActiveProjectId();
+      const task = await moveTask(storage, parseInt(req.params.id as string, 10), status, projectId);
       await autoMailOnStatusChange(storage, sendMail, task, status);
       localEventBus?.emit({
         event: 'kanban-update',
@@ -103,7 +107,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
         throw err;
       }
       const requireUnassigned = req.body.requireUnassigned === true;
-      const task = await assignTask(storage, parseInt(req.params.id as string, 10), agent, { requireUnassigned });
+      const projectId = await storage.getActiveProjectId();
+      const task = await assignTask(storage, parseInt(req.params.id as string, 10), agent, { requireUnassigned }, projectId);
       localEventBus?.emit({
         event: 'kanban-update',
         data: { action: 'assigned', task_id: req.params.id, agent },
@@ -130,7 +135,8 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
         err.code = 'INVALID_REQUEST';
         throw err;
       }
-      const task = await reviewTask(storage, sendMail, parseInt(req.params.id as string, 10), action, { notes, reviewer });
+      const projectId = await storage.getActiveProjectId();
+      const task = await reviewTask(storage, sendMail, parseInt(req.params.id as string, 10), action, { notes, reviewer }, projectId);
       localEventBus?.emit({
         event: 'kanban-update',
         data: { action: 'reviewed', task_id: req.params.id, review_action: action },
