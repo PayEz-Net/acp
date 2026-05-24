@@ -1,7 +1,8 @@
-const VALID_STATUSES = ['backlog', 'in_progress', 'review', 'done', 'blocked'];
+const VALID_STATUSES = ['todo', 'backlog', 'in_progress', 'review', 'done', 'blocked'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
 const TRANSITIONS = {
+  todo: ['in_progress', 'backlog'],
   backlog: ['in_progress'],
   in_progress: ['review', 'blocked'],
   review: ['done', 'in_progress'],
