@@ -45,6 +45,16 @@ import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
 
 import { validateConfig } from './lifecycle/configValidator.js';
 
+// Crash logger — never fly blind on uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException:', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+  process.exit(1);
+});
+
 const startTime = Date.now();
 
 export async function createApp(cfg) {

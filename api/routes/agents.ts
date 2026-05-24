@@ -3,6 +3,9 @@ import { success, error } from '../response.js';
 import { config } from '../../config.js';
 import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
 import { signVibeRequest } from '../auth/vibeHmac.js';
+import { fileURLToPath } from 'url';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const VIBESQL_URL = process.env.VIBESQL_URL || 'http://10.0.0.93:52411';
 const VIBESQL_SECRET = process.env.VIBESQL_SECRET || 'ContainersSuperDevSecret';
@@ -244,22 +247,31 @@ export default function agentRoutes(_storage: any): Router {
   const router = Router();
 
   // GET /v1/agents/startup-config
+  //
+  // Canonical model: type-aware seeding (BAPert ratified 2026-05-23, #37).
+  // The doc-store at client_id=0 holds the global Specialist Library catalog.
+  // Core team (BA+QA) are always-on; tech specialists are stack-gated via
+  // SeedTypeAwareForProjectAsync in vibe-publicapi. is_canonical is deprecated.
+  //
   router.get('/startup-config', async (req: Request, res: Response) => {
     try {
       const sql = `SELECT
         (data->>'id')::int AS id,
-        data->>'name' AS name,
-        data->>'display_name' AS display_name,
-        data->>'role' AS role,
-        data->>'model' AS model,
-        data->>'expertise_json' AS expertise_json,
-        data->>'agent_type' AS agent_type,
+        data->>'slug' AS name,
+        data->>'name' AS display_name,
+        data->>'description' AS description,
+        data->>'role_preset' AS role,
+        data->>'model_hint' AS model,
+        data->>'expertise_tags' AS expertise_json,
+        data->>'identity_prompt' AS base_prompt,
         COALESCE((data->>'is_active')::boolean, true) AS is_active,
-        COALESCE((data->>'startup_order')::int, 0) AS startup_order,
-        data->>'capabilities' AS capabilities,
-        data->>'safety_rules' AS safety_rules
+        COALESCE((data->>'is_canonical')::boolean, false) AS is_canonical,
+        COALESCE((data->>'is_coordinator')::boolean, false) AS is_coordinator,
+        COALESCE((data->>'is_shared')::boolean, false) AS is_shared,
+        COALESCE((data->>'startup_order')::int, 0) AS startup_order
       FROM vibe.documents
-      WHERE collection = 'vibe_agents'
+      WHERE client_id = 0
+        AND collection = 'vibe_agents'
         AND table_name = 'agent_profiles'
         AND COALESCE((data->>'is_active')::boolean, true) = true
         AND data->>'deleted_at' IS NULL
@@ -291,24 +303,34 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const sets: string[] = [`is_active = ${escapeSql(is_active)}`];
+      const patchObj: Record<string, any> = {};
+      patchObj.is_active = is_active;
       if (startup_order !== undefined) {
         const order = parseInt(startup_order, 10);
         if (isNaN(order) || order < 0) {
           res.status(400).json(error('VALIDATION_ERROR', 'startup_order must be a non-negative integer', 'agent_activation', (req as any).requestId));
           return;
         }
-        sets.push(`startup_order = ${escapeSql(order)}`);
+        patchObj.startup_order = order;
       }
-      sets.push(`updated_at = NOW()`);
+      const patchJson = escapeJsonb(patchObj);
 
-      const sql = `UPDATE vibe_agents.agents SET ${sets.join(', ')} WHERE id = ${escapeSql(id)} RETURNING *`;
+      const sql = `UPDATE vibe.documents SET data = data || ${patchJson}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
       const vsql = await queryVibeSql(sql);
       if (!vsql.success || !vsql.data?.length) {
         res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_activation', (req as any).requestId));
         return;
       }
-      res.json(success(rowToCamel(vsql.data[0]), 'agent_activation', (req as any).requestId));
+      const rowData = vsql.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+      res.json(success({
+        id: data.id ?? rowData.document_id,
+        name: data.name,
+        displayName: data.display_name,
+        isActive: data.is_active,
+        startupOrder: data.startup_order,
+        updatedAt: new Date().toISOString(),
+      }, 'agent_activation', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_activation', (req as any).requestId));
     }
@@ -323,14 +345,16 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const check = await queryVibeSql(`SELECT id, name FROM vibe_agents.agents WHERE id = ${escapeSql(id)} AND deleted_at IS NULL`);
+      const check = await queryVibeSql(`SELECT document_id, data FROM vibe.documents WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL`);
       if (!check.success || !check.data?.length) {
         res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_delete', (req as any).requestId));
         return;
       }
+      const rowData = check.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
 
-      await queryVibeSql(`UPDATE vibe_agents.agents SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = ${escapeSql(id)}`);
-      res.json(success({ id, name: check.data[0].name, deleted: true }, 'agent_delete', (req as any).requestId));
+      await queryVibeSql(`UPDATE vibe.documents SET deleted_at = NOW(), updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))}`);
+      res.json(success({ id, name: data.name, deleted: true }, 'agent_delete', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_delete', (req as any).requestId));
     }
@@ -347,8 +371,12 @@ export default function agentRoutes(_storage: any): Router {
       }
       const trimmedName = name.trim();
 
-      // Check if name already exists (including soft-deleted — unique constraint)
-      const existing = await queryVibeSql(`SELECT id FROM vibe_agents.agents WHERE name = ${escapeSql(trimmedName)} AND deleted_at IS NULL`);
+      // Check if name already exists in the canonical docstore
+      const existing = await queryVibeSql(
+        `SELECT document_id FROM vibe.documents
+         WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles'
+           AND data->>'name' = ${escapeSql(trimmedName)} AND deleted_at IS NULL`
+      );
       if (existing.success && existing.data?.length) {
         res.status(409).json(error('CONFLICT', 'Agent with that name already exists', 'agent_hire', (req as any).requestId));
         return;
@@ -377,26 +405,55 @@ export default function agentRoutes(_storage: any): Router {
         }
       }
 
-      const sql = `INSERT INTO vibe_agents.agents
-        (name, display_name, role, model, expertise_json, agent_type, is_active, capabilities, safety_rules)
-        VALUES (
-          ${escapeSql(trimmedName)},
-          ${escapeSql(display_name || templateData.displayName || trimmedName)},
-          ${escapeSql(role || description || templateData.role || null)},
-          ${escapeSql(templateData.model || null)},
-          ${escapeJsonb(templateData.expertiseJson || {})},
-          ${escapeSql(is_active ? 'team' : 'contractor')},
-          ${escapeSql(is_active !== undefined ? is_active : false)},
-          '{}'::jsonb,
-          '[]'::jsonb
-        )
-        RETURNING *`;
-      const vsql = await queryVibeSql(sql);
-      if (!vsql.success || !vsql.data?.length) {
-        res.status(500).json(error('INTERNAL_ERROR', vsql.error?.message || 'Insert failed', 'agent_hire', (req as any).requestId));
+      // Allocate next agent id from the docstore JSON ids
+      const nextIdResult = await queryVibeSql(
+        `SELECT COALESCE(MAX((data->>'id')::int), 0) + 1 AS next_id
+         FROM vibe.documents
+         WHERE collection = 'vibe_agents' AND table_name = 'agent_profiles'`
+      );
+      const nextId = nextIdResult.success && nextIdResult.data?.length ? nextIdResult.data[0].next_id : 1;
+
+      const agentJson = escapeJsonb({
+        id: nextId,
+        name: trimmedName,
+        display_name: display_name || templateData.displayName || trimmedName,
+        role: role || description || templateData.role || null,
+        model: templateData.model || null,
+        agent_type: is_active ? 'team' : 'contractor',
+        is_active: is_active !== undefined ? is_active : false,
+        is_shared: false,
+        program: 'claude-code',
+        expertise_tags: templateData.expertiseJson || [],
+        capabilities: {},
+        safety_rules: [],
+        identity_prompt: `I am ${trimmedName}, a specialist agent.`,
+        created_at: new Date().toISOString(),
+      });
+
+      const insert = await queryVibeSql(
+        `INSERT INTO vibe.documents (client_id, user_id, collection, table_name, data, created_at, created_by)
+         VALUES (0, NULL, 'vibe_agents', 'agent_profiles', ${agentJson}, CURRENT_TIMESTAMP, 0)
+         RETURNING document_id, data`
+      );
+      if (!insert.success || !insert.data?.length) {
+        res.status(500).json(error('INTERNAL_ERROR', insert.error?.message || 'Insert failed', 'agent_hire', (req as any).requestId));
         return;
       }
-      res.status(201).json(success(rowToCamel(vsql.data[0]), 'agent_hire', (req as any).requestId));
+      const rowData = insert.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+      res.status(201).json(success({
+        id: data.id ?? rowData.document_id,
+        name: data.name,
+        displayName: data.display_name,
+        role: data.role,
+        model: data.model,
+        agentType: data.agent_type,
+        isActive: data.is_active,
+        isShared: data.is_shared,
+        program: data.program,
+        expertiseTags: data.expertise_tags,
+        createdAt: data.created_at,
+      }, 'agent_hire', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_hire', (req as any).requestId));
     }
@@ -423,9 +480,10 @@ export default function agentRoutes(_storage: any): Router {
         }
       }
 
-      const updates = order.map((entry: any) =>
-        `UPDATE vibe_agents.agents SET startup_order = ${escapeSql(parseInt(entry.startup_order, 10))}, updated_at = NOW() WHERE id = ${escapeSql(parseInt(entry.agent_id, 10))};`
-      ).join('\n');
+      const updates = order.map((entry: any) => {
+        const patch = escapeJsonb({ startup_order: parseInt(entry.startup_order, 10) });
+        return `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(parseInt(entry.agent_id, 10)))} AND deleted_at IS NULL;`;
+      }).join('\n');
 
       const vsql = await queryVibeSql(`DO $$ BEGIN ${updates} END $$`);
       if (!vsql.success) {
@@ -452,13 +510,22 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const sql = `UPDATE vibe_agents.agents SET capabilities = ${escapeJsonb(capabilities)}, updated_at = NOW() WHERE id = ${escapeSql(id)} RETURNING *`;
+      const patch = escapeJsonb({ capabilities });
+      const sql = `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
       const vsql = await queryVibeSql(sql);
       if (!vsql.success || !vsql.data?.length) {
         res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_capabilities', (req as any).requestId));
         return;
       }
-      res.json(success(rowToCamel(vsql.data[0]), 'agent_capabilities', (req as any).requestId));
+      const rowData = vsql.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+      res.json(success({
+        id: data.id ?? rowData.document_id,
+        name: data.name,
+        displayName: data.display_name,
+        capabilities: data.capabilities,
+        updatedAt: new Date().toISOString(),
+      }, 'agent_capabilities', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_capabilities', (req as any).requestId));
     }
@@ -478,13 +545,22 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const sql = `UPDATE vibe_agents.agents SET safety_rules = ${escapeJsonb(safety_rules)}, updated_at = NOW() WHERE id = ${escapeSql(id)} RETURNING *`;
+      const patch = escapeJsonb({ safety_rules });
+      const sql = `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
       const vsql = await queryVibeSql(sql);
       if (!vsql.success || !vsql.data?.length) {
         res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_safety_rules', (req as any).requestId));
         return;
       }
-      res.json(success(rowToCamel(vsql.data[0]), 'agent_safety_rules', (req as any).requestId));
+      const rowData = vsql.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+      res.json(success({
+        id: data.id ?? rowData.document_id,
+        name: data.name,
+        displayName: data.display_name,
+        safetyRules: data.safety_rules,
+        updatedAt: new Date().toISOString(),
+      }, 'agent_safety_rules', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_safety_rules', (req as any).requestId));
     }
@@ -497,7 +573,7 @@ export default function agentRoutes(_storage: any): Router {
       const email = identity.email;
       const userId = identity.sub ? parseInt(identity.sub, 10) : null;
       const clientId = identity.clientId ?? config.vibeIdealVibeClientNum;
-      const { project_name } = req.body || {};
+      const { project_name, runtime_choice } = req.body || {};
 
       let derivedName = project_name;
       if (!derivedName) {
@@ -521,8 +597,8 @@ export default function agentRoutes(_storage: any): Router {
         projectId = existingProject.data[0].id;
       } else {
         const createProject = await queryVibeSql(
-          `INSERT INTO vibe_projects.projects (name, description, is_active, client_id, created_by, updated_by)
-           VALUES (${escapeSql(derivedName)}, ${escapeSql('Auto-provisioned project')}, true, ${escapeSql(clientId)}, ${escapeSql(userId)}, ${escapeSql(userId)})
+          `INSERT INTO vibe_projects.projects (name, description, is_active, runtime_choice, client_id, created_by, updated_by)
+           VALUES (${escapeSql(derivedName)}, ${escapeSql('Auto-provisioned project')}, true, ${escapeSql(runtime_choice || 'kimi')}, ${escapeSql(clientId)}, ${escapeSql(userId)}, ${escapeSql(userId)})
            RETURNING id`
         );
         if (!createProject.success || !createProject.data?.length) {
@@ -533,27 +609,48 @@ export default function agentRoutes(_storage: any): Router {
         isNewlyCreated = true;
       }
 
-      // Ensure 2 default agents exist in vibe_agents.agents (universal pair)
+      // Ensure 2 default agents exist in vibe.documents (canonical docstore).
+      // Core team IDs are fixed (BAPert=2, QAPert=5) to match .NET AgentSchemaProvisioningService seed.
       const defaultAgents = [
-        { name: 'BAPert', display_name: 'Business Analyst and Product Strategist', role: 'team-lead' },
-        { name: 'QAPert', display_name: 'QA Analyst Specialist', role: 'qa-analyst' },
+        { name: 'BAPert', display_name: 'Business Analyst and Product Strategist', role: 'team-lead', id: 2 },
+        { name: 'QAPert', display_name: 'QA Analyst Specialist', role: 'qa-analyst', id: 5 },
       ];
 
       const agentsCreated: Array<{ id: number; name: string; display_name: string }> = [];
       for (const agent of defaultAgents) {
         const check = await queryVibeSql(
-          `SELECT id, name, display_name FROM vibe_agents.agents WHERE name = ${escapeSql(agent.name)} AND deleted_at IS NULL`
+          `SELECT document_id, data FROM vibe.documents
+           WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles'
+             AND data->>'name' = ${escapeSql(agent.name)} AND deleted_at IS NULL`
         );
         if (check.success && check.data?.length) {
-          agentsCreated.push({ id: check.data[0].id, name: check.data[0].name, display_name: check.data[0].display_name });
+          const rowData = check.data[0];
+          const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+          agentsCreated.push({ id: data.id ?? rowData.document_id, name: data.name, display_name: data.display_name });
         } else {
+          const agentJson = escapeJsonb({
+            id: agent.id,
+            name: agent.name,
+            display_name: agent.display_name,
+            role: agent.role,
+            agent_type: 'team',
+            is_active: true,
+            is_shared: true,
+            program: 'claude-code',
+            model: 'claude-sonnet-4-6',
+            expertise_tags: [],
+            identity_prompt: `I am ${agent.name}, ${agent.display_name}.`,
+            created_at: new Date().toISOString(),
+          });
           const insert = await queryVibeSql(
-            `INSERT INTO vibe_agents.agents (name, display_name, role, is_active, capabilities, safety_rules, updated_at)
-             VALUES (${escapeSql(agent.name)}, ${escapeSql(agent.display_name)}, ${escapeSql(agent.role)}, true, '{}'::jsonb, '[]'::jsonb, NOW())
-             RETURNING id, name, display_name`
+            `INSERT INTO vibe.documents (client_id, user_id, collection, table_name, data, created_at, created_by)
+             VALUES (0, NULL, 'vibe_agents', 'agent_profiles', ${agentJson}, CURRENT_TIMESTAMP, 0)
+             RETURNING document_id, data`
           );
           if (insert.success && insert.data?.length) {
-            agentsCreated.push({ id: insert.data[0].id, name: insert.data[0].name, display_name: insert.data[0].display_name });
+            const rowData = insert.data[0];
+            const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+            agentsCreated.push({ id: data.id ?? rowData.document_id, name: data.name, display_name: data.display_name });
           }
         }
       }
@@ -683,6 +780,78 @@ export default function agentRoutes(_storage: any): Router {
       res.json(success(profile, 'agent_profile', (req as any).requestId));
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_profile', (req as any).requestId));
+    }
+  });
+
+  // ── Skills persistence (NextPert #5 skill chips) ─────────────────────────
+
+  // Load acp-skills.json catalog once at module init for validation
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  function loadSkillsCatalog(): string[] {
+    try {
+      const catalogPath = path.resolve(__dirname, '../../../acp-desktop/skills/acp-skills.json');
+      const raw = fs.readFileSync(catalogPath, 'utf-8');
+      const json = JSON.parse(raw);
+      return (json.skills || []).map((s: any) => s.name);
+    } catch (err) {
+      console.warn('[agents/skills] Could not load acp-skills.json:', err);
+      return [];
+    }
+  }
+  const skillsCatalog = loadSkillsCatalog();
+
+  // GET /v1/agents/:id/skills
+  router.get('/:id/skills', async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_skills_get', (req as any).requestId));
+        return;
+      }
+      const result = await queryVibeSql(
+        `SELECT data FROM vibe.documents WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL`
+      );
+      if (!result.success || !result.data?.length) {
+        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_skills_get', (req as any).requestId));
+        return;
+      }
+      const data = typeof result.data[0].data === 'string' ? JSON.parse(result.data[0].data) : result.data[0].data;
+      res.json(success({ skills: data.skills || [] }, 'agent_skills_get', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_skills_get', (req as any).requestId));
+    }
+  });
+
+  // PUT /v1/agents/:id/skills
+  router.put('/:id/skills', async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (isNaN(id)) {
+        res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', 'agent_skills_put', (req as any).requestId));
+        return;
+      }
+      const { skills } = req.body || {};
+      if (!Array.isArray(skills) || skills.some((s: any) => typeof s !== 'string')) {
+        res.status(400).json(error('VALIDATION_ERROR', 'skills must be an array of strings', 'agent_skills_put', (req as any).requestId));
+        return;
+      }
+      const invalid = skills.filter((s: string) => !skillsCatalog.includes(s));
+      if (invalid.length > 0 && skillsCatalog.length > 0) {
+        res.status(400).json(error('VALIDATION_ERROR', `Invalid skills: ${invalid.join(', ')}. Valid: ${skillsCatalog.join(', ')}`, 'agent_skills_put', (req as any).requestId));
+        return;
+      }
+      const patch = escapeJsonb({ skills });
+      const sql = `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
+      const result = await queryVibeSql(sql);
+      if (!result.success || !result.data?.length) {
+        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_skills_put', (req as any).requestId));
+        return;
+      }
+      const rowData = result.data[0];
+      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
+      res.json(success({ skills: data.skills || [] }, 'agent_skills_put', (req as any).requestId));
+    } catch (err: any) {
+      res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_skills_put', (req as any).requestId));
     }
   });
 

@@ -267,6 +267,7 @@ export async function refreshToken(idpUrl: string, trigger: string = 'unspecifie
     // run, another caller might have already populated inflightRefresh and
     // we'd double-check, but the outer guard above makes that unreachable.
     const refreshTokenValue = currentSession!.refreshToken!;
+    const preflightRefreshToken = refreshTokenValue;
 
     try {
       // Replay the EXACT binding context the refresh token was minted with
@@ -350,16 +351,22 @@ export async function refreshToken(idpUrl: string, trigger: string = 'unspecifie
       }
 
       const jwtExp = decodeJwtExp(accessToken);
-      currentSession = {
-        accessToken,
-        refreshToken: payload?.refresh_token || currentSession!.refreshToken,
-        expiresAt: jwtExp ?? new Date(Date.now() + 15 * 60 * 1000),
-        userId: payload?.user?.userId || currentSession!.userId,
-        email: payload?.user?.email || currentSession!.email,
-      };
+      // Harden: if the session was re-seeded (e.g. fresh login) while this
+      // refresh was in flight, do NOT overwrite the newer session with stale
+      // tokens from the old refresh context.
+      if (currentSession?.refreshToken === preflightRefreshToken) {
+        currentSession = {
+          accessToken,
+          refreshToken: payload?.refresh_token || currentSession!.refreshToken,
+          expiresAt: jwtExp ?? new Date(Date.now() + 15 * 60 * 1000),
+          userId: payload?.user?.userId || currentSession!.userId,
+          email: payload?.user?.email || currentSession!.email,
+        };
+      }
       consecutiveAmbiguousFailures = 0; // any success resets the backstop
-      console.log(`[Auth] refresh ok, expires ${currentSession.expiresAt.toISOString()}`);
-      authRc({ phase: 'outcome', cid, trigger, detail: { result: 'refreshed', new_exp: currentSession.expiresAt.toISOString() } });
+      const logExp = currentSession?.expiresAt?.toISOString() ?? 'unknown';
+      console.log(`[Auth] refresh ok, expires ${logExp}`);
+      authRc({ phase: 'outcome', cid, trigger, detail: { result: 'refreshed', new_exp: logExp } });
 
       return true;
     } catch (err: any) {

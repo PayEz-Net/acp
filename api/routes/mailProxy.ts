@@ -44,11 +44,10 @@ function buildAuthHeaders(
  * (GET /v1/projects/current → `cache.current`), so the sidecar's view stays
  * lock-step with the renderer's.
  *
- * Used by POST /send to stamp the outgoing mail body with `project_id` so the
- * cloud can enforce project-scoped isolation (WO-agent-mail-project-isolation
- * §Sidecar). GET /inbox + GET /messages do NOT use this — the cloud derives
- * project_id from auth on the read side and filters there (single source of
- * truth on the server; sidecar adds no belt-and-suspenders filter).
+ * Used by all mail proxy routes to stamp `project_id` on every upstream call.
+ * The cloud enforces project-scoped isolation (WO-agent-mail-project-isolation
+ * §Sidecar + §Cloud). Both read and write paths carry the parameter so the
+ * .NET backend can filter inbox, messages, search, and sidebar by project.
  *
  * Prefer fresh (60s TTL); fall back to stale for resilience inside a desktop
  * session. Project switches always relaunch the app (project-switch.ts), so a
@@ -217,8 +216,22 @@ export default function mailProxyRoutes(
     try {
       const { from_agent, to, subject } = req.body || {};
 
+      // Basic input validation before any upstream call
+      if (!from_agent || typeof from_agent !== 'string' || from_agent.trim().length === 0) {
+        res.status(400).json(
+          error('VALIDATION_ERROR', 'from_agent is required and must be a non-empty string', 'mail_send', (req as any).requestId)
+        );
+        return;
+      }
+      if (!Array.isArray(to) || to.length === 0 || to.some((r: any) => typeof r !== 'string' || r.trim().length === 0)) {
+        res.status(400).json(
+          error('VALIDATION_ERROR', 'to must be a non-empty array of non-empty string recipient names', 'mail_send', (req as any).requestId)
+        );
+        return;
+      }
+
       // v2: validate recipients — reject unknown names (AC-11), pass existing agents (AC-12)
-      if (contractorService && from_agent && Array.isArray(to)) {
+      if (contractorService) {
         for (const recipientName of to) {
           const result = await contractorService.resolveRecipient(from_agent, recipientName);
           if (result.action === 'rejected') {
@@ -345,7 +358,12 @@ export default function mailProxyRoutes(
   // GET /v1/mail/agents -> idealvibe.online/v1/agentmail/agents
   router.get('/agents', async (req: Request, res: Response) => {
     try {
-      const result = await proxyToCloud(cfg, '/agents', 'GET', req.query as Record<string, any>);
+      const query = { ...(req.query as Record<string, any>) };
+      const projectId = resolveCurrentProjectId();
+      if (projectId != null && query.project_id == null) {
+        query.project_id = projectId;
+      }
+      const result = await proxyToCloud(cfg, '/agents', 'GET', query);
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_agents');

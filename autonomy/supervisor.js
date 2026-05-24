@@ -1,4 +1,4 @@
-import { signVibeRequest } from '../api/auth/vibeHmac.js';
+import { sendMail, markRead } from '../collaboration/mail.js';
 
 export class Supervisor {
   constructor(storage, cfg = {}) {
@@ -418,48 +418,24 @@ export class Supervisor {
       taskSummary = '(could not fetch kanban)';
     }
 
-    // Send ping via agent mail (HMAC service-account path — no IDP session needed).
-    const cfg = this._cfg;
-    const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
+    // Send ping via local mail (avoids HMAC cloud dependency).
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
-    const hmacCfg = {
-      clientId: cfg.vibeClientId,
-      signingKey: cfg.vibeHmacKey,
-    };
-
     try {
-      const sendPath = '/v1/agentmail/send';
-      const sendRes = await fetch(`${vibeApiUrl}${sendPath}`, {
-        method: 'POST',
-        headers: {
-          ...signVibeRequest('POST', sendPath, hmacCfg),
-          'X-Vibe-Via': 'idp-proxy',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from_agent: leadAgent,
-          to: [leadAgent],
-          subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
-          body,
-          importance: 'normal',
-        }),
+      const pingMsg = await sendMail(this._storage, {
+        from: leadAgent,
+        to: leadAgent,
+        subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
+        body,
+        priority: 'normal',
       });
 
-      if (!sendRes.ok) {
-        const errText = await sendRes.text().catch(() => '(unreadable)');
-        console.error(`[Supervisor] Ping send failed: HTTP ${sendRes.status} — ${errText.slice(0, 400)}`);
-        return;
+      // Auto-mark as read — pings are reference-only, not unread notifications.
+      if (pingMsg?.id) {
+        await markRead(this._storage, pingMsg.id);
       }
-      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
 
-      // NOTE: Do NOT auto-mark the ping as read here. The inbox-poll push
-      // channels (acp-mail-channel.js for Claude, the Kimi/Codex PTY poller
-      // in acp-desktop/src/main/pty.ts) only surface UNREAD mail. Marking
-      // the ping read immediately after send hides it from the channel
-      // push path, which is why "he got the mail but not the notification"
-      // happened. Leave it unread; the lead agent marks it read when they
-      // act on it, same as any normal mail.
+      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
     }
