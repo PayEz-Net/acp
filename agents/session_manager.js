@@ -413,7 +413,9 @@ export class SessionManager {
       sql += ` AND project_id = ${this._escapeSql(projectId)}`;
     }
     const result = await this._queryVibeSql(sql);
-    if (!result.success || !result.data || result.data.length === 0) return null;
+    // Surface query failures — do NOT mask them as "not found" (a null here previously hid real SQL errors).
+    if (!result.success) throw new Error(result.error?.message || 'Failed to query kanban task');
+    if (!result.data || result.data.length === 0) return null;
     return this._rowToTask(result.data[0]);
   }
 
@@ -432,7 +434,11 @@ export class SessionManager {
     if (filter.priority) sql += ` AND priority = ${this._escapeSql(filter.priority)}`;
     sql += ' ORDER BY id ASC';
     const result = await this._queryVibeSql(sql);
-    if (!result.success || !result.data) return [];
+    // Surface query failures instead of returning [] — an empty array on a FAILED query is the masking
+    // hole that hid the kanban write break (GET looked healthy while the query errored). Throw; the route
+    // turns it into a real error response. Genuine empty results still return [].
+    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban tasks');
+    if (!result.data) return [];
     return result.data.map(r => this._rowToTask(r));
   }
 
@@ -456,7 +462,9 @@ export class SessionManager {
     }
     sql += ' RETURNING *';
     const result = await this._queryVibeSql(sql);
-    if (!result.success || !result.data || result.data.length === 0) return null;
+    // Surface query failures — do NOT mask them as "no row updated".
+    if (!result.success) throw new Error(result.error?.message || 'Failed to update kanban task');
+    if (!result.data || result.data.length === 0) return null;
     return this._rowToTask(result.data[0]);
   }
 
