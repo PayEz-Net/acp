@@ -83,7 +83,16 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       }
       const projectId = await storage.getActiveProjectId();
       const task = await moveTask(storage, parseInt(req.params.id as string, 10), status, projectId);
-      await autoMailOnStatusChange(storage, sendMail, task, status);
+      // Notification is best-effort — it must NEVER fail the status transition. The legacy
+      // collaboration/mail.js sendMail -> storage.createMessage is orphaned (createMessage was
+      // dropped from the storage layer in a refactor), so on ->review/->done it threw and 500'd
+      // the whole transition, stranding finished cards (#59/#61/#63/#65). Surface (warn), don't
+      // swallow the transition. Full createMessage wire tracked in #64; #45 is the down-payment.
+      try {
+        await autoMailOnStatusChange(storage, sendMail, task, status);
+      } catch (mailErr: any) {
+        console.warn(`[kanban] status-change notification skipped for task ${req.params.id} -> ${status}: ${mailErr?.message}`);
+      }
       localEventBus?.emit({
         event: 'kanban-update',
         data: { action: 'status_changed', task_id: req.params.id, status },
