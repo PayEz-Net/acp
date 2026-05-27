@@ -72,6 +72,9 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const state = backoff.getOrCreate(name);
       state.status = 'spawning';
       state.workDir = workDir || null;
+      // Persist the override so restarts (manual + crash auto-restart)
+      // re-apply it instead of dropping to the global default (#16b).
+      state.effort = validEffort ?? null;
       state.autoReport = autoReport !== false;
 
       // Bootstrap session
@@ -186,11 +189,13 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       // Bootstrap session
       const { session } = await bootstrap(name);
 
-      // Spawn
+      // Spawn — re-apply the persisted per-agent effort override (#16b)
+      // so a manual restart keeps the agent at its override, not global.
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: state.workDir || undefined,
         autoReport: state.autoReport,
+        ...(state.effort ? { effort: state.effort } : {}),
       });
 
       if (result.status !== 200) {

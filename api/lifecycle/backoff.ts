@@ -11,6 +11,11 @@ export interface AgentState {
   terminalId: string | null;
   sessionId: string | null;
   workDir: string | null;
+  /** Per-agent effort override the agent was spawned with (Claude-only).
+   *  Persisted so a crash auto-restart / manual restart re-applies the
+   *  SAME override instead of silently dropping to the global default
+   *  (QA #16b). null = no override (defer to the single resolver). */
+  effort: 'low' | 'medium' | 'high' | 'max' | null;
   autoReport: boolean;
   consecutiveCrashes: number;
   restartCount: number;
@@ -37,6 +42,7 @@ export class BackoffManager {
         terminalId: null,
         sessionId: null,
         workDir: null,
+        effort: null,
         autoReport: true,
         consecutiveCrashes: 0,
         restartCount: 0,

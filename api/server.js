@@ -185,7 +185,10 @@ export async function createApp(cfg) {
             'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport }),
+          // Re-apply the persisted per-agent effort override on crash
+          // auto-restart so the agent restarts AT its override, not the
+          // global default (#16b). null/absent -> omitted (defer to resolver).
+          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(state.effort ? { effort: state.effort } : {}) }),
         });
         if (result.ok) {
           const data = await result.json();
