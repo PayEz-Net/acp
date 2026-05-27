@@ -327,12 +327,89 @@ export class SessionManager {
   }
 
   // -----------------------------------------------------------------------
-  // Kanban tasks — VibeSQL-backed store
+  // Kanban tasks — VibeSQL-backed store (with local JSON fallback)
   // Schema: vibe.kanban_tasks
+  //
+  // Local fallback is enabled either:
+  //   (1) Explicitly: ACP_KANBAN_LOCAL=true env var, OR
+  //   (2) Automatically: first VibeSQL probe at call time fails (2s timeout).
+  //
+  // Default endpoint http://10.0.0.93:52411 is reachable only on Jon's LAN —
+  // off-LAN agents silently saw "fetch failed" before this fallback. The
+  // sticky probe makes the API self-heal to a local JSON store at
+  // <cwd>/data/kanban-tasks.json so the kanban UI renders. See
+  // [[vibesql-store-reachability]].
   // -----------------------------------------------------------------------
 
   _vibeSqlUrl = process.env.VIBESQL_URL || 'http://10.0.0.93:52411';
   _vibeSqlSecret = process.env.VIBESQL_SECRET || 'ContainersSuperDevSecret';
+  _kanbanLocal = process.env.ACP_KANBAN_LOCAL === 'true';
+  _kanbanBackendChecked = process.env.ACP_KANBAN_LOCAL === 'true';
+  _kanbanLocalLogged = false;
+
+  // First call probes VibeSQL with a 2s timeout. On failure, sets _kanbanLocal
+  // sticky for the session — avoids paying the timeout on every subsequent call
+  // when the upstream is dead. Idempotent / safe to call from each method.
+  async _ensureKanbanBackend() {
+    if (this._kanbanBackendChecked) return;
+    this._kanbanBackendChecked = true;
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this._vibeSqlUrl}/v1/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Secret ${this._vibeSqlSecret}`,
+        },
+        body: JSON.stringify({ sql: 'SELECT 1' }),
+        signal: controller.signal,
+      });
+      clearTimeout(t);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      this._kanbanLocal = true;
+      console.warn(`[KanbanStore] VibeSQL unreachable at ${this._vibeSqlUrl} (${err?.message || err}) — auto-falling back to LOCAL JSON store at ${process.cwd()}/data/kanban-tasks.json. Set VIBESQL_URL to a reachable endpoint to re-enable shared store.`);
+    }
+  }
+
+  async _loadKanbanLocal() {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const p = path.join(process.cwd(), 'data', 'kanban-tasks.json');
+    try {
+      const text = await fs.readFile(p, 'utf8');
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed?.tasks) ? parsed : { nextId: 1, tasks: [] };
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return { nextId: 1, tasks: [] };
+      throw err;
+    }
+  }
+
+  async _saveKanbanLocal(state) {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const dir = path.join(process.cwd(), 'data');
+    const p = path.join(dir, 'kanban-tasks.json');
+    await fs.mkdir(dir, { recursive: true });
+    // Best-effort atomic write: tmp file + rename. Avoids torn writes if the
+    // process dies mid-flush. JSON pretty-printed so a human can hand-edit
+    // if needed (this is a local dev fallback, not a hot store).
+    const tmp = p + '.tmp';
+    await fs.writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
+    await fs.rename(tmp, p);
+  }
+
+  _logKanbanMode() {
+    if (this._kanbanLocalLogged) return;
+    this._kanbanLocalLogged = true;
+    if (this._kanbanLocal) {
+      console.warn(`[KanbanStore] LOCAL JSON mode (ACP_KANBAN_LOCAL=true). Store: ${process.cwd()}/data/kanban-tasks.json — NOT shared with team.`);
+    } else {
+      console.log(`[KanbanStore] VibeSQL mode. Endpoint: ${this._vibeSqlUrl}`);
+    }
+  }
 
   _escapeSql(value) {
     if (value === null || value === undefined) return 'NULL';
@@ -377,7 +454,32 @@ export class SessionManager {
   }
 
   async createTask(task) {
+    await this._ensureKanbanBackend();
+    this._logKanbanMode();
     const now = new Date().toISOString();
+    if (this._kanbanLocal) {
+      const state = await this._loadKanbanLocal();
+      const id = state.nextId || 1;
+      state.nextId = id + 1;
+      state.tasks.push({
+        id,
+        title: task.title,
+        description: task.description ?? null,
+        status: task.status || 'backlog',
+        priority: task.priority || 'medium',
+        assigned_to: task.assignedTo ?? null,
+        created_by: task.createdBy ?? null,
+        spec_path: task.specPath ?? null,
+        milestone: task.milestone ?? null,
+        files_changed: task.filesChanged || [],
+        blockers: task.blockers ?? null,
+        created_at: now,
+        updated_at: now,
+        completed_at: null,
+      });
+      await this._saveKanbanLocal(state);
+      return id;
+    }
     const sql = `INSERT INTO vibe.kanban_tasks (title, description, status, priority, assigned_to, created_by, spec_path, milestone, files_changed, blockers, created_at, updated_at, completed_at) VALUES (${this._escapeSql(task.title)}, ${this._escapeSql(task.description)}, ${this._escapeSql(task.status || 'backlog')}, ${this._escapeSql(task.priority || 'medium')}, ${this._escapeSql(task.assignedTo)}, ${this._escapeSql(task.createdBy)}, ${this._escapeSql(task.specPath)}, ${this._escapeSql(task.milestone)}, ${this._escapeSql(JSON.stringify(task.filesChanged || []))}::jsonb, ${this._escapeSql(task.blockers)}, ${this._escapeSql(now)}, ${this._escapeSql(now)}, NULL) RETURNING id`;
     const result = await this._queryVibeSql(sql);
     if (!result.success || !result.data || result.data.length === 0) {
@@ -387,6 +489,13 @@ export class SessionManager {
   }
 
   async getTask(id) {
+    await this._ensureKanbanBackend();
+    this._logKanbanMode();
+    if (this._kanbanLocal) {
+      const state = await this._loadKanbanLocal();
+      const row = state.tasks.find(t => Number(t.id) === Number(id));
+      return row ? this._rowToTask(row) : null;
+    }
     const sql = `SELECT * FROM vibe.kanban_tasks WHERE id = ${Number(id)}`;
     const result = await this._queryVibeSql(sql);
     if (!result.success || !result.data || result.data.length === 0) return null;
@@ -394,6 +503,21 @@ export class SessionManager {
   }
 
   async listTasks(filter = {}) {
+    await this._ensureKanbanBackend();
+    this._logKanbanMode();
+    if (this._kanbanLocal) {
+      const state = await this._loadKanbanLocal();
+      let rows = state.tasks;
+      if (filter.status) {
+        const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+        rows = rows.filter(r => statuses.includes(r.status));
+      }
+      if (filter.assignedTo) rows = rows.filter(r => r.assigned_to === filter.assignedTo);
+      if (filter.milestone) rows = rows.filter(r => r.milestone === filter.milestone);
+      if (filter.priority) rows = rows.filter(r => r.priority === filter.priority);
+      // Match SQL path's ORDER BY id ASC for stable UI ordering
+      return [...rows].sort((a, b) => Number(a.id) - Number(b.id)).map(r => this._rowToTask(r));
+    }
     let sql = 'SELECT * FROM vibe.kanban_tasks WHERE 1=1';
     if (filter.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
@@ -410,6 +534,28 @@ export class SessionManager {
   }
 
   async updateTask(id, updates) {
+    await this._ensureKanbanBackend();
+    this._logKanbanMode();
+    if (this._kanbanLocal) {
+      const state = await this._loadKanbanLocal();
+      const idx = state.tasks.findIndex(t => Number(t.id) === Number(id));
+      if (idx === -1) return null;
+      const row = state.tasks[idx];
+      // Map camelCase update keys to snake_case row keys (mirrors _rowToTask shape)
+      if (updates.status !== undefined) row.status = updates.status;
+      if (updates.priority !== undefined) row.priority = updates.priority;
+      if (updates.assignedTo !== undefined) row.assigned_to = updates.assignedTo;
+      if (updates.milestone !== undefined) row.milestone = updates.milestone;
+      if (updates.specPath !== undefined) row.spec_path = updates.specPath;
+      if (updates.blockers !== undefined) row.blockers = updates.blockers;
+      if (updates.description !== undefined) row.description = updates.description;
+      if (updates.title !== undefined) row.title = updates.title;
+      if (updates.filesChanged !== undefined) row.files_changed = updates.filesChanged;
+      if (updates.updatedAt !== undefined) row.updated_at = updates.updatedAt;
+      if (updates.completedAt !== undefined) row.completed_at = updates.completedAt;
+      await this._saveKanbanLocal(state);
+      return this._rowToTask(row);
+    }
     const sets = [];
     if (updates.status !== undefined) sets.push(`status = ${this._escapeSql(updates.status)}`);
     if (updates.priority !== undefined) sets.push(`priority = ${this._escapeSql(updates.priority)}`);

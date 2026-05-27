@@ -7,5 +7,7 @@ build/
 .env.*
 !.env.example
 coverage/
-.acp-test-*/ 
+.acp-test-*/
 package-lock.json
+# Local kanban JSON fallback store (ACP_KANBAN_LOCAL=true)
+data/
