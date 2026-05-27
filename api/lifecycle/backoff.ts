@@ -11,11 +11,13 @@ export interface AgentState {
   terminalId: string | null;
   sessionId: string | null;
   workDir: string | null;
-  /** Per-agent effort override the agent was spawned with (Claude-only).
-   *  Persisted so a crash auto-restart / manual restart re-applies the
-   *  SAME override instead of silently dropping to the global default
-   *  (QA #16b). null = no override (defer to the single resolver). */
-  effort: 'low' | 'medium' | 'high' | 'max' | null;
+  /** Project the agent was spawned under — the LOOKUP KEY (not the effort
+   *  value) for re-resolving effort_override FRESH from the DB at respawn
+   *  (#16b). Caching the stable routing key is fine; caching the effort
+   *  VALUE would drift if the user edits it mid-crash-window (Aurum 1421
+   *  mini-hydra). null = caller didn't send projectId -> restart can't
+   *  look up -> defers to the global resolver (documented micro-gap). */
+  projectId: number | null;
   autoReport: boolean;
   consecutiveCrashes: number;
   restartCount: number;
@@ -42,7 +44,7 @@ export class BackoffManager {
         terminalId: null,
         sessionId: null,
         workDir: null,
-        effort: null,
+        projectId: null,
         autoReport: true,
         consecutiveCrashes: 0,
         restartCount: 0,

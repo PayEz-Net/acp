@@ -23,6 +23,7 @@ import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
+import { resolveMemberEffort } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
 import { LifecycleHooks } from './lifecycle/hooks.js';
@@ -179,16 +180,20 @@ export async function createApp(cfg) {
     state.restartTimer = setTimeout(async () => {
       try {
         const { session } = await bootstrap(sessionManager, agentName);
+        // #16b: re-resolve effort FRESH from the DB at crash auto-restart
+        // (Aurum 1421 — a cached value drifts if effort was edited during the
+        // crash/backoff window; the drift test demands the CURRENT DB value).
+        // Defers to the global resolver if no project ctx / no active session.
+        const freshEffort = state.projectId != null
+          ? await resolveMemberEffort(appConfig, state.projectId, agentName)
+          : undefined;
         const result = await fetch(`http://127.0.0.1:${callbackPort}/internal/pty/spawn`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
             'Content-Type': 'application/json',
           },
-          // Re-apply the persisted per-agent effort override on crash
-          // auto-restart so the agent restarts AT its override, not the
-          // global default (#16b). null/absent -> omitted (defer to resolver).
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(state.effort ? { effort: state.effort } : {}) }),
+          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}) }),
         });
         if (result.ok) {
           const data = await result.json();

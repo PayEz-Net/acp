@@ -3,6 +3,7 @@ import { success, error } from '../response.js';
 import type { BackoffManager } from '../lifecycle/backoff.js';
 import type { HealthMonitor } from '../lifecycle/healthMonitor.js';
 import type { Config } from '../../config.js';
+import { resolveMemberEffort } from './team.js';
 
 interface LifecycleDeps {
   cfg: Config;
@@ -48,7 +49,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
   // POST /v1/lifecycle/agents/:name/spawn
   router.post('/:name/spawn', async (req: Request, res: Response) => {
     const name = req.params.name as string;
-    const { workDir, autoReport, runtime, effort } = req.body || {};
+    const { workDir, autoReport, runtime, effort, projectId } = req.body || {};
 
     // Project-driven runtime — renderer reads activeProject.runtime_choice
     // and POSTs it here. Forwarded as-is to the Electron callback server;
@@ -72,9 +73,10 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const state = backoff.getOrCreate(name);
       state.status = 'spawning';
       state.workDir = workDir || null;
-      // Persist the override so restarts (manual + crash auto-restart)
-      // re-apply it instead of dropping to the global default (#16b).
-      state.effort = validEffort ?? null;
+      // #16b: store the PROJECT (the lookup key) so restarts can re-resolve
+      // effort_override FRESH from the DB — never a cached value (Aurum 1421:
+      // a cached value drifts if the user edits effort mid-crash-window).
+      state.projectId = typeof projectId === 'number' ? projectId : null;
       state.autoReport = autoReport !== false;
 
       // Bootstrap session
@@ -189,13 +191,18 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       // Bootstrap session
       const { session } = await bootstrap(name);
 
-      // Spawn — re-apply the persisted per-agent effort override (#16b)
-      // so a manual restart keeps the agent at its override, not global.
+      // #16b: re-resolve effort FRESH from the DB at respawn (Aurum 1421 —
+      // a cached value drifts if the user edited effort during the window;
+      // the drift test demands the CURRENT DB value). Defers to the global
+      // resolver when there's no project ctx / no active session.
+      const freshEffort = state.projectId != null
+        ? await resolveMemberEffort(cfg, state.projectId, name)
+        : undefined;
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: state.workDir || undefined,
         autoReport: state.autoReport,
-        ...(state.effort ? { effort: state.effort } : {}),
+        ...(freshEffort ? { effort: freshEffort } : {}),
       });
 
       if (result.status !== 200) {
