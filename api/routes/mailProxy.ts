@@ -289,67 +289,20 @@ export default function mailProxyRoutes(
     }
   });
 
-  // POST /v1/mail/inbox/:agent/read-all -> Mark all messages as read for agent
-  // This is a local convenience endpoint that batches individual mark-read calls
+  // POST /v1/mail/inbox/:agent/read-all -> cloud ATOMIC bulk read-all (project-scoped).
+  // Proxies straight to the cloud's single-SQL-UPDATE endpoint
+  // (AgentMailController -> AgentMailService.MarkAllAsReadAsync) instead of the old per-message
+  // loop. The loop fetched only inbox page-1 (first 100 unread), could time out mid-loop on the
+  // 10s proxy budget, and claimed success on partial failure. The cloud does it in one round-trip,
+  // no page limit, scoped agent+client+project. (Jon / BAPert msg 1310.)
   router.post('/inbox/:agent/read-all', async (req: Request, res: Response) => {
     try {
       const agentName = req.params.agent;
-      
-      // First, fetch all messages for the agent (project-scoped)
       const projectId = resolveCurrentProjectId();
-      const inboxQuery: Record<string, any> = { page: 1, page_size: 100 };
-      if (projectId != null) {
-        inboxQuery.project_id = projectId;
-      }
-      const inboxResult = await proxyToCloud(cfg, `/inbox/${agentName}`, 'GET', inboxQuery);
-      
-      const inboxData = inboxResult.data as any;
-      if (inboxResult.status !== 200 || !inboxData?.success) {
-        res.status(inboxResult.status).json(inboxData);
-        return;
-      }
-      
-      const messages = inboxData.data?.messages || [];
-      const unreadMessages = messages.filter((m: any) => !m.read_at);
-      
-      if (unreadMessages.length === 0) {
-        res.json({
-          success: true,
-          data: { marked: 0, total: messages.length },
-          message: 'No unread messages to mark'
-        });
-        return;
-      }
-      
-      // Mark each unread message as read using inbox_id
-      let markedCount = 0;
-      const errors: string[] = [];
-      
-      for (const msg of unreadMessages) {
-        const inbox_id = msg.inbox_id;
-        try {
-          const result = await proxyToCloud(cfg, `/inbox/${inbox_id}/read`, 'POST');
-          const resultData = result.data as any;
-          if (result.status === 200 && resultData?.success) {
-            markedCount++;
-          } else {
-            errors.push(`inbox_id ${inbox_id}: ${resultData?.error || 'Unknown error'}`);
-          }
-        } catch (err: any) {
-          errors.push(`inbox_id ${inbox_id}: ${err.message}`);
-        }
-      }
-      
-      res.json({
-        success: markedCount > 0,
-        data: { 
-          marked: markedCount, 
-          total: unreadMessages.length,
-          agent: agentName
-        },
-        errors: errors.length > 0 ? errors : undefined,
-        message: `Marked ${markedCount}/${unreadMessages.length} messages as read`
-      });
+      const query: Record<string, any> = {};
+      if (projectId != null) query.project_id = projectId;   // clear ONLY the current project's mail
+      const result = await proxyToCloud(cfg, `/inbox/${agentName}/read-all`, 'POST', query);
+      res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_mark_all_read');
     }
