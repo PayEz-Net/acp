@@ -322,35 +322,12 @@ if (process.argv[1]?.endsWith('server.js')) {
     // Start health monitor for Electron callback server
     app._healthMonitor.start();
 
-    // Auto-spawn agents via Electron callback (if enabled and callback port configured)
-    if (config.acpAutoSpawn && config.acpCallbackPort) {
-      console.log(`[ACP] Auto-spawning ${agents.length} agents via callback port ${config.acpCallbackPort}`);
-      for (const agentName of agents) {
-        const state = app._backoffManager.getOrCreate(agentName);
-        state.status = 'spawning';
-        fetch(`http://127.0.0.1:${config.acpCallbackPort}/internal/pty/spawn`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${config.acpLocalSecret}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ agentName, autoReport: true }),
-        }).then(async (res) => {
-          if (res.ok) {
-            const data = await res.json();
-            const terminalId = data?.terminalId || data?.data?.terminalId || '';
-            app._backoffManager.markSpawned(agentName, terminalId, '');
-            console.log(`[ACP] Auto-spawned ${agentName}`);
-          } else {
-            state.status = 'error';
-            console.warn(`[ACP] Auto-spawn failed for ${agentName}: HTTP ${res.status}`);
-          }
-        }).catch((err) => {
-          state.status = 'error';
-          console.warn(`[ACP] Auto-spawn failed for ${agentName}: ${err.message}`);
-        });
-      }
-    }
+    // The config-gated boot auto-spawn loop was REMOVED (BAPert 1425; Aurum
+    // 1413 greenfield-no-dead-code). It was a dead, competing autostart path:
+    // ACP_AUTO_SPAWN defaulted OFF and no surface set it true, while the
+    // CANONICAL autostart is the lifecycle-hub -> spawn-orchestrator (main
+    // process). A second autostart authority here would be a hydra. Spawns
+    // now come from the orchestrator or explicit /v1/lifecycle/agents/:name/spawn.
 
     // Register graceful shutdown handlers
     registerShutdownHandlers({
