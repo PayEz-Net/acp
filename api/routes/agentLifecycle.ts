@@ -48,7 +48,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
   // POST /v1/lifecycle/agents/:name/spawn
   router.post('/:name/spawn', async (req: Request, res: Response) => {
     const name = req.params.name as string;
-    const { workDir, autoReport, runtime } = req.body || {};
+    const { workDir, autoReport, runtime, effort } = req.body || {};
 
     // Project-driven runtime — renderer reads activeProject.runtime_choice
     // and POSTs it here. Forwarded as-is to the Electron callback server;
@@ -56,6 +56,16 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
     // values. Per feedback_runtime_choice_vs_platform_llm.
     const validRuntime = (runtime === 'claude' || runtime === 'kimi' || runtime === 'codex')
       ? runtime
+      : undefined;
+
+    // Per-agent effort override (Claude-only). The caller (renderer with
+    // team context) POSTs the agent's effort_override; forward it to the
+    // Electron callback so lifecycle-server -> spawnAgent's single resolver
+    // (opts?.effort || settings.claudeEffort || 'high') honors it. Unknown/
+    // absent -> undefined = defer to the global default (no second authority,
+    // Aurum 1401/1411). Per-member, unlike the project-uniform runtime.
+    const validEffort = (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'max')
+      ? effort
       : undefined;
 
     try {
@@ -73,6 +83,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
         workDir: workDir || undefined,
         autoReport: state.autoReport,
         ...(validRuntime ? { runtime: validRuntime } : {}),
+        ...(validEffort ? { effort: validEffort } : {}),
       });
 
       // 409 = agent already running — reuse existing terminalId
