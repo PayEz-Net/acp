@@ -104,7 +104,7 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
 interface CloudProfileShape {
   id?: number;
   agent_id?: number;
-  identity_prompt?: string | null;
+  identity_md?: string | null;       // ProfileDto [JsonPropertyName("identity_md")]
   role_md?: string | null;
   philosophy_md?: string | null;
   communication_md?: string | null;
@@ -128,12 +128,12 @@ function mapCloudProfile(
   // For backward-tolerance during the cloud schema cleanup, we
   // concatenate any non-empty content across the legacy fields into
   // a single `profile` paragraph blob. In practice today only
-  // identity_prompt is populated for canonical agents — so `profile`
-  // ends up = identity_prompt content. Order matches the original
+  // identity_md is populated for canonical agents — so `profile`
+  // ends up = identity_md content. Order matches the original
   // breakdown sequence so any author who DID fill multiple fields
   // gets a sensible read.
   const sections = [
-    cloudProfile.identity_prompt,
+    cloudProfile.identity_md,
     cloudProfile.role_md,
     cloudProfile.philosophy_md,
     cloudProfile.communication_md,
