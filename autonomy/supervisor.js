@@ -1,4 +1,4 @@
-import { sendMail, markRead } from '../collaboration/mail.js';
+// sendMail/markRead removed — _sendPing uses direct fetch to local mail API
 
 export class Supervisor {
   constructor(storage, cfg = {}) {
@@ -173,8 +173,9 @@ export class Supervisor {
       });
     }
 
-    // Fire first ping immediately so lead agent gets notified on start
-    this._sendPing().catch(() => {});
+    // Fire first ping immediately so lead agent gets notified on start.
+    // isInitial=true skips auto-markRead so the lead sees it as unread.
+    this._sendPing(true).catch(err => console.error('[Supervisor] Initial ping failed:', err.message || err));
 
     return this.getState();
   }
@@ -360,7 +361,7 @@ export class Supervisor {
     // the SSE emit that reads _pingConfig after _startPingTimer returns.
   }
 
-  async _sendPing() {
+  async _sendPing(isInitial = false) {
     if (!this.unattendedMode || !this._pingConfig) return;
 
     // Read lead agent from DB (source of truth — written by config modal on start)
@@ -422,17 +423,31 @@ export class Supervisor {
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
     try {
-      const pingMsg = await sendMail(this._storage, {
-        from: leadAgent,
-        to: leadAgent,
-        subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
-        body,
-        priority: 'normal',
+      const port = this._cfg?.port || 3001;
+      const mailRes = await fetch(`http://127.0.0.1:${port}/v1/mail/send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-ACP-Agent': leadAgent,
+        },
+        body: JSON.stringify({
+          from_agent: leadAgent,
+          to: [leadAgent],
+          subject: `UNATTENDED PING: Check kanban and mail (${elapsedMin}m elapsed)`,
+          body,
+          importance: 'normal',
+        }),
       });
+      if (!mailRes.ok) throw new Error(`Mail send failed: ${mailRes.status}`);
+      const pingMsg = await mailRes.json();
 
-      // Auto-mark as read — pings are reference-only, not unread notifications.
-      if (pingMsg?.id) {
-        await markRead(this._storage, pingMsg.id);
+      // Interval pings are reference-only — mark read so they don't pile up in inbox.
+      // Initial ping (isInitial=true) stays unread so the lead agent sees the start notification.
+      if (!isInitial && pingMsg?.data?.message_id) {
+        await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}/read-all`, {
+          method: 'POST',
+          headers: { 'X-ACP-Agent': leadAgent },
+        }).catch(() => {});
       }
 
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
