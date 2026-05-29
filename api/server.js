@@ -35,6 +35,7 @@ import { SessionManager as ContractorSessionManager } from './contractors/sessio
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
+import standupProxyRoutes from './routes/standupProxy.js';
 import documentRoutes from './routes/documents.js';
 import agentRoutes from './routes/agents.js';
 import teamRoutes from './routes/team.js';
@@ -253,6 +254,10 @@ export async function createApp(cfg) {
     app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
     app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
   }
+  // Standup (Team Check-in) proxy — #66 W1. MOUNTED BEFORE projectRoutes so the
+  // deeper /v1/projects/:id/standup/* paths forward to the typed .NET vibe-api;
+  // all other /v1/projects/* fall through to the projects proxy below.
+  app.use('/v1/projects', standupProxyRoutes(appConfig));
   app.use('/v1/projects', projectRoutes(localEventBus, appConfig));
   app.use('/v1/documents', documentRoutes(storage));
   // Team sync — soft-cached proxy of vibe-publicapi /v1/agentmail/agents?type=team.
