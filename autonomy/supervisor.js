@@ -408,13 +408,9 @@ export class Supervisor {
         }
       }
 
-      // Check stop conditions while we have tasks
-      const stopReason = await this.checkStopConditions(tasks);
-      if (stopReason) {
-        console.log(`[Supervisor] Stop condition met: ${stopReason}`);
-        await this.stopUnattended(stopReason);
-        return;
-      }
+      // Stop condition check moved to AFTER mail send — checking here caused an
+      // early return that swallowed the initial startup notification entirely.
+      // Capture tasks for the post-send check below.
     } catch {
       taskSummary = '(could not fetch kanban)';
     }
@@ -441,18 +437,49 @@ export class Supervisor {
       if (!mailRes.ok) throw new Error(`Mail send failed: ${mailRes.status}`);
       const pingMsg = await mailRes.json();
 
-      // Interval pings are reference-only — mark read so they don't pile up in inbox.
-      // Initial ping (isInitial=true) stays unread so the lead agent sees the start notification.
-      if (!isInitial && pingMsg?.data?.message_id) {
-        await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}/read-all`, {
-          method: 'POST',
-          headers: { 'X-ACP-Agent': leadAgent },
-        }).catch(() => {});
+      // Initial ping is a system start-notification — arrive already-read so it
+      // doesn't show as action-required. Interval pings stay unread; they ARE
+      // the "check in now" trigger for the lead agent.
+      // The send response returns message_id; the read endpoint needs inbox_id —
+      // resolve it via a quick inbox lookup.
+      if (isInitial && pingMsg?.data?.message_id) {
+        try {
+          const sentMsgId = pingMsg.data.message_id;
+          const inboxRes = await fetch(
+            `http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}?unread=true&page_size=5`,
+            { headers: { 'X-ACP-Agent': leadAgent } }
+          );
+          if (inboxRes.ok) {
+            const inboxData = await inboxRes.json();
+            const match = (inboxData?.data?.messages || []).find(m => m.message_id === sentMsgId);
+            if (match?.inbox_id) {
+              await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${match.inbox_id}/read`, {
+                method: 'POST',
+                headers: { 'X-ACP-Agent': leadAgent },
+              }).catch(() => {});
+            }
+          }
+        } catch { /* non-fatal — mail still delivered even if mark-read fails */ }
       }
 
-      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
+      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed, isInitial=${isInitial})`);
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
+    }
+
+    // Check stop conditions AFTER the mail has been sent. This ensures the lead
+    // agent always receives the startup notification even when the kanban is
+    // already in a stop-eligible state (e.g. review_queue full on day-start).
+    try {
+      const activeProjectId = await this._storage.getActiveProjectId();
+      const tasks = await this._storage.listTasks(activeProjectId != null ? { projectId: activeProjectId } : {});
+      const stopReason = await this.checkStopConditions(tasks);
+      if (stopReason) {
+        console.log(`[Supervisor] Stop condition met: ${stopReason}`);
+        await this.stopUnattended(stopReason);
+      }
+    } catch {
+      // Non-fatal — unattended continues if stop-condition check fails
     }
   }
 
