@@ -69,6 +69,7 @@ async function proxyToCloud(
   method: string,
   query?: Record<string, any>,
   body?: unknown,
+  agentName?: string,
 ): Promise<{ status: number; data: unknown }> {
   const qs = query ? buildQueryString(query) : '';
   const url = `${cfg.vibeApiUrl}${path}${qs}`;
@@ -80,6 +81,11 @@ async function proxyToCloud(
 
   const doFetch = async (bearer: string): Promise<{ status: number; data: unknown }> => {
     const headers = buildAuthHeaders(cfg, bearer, method, path);
+    // Forward the agent identity (report-filing authz, #67 W2 / S8a). The sidecar
+    // is the trusted local boundary; the cloud reads X-ACP-Agent when no agent JWT.
+    if (agentName) {
+      headers['X-ACP-Agent'] = agentName;
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {
@@ -171,6 +177,25 @@ export default function standupProxyRoutes(cfg: Config): Router {
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'standup_close_round');
+    }
+  });
+
+  // POST /v1/projects/:projectId/standup/rounds/:roundId/report -> file the agent's own report
+  router.post('/:projectId/standup/rounds/:roundId/report', async (req: Request, res: Response) => {
+    try {
+      const agentName = (req.headers['x-acp-agent'] as string | undefined)
+        || (req as any).agentName as string | undefined;
+      const result = await proxyToCloud(
+        cfg,
+        `${cloudBase(String(req.params.projectId))}/rounds/${encodeURIComponent(String(req.params.roundId))}/report`,
+        'POST',
+        req.query as any,
+        req.body,
+        agentName,
+      );
+      res.status(result.status).json(result.data);
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'standup_file_report');
     }
   });
 
