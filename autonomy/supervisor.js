@@ -174,7 +174,10 @@ export class Supervisor {
     }
 
     // Fire first ping immediately so lead agent gets notified on start.
-    // isInitial=true skips auto-markRead so the lead sees it as unread.
+    // isInitial=true marks the inbox read-all (clean slate) so the start
+    // notification + any backlog don't clog the lead's mailbox as unread.
+    // Interval pings (isInitial=false) intentionally arrive UNREAD — they are
+    // the "check in now" trigger for the lead.
     this._sendPing(true).catch(err => console.error('[Supervisor] Initial ping failed:', err.message || err));
 
     return this.getState();
@@ -437,28 +440,19 @@ export class Supervisor {
       if (!mailRes.ok) throw new Error(`Mail send failed: ${mailRes.status}`);
       const pingMsg = await mailRes.json();
 
-      // Initial ping is a system start-notification — arrive already-read so it
-      // doesn't show as action-required. Interval pings stay unread; they ARE
-      // the "check in now" trigger for the lead agent.
-      // The send response returns message_id; the read endpoint needs inbox_id —
-      // resolve it via a quick inbox lookup.
-      if (isInitial && pingMsg?.data?.message_id) {
+      // Initial ping is a system start-notification — clear the lead's inbox to
+      // a clean slate so it (and any pre-existing backlog) doesn't show as
+      // action-required. One atomic, agent+project-scoped read-all (single cloud
+      // UPDATE) replaces the old fragile send->lookup->resolve-inbox_id->read
+      // dance, which silently missed (list item shape ≠ message shape, 5-item
+      // window, send/refetch race) and left the ping UNREAD.
+      // Interval pings stay UNREAD; they ARE the "check in now" trigger.
+      if (isInitial) {
         try {
-          const sentMsgId = pingMsg.data.message_id;
-          const inboxRes = await fetch(
-            `http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}?unread=true&page_size=5`,
-            { headers: { 'X-ACP-Agent': leadAgent } }
-          );
-          if (inboxRes.ok) {
-            const inboxData = await inboxRes.json();
-            const match = (inboxData?.data?.messages || []).find(m => m.message_id === sentMsgId);
-            if (match?.inbox_id) {
-              await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${match.inbox_id}/read`, {
-                method: 'POST',
-                headers: { 'X-ACP-Agent': leadAgent },
-              }).catch(() => {});
-            }
-          }
+          await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}/read-all`, {
+            method: 'POST',
+            headers: { 'X-ACP-Agent': leadAgent },
+          });
         } catch { /* non-fatal — mail still delivered even if mark-read fails */ }
       }
 
