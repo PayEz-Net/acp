@@ -174,10 +174,10 @@ export class Supervisor {
     }
 
     // Fire first ping immediately so lead agent gets notified on start.
-    // isInitial=true marks the inbox read-all (clean slate) so the start
-    // notification + any backlog don't clog the lead's mailbox as unread.
-    // Interval pings (isInitial=false) intentionally arrive UNREAD — they are
-    // the "check in now" trigger for the lead.
+    // The start notification arrives UNREAD (like interval pings) so the lead
+    // actually SEES it — the previous auto read-all clobbered the just-sent
+    // ping itself, leaving the lead with no visible start notification (#81).
+    // isInitial is retained only as a log label now.
     this._sendPing(true).catch(err => console.error('[Supervisor] Initial ping failed:', err.message || err));
 
     return this.getState();
@@ -438,23 +438,13 @@ export class Supervisor {
         }),
       });
       if (!mailRes.ok) throw new Error(`Mail send failed: ${mailRes.status}`);
-      const pingMsg = await mailRes.json();
+      await mailRes.json().catch(() => {}); // consume the response body
 
-      // Initial ping is a system start-notification — clear the lead's inbox to
-      // a clean slate so it (and any pre-existing backlog) doesn't show as
-      // action-required. One atomic, agent+project-scoped read-all (single cloud
-      // UPDATE) replaces the old fragile send->lookup->resolve-inbox_id->read
-      // dance, which silently missed (list item shape ≠ message shape, 5-item
-      // window, send/refetch race) and left the ping UNREAD.
-      // Interval pings stay UNREAD; they ARE the "check in now" trigger.
-      if (isInitial) {
-        try {
-          await fetch(`http://127.0.0.1:${port}/v1/mail/inbox/${leadAgent}/read-all`, {
-            method: 'POST',
-            headers: { 'X-ACP-Agent': leadAgent },
-          });
-        } catch { /* non-fatal — mail still delivered even if mark-read fails */ }
-      }
+      // #81: the start ping (and interval pings) intentionally arrive UNREAD —
+      // the ping IS the lead's "you're up / check in now" trigger, so it must be
+      // visible. The previous isInitial read-all cleared the inbox AFTER sending,
+      // which marked the just-sent ping read and left the lead with no visible
+      // start notification. Removed — no auto read-all on any ping.
 
       console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed, isInitial=${isInitial})`);
     } catch (err) {
