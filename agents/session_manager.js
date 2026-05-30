@@ -421,6 +421,10 @@ export class SessionManager {
 
   async listTasks(filter = {}) {
     let sql = 'SELECT * FROM vibe.kanban_tasks WHERE 1=1';
+    // #64 G5: archived cards drop out of the default board unless explicitly included.
+    if (!filter.includeArchived) {
+      sql += ' AND archived = false';
+    }
     if (filter.projectId != null) {
       sql += ` AND project_id = ${this._escapeSql(filter.projectId)}`;
     }
@@ -455,6 +459,7 @@ export class SessionManager {
     if (updates.filesChanged !== undefined) sets.push(`files_changed = ${this._escapeSql(JSON.stringify(updates.filesChanged))}::jsonb`);
     if (updates.updatedAt !== undefined) sets.push(`updated_at = ${this._escapeSql(updates.updatedAt)}`);
     if (updates.completedAt !== undefined) sets.push(`completed_at = ${updates.completedAt ? this._escapeSql(updates.completedAt) : 'NULL'}`);
+    if (updates.archived !== undefined) sets.push(`archived = ${updates.archived ? 'TRUE' : 'FALSE'}`);
     if (sets.length === 0) return this.getTask(id, projectId);
     let sql = `UPDATE vibe.kanban_tasks SET ${sets.join(', ')} WHERE id = ${Number(id)}`;
     if (projectId != null) {
@@ -466,6 +471,48 @@ export class SessionManager {
     if (!result.success) throw new Error(result.error?.message || 'Failed to update kanban task');
     if (!result.data || result.data.length === 0) return null;
     return this._rowToTask(result.data[0]);
+  }
+
+  // ── #64 G4: kanban activity / audit trail (vibe.kanban_activity) ──────────
+  async appendKanbanActivity({ taskId, actor, action, fromStatus, toStatus, detail, projectId }) {
+    const sql = `INSERT INTO vibe.kanban_activity (task_id, actor, action, from_status, to_status, detail, project_id)
+      VALUES (${Number(taskId)}, ${this._escapeSql(actor)}, ${this._escapeSql(action)}, ${this._escapeSql(fromStatus)}, ${this._escapeSql(toStatus)}, ${this._escapeSql(detail)}, ${projectId != null ? Number(projectId) : 'NULL'})
+      RETURNING activity_id`;
+    const result = await this._queryVibeSql(sql);
+    if (!result.success) throw new Error(result.error?.message || 'Failed to append kanban activity');
+    return result.data?.[0]?.activity_id ?? null;
+  }
+
+  async listKanbanActivity(taskId, projectId) {
+    let sql = `SELECT activity_id, task_id, actor, action, from_status, to_status, detail, at FROM vibe.kanban_activity WHERE task_id = ${Number(taskId)}`;
+    if (projectId != null) sql += ` AND (project_id = ${Number(projectId)} OR project_id IS NULL)`;
+    sql += ' ORDER BY at ASC, activity_id ASC';
+    const result = await this._queryVibeSql(sql);
+    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban activity');
+    return (result.data || []).map(r => ({
+      activity_id: r.activity_id, task_id: r.task_id, actor: r.actor, action: r.action,
+      from: r.from_status, to: r.to_status, detail: r.detail, at: r.at,
+    }));
+  }
+
+  // ── #64 G3: kanban comments thread (vibe.kanban_comments) ────────────────
+  async addKanbanComment({ taskId, author, bodyMd, projectId }) {
+    const sql = `INSERT INTO vibe.kanban_comments (task_id, author, body_md, project_id)
+      VALUES (${Number(taskId)}, ${this._escapeSql(author)}, ${this._escapeSql(bodyMd)}, ${projectId != null ? Number(projectId) : 'NULL'})
+      RETURNING comment_id, task_id, author, body_md, created_at`;
+    const result = await this._queryVibeSql(sql);
+    if (!result.success) throw new Error(result.error?.message || 'Failed to add kanban comment');
+    const r = result.data?.[0];
+    return r ? { comment_id: r.comment_id, task_id: r.task_id, author: r.author, body_md: r.body_md, created_at: r.created_at } : null;
+  }
+
+  async listKanbanComments(taskId, projectId) {
+    let sql = `SELECT comment_id, task_id, author, body_md, created_at FROM vibe.kanban_comments WHERE task_id = ${Number(taskId)}`;
+    if (projectId != null) sql += ` AND (project_id = ${Number(projectId)} OR project_id IS NULL)`;
+    sql += ' ORDER BY created_at ASC, comment_id ASC';
+    const result = await this._queryVibeSql(sql);
+    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban comments');
+    return (result.data || []).map(r => ({ comment_id: r.comment_id, task_id: r.task_id, author: r.author, body_md: r.body_md, created_at: r.created_at }));
   }
 
   get storage() {
@@ -505,6 +552,11 @@ export class SessionManager {
       getTask: (id, projectId) => self.getTask(id, projectId),
       listTasks: (filter) => self.listTasks(filter),
       updateTask: (id, updates, projectId) => self.updateTask(id, updates, projectId),
+      // #64 kanban mutation surface — activity (G4) + comments (G3)
+      appendKanbanActivity: (e) => self.appendKanbanActivity(e),
+      listKanbanActivity: (id, projectId) => self.listKanbanActivity(id, projectId),
+      addKanbanComment: (c) => self.addKanbanComment(c),
+      listKanbanComments: (id, projectId) => self.listKanbanComments(id, projectId),
       // Autonomy state + standup entries — forwards to the stubs above.
       getAutonomyState: () => self.getAutonomyState(),
       updateAutonomyState: (partial) => self.updateAutonomyState(partial),

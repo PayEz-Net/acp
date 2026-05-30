@@ -50,6 +50,10 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
       if (secret && token === secret) {
         // Bearer valid — use X-ACP-Agent for identity if present, otherwise 'system'
         (req as any).agentName = agentHeader || 'system';
+        // #64 G2 force-gate: the ACP_LOCAL_SECRET Bearer is the DESKTOP/human (renderer)
+        // — agents authenticate via X-ACP-Agent only, never the local secret. So a
+        // valid-secret caller is the privileged human path eligible for `force`.
+        (req as any).authMethod = 'bearer';
         next();
         return;
       }
@@ -75,6 +79,8 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
         const reg = await storage.getAgentRegistration(agentId);
         if (reg) {
           (req as any).agentName = agentHeader;
+          // #64 G2: agent identity (X-ACP-Agent) is NOT eligible for force-move.
+          (req as any).authMethod = 'agent';
           next();
           return;
         }
