@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { createTask, getTask, listTasks, moveTask, assignTask, TRANSITIONS } from '../kanban/board.js';
+import { createTask, getTask, listTasks, moveTask, assignTask, archiveTask, unarchiveTask, TRANSITIONS } from '../kanban/board.js';
 
 function createMockStorage() {
   return {
@@ -111,6 +111,38 @@ describe('assignTask', () => {
     const result = await assignTask(storage, 1, 'DotNetPert');
     expect(result.previousAssignee).toBe('QAPert');
     expect(result.assignedTo).toBe('DotNetPert');
+  });
+});
+
+describe('archiveTask / unarchiveTask', () => {
+  test('archive sets archived=true (reversible soft-delete)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, archived: false });
+    const result = await archiveTask(storage, 1);
+    expect(result.archived).toBe(true);
+    expect(storage.updateTask).toHaveBeenCalledWith(1, expect.objectContaining({ archived: true }));
+  });
+
+  test('archive is idempotent (already archived -> no write)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, archived: true });
+    const result = await archiveTask(storage, 1);
+    expect(result.archived).toBe(true);
+    expect(storage.updateTask).not.toHaveBeenCalled();
+  });
+
+  test('unarchive restores archived=false', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, archived: true });
+    const result = await unarchiveTask(storage, 1);
+    expect(result.archived).toBe(false);
+    expect(storage.updateTask).toHaveBeenCalledWith(1, expect.objectContaining({ archived: false }));
+  });
+
+  test('archive 404s on missing task', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue(null);
+    await expect(archiveTask(storage, 999)).rejects.toThrow(/not found/);
   });
 });
 

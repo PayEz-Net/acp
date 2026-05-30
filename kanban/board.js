@@ -75,3 +75,22 @@ export async function assignTask(storage, id, agentName, { requireUnassigned = f
   await storage.updateTask(id, updates);
   return { ...task, ...updates, previousAssignee };
 }
+
+// #152: archive = reversible soft-delete (default for "remove"; NOT hard delete). An archived
+// task is excluded from the default board (listTasks) but kept + restorable via unarchiveTask.
+// Orthogonal to the status state-machine — a task in ANY status can be archived.
+export async function archiveTask(storage, id) {
+  const task = await getTask(storage, id);            // 404s if missing
+  if (task.archived) return task;                      // idempotent — already archived
+  const updates = { archived: true, updatedAt: new Date().toISOString() };
+  await storage.updateTask(id, updates);
+  return { ...task, ...updates };
+}
+
+export async function unarchiveTask(storage, id) {
+  const task = await getTask(storage, id);
+  if (!task.archived) return task;                     // idempotent — already active
+  const updates = { archived: false, updatedAt: new Date().toISOString() };
+  await storage.updateTask(id, updates);
+  return { ...task, ...updates };
+}

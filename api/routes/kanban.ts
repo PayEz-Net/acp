@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { success } from '../response.js';
-import { createTask, getTask, listTasks, moveTask, assignTask } from '../../kanban/board.js';
+import { createTask, getTask, listTasks, moveTask, assignTask, archiveTask, unarchiveTask } from '../../kanban/board.js';
 import { reviewTask, autoMailOnStatusChange } from '../../kanban/review.js';
 import { sendMail } from '../../collaboration/mail.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
@@ -46,6 +46,10 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo;
       if (req.query.milestone) filter.milestone = req.query.milestone;
       if (req.query.priority) filter.priority = req.query.priority;
+      // #152: archived tasks are excluded by default. ?archived=true -> archived view only;
+      // ?includeArchived=true -> both active and archived.
+      if (req.query.archived === 'true') filter.archived = true;
+      if (req.query.includeArchived === 'true') filter.includeArchived = true;
       const tasks = await listTasks(storage, filter);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(success(tasks, 'kanban_list', (req as any).requestId, {
@@ -124,6 +128,42 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
         res.status(409).json({ success: false, message: err.message, error: { code: 'CONFLICT' } });
         return;
       }
+      next(err);
+    }
+  });
+
+  // #152: archive = reversible soft-delete (the default "remove"; NOT hard delete). Excluded
+  // from the default board, restorable via unarchive. Aurum's contract: archive-not-delete.
+  router.put('/tasks/:id/archive', async (req: Request, res: Response, next) => {
+    try {
+      (req as any).operationCode = 'kanban_archive';
+      const task = await archiveTask(storage, parseInt(req.params.id as string, 10));
+      localEventBus?.emit({
+        event: 'kanban-update',
+        data: { action: 'archived', task_id: req.params.id },
+      });
+      const elapsed = Math.round(performance.now() - (req as any).startTime);
+      res.json(success(task, 'kanban_archive', (req as any).requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/tasks/:id/unarchive', async (req: Request, res: Response, next) => {
+    try {
+      (req as any).operationCode = 'kanban_unarchive';
+      const task = await unarchiveTask(storage, parseInt(req.params.id as string, 10));
+      localEventBus?.emit({
+        event: 'kanban-update',
+        data: { action: 'unarchived', task_id: req.params.id },
+      });
+      const elapsed = Math.round(performance.now() - (req as any).startTime);
+      res.json(success(task, 'kanban_unarchive', (req as any).requestId, {
+        performance: { response_time_ms: elapsed },
+      }));
+    } catch (err) {
       next(err);
     }
   });

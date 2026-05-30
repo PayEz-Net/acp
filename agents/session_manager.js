@@ -370,6 +370,7 @@ export class SessionManager {
       milestone: row.milestone,
       filesChanged: Array.isArray(row.files_changed) ? row.files_changed : (typeof row.files_changed === 'string' ? JSON.parse(row.files_changed) : []),
       blockers: row.blockers,
+      archived: row.archived === true,
       created_at: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at,
@@ -395,6 +396,13 @@ export class SessionManager {
 
   async listTasks(filter = {}) {
     let sql = 'SELECT * FROM vibe.kanban_tasks WHERE 1=1';
+    // #152: archived (soft-deleted) tasks are EXCLUDED from the default board. Pass
+    // archived=true for the archived view, or includeArchived=true to see both.
+    if (filter.archived === true) {
+      sql += ' AND archived IS TRUE';
+    } else if (!filter.includeArchived) {
+      sql += ' AND archived IS NOT TRUE';
+    }
     if (filter.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
       const statusList = statuses.map(s => this._escapeSql(s)).join(',');
@@ -422,6 +430,7 @@ export class SessionManager {
     if (updates.filesChanged !== undefined) sets.push(`files_changed = ${this._escapeSql(JSON.stringify(updates.filesChanged))}::jsonb`);
     if (updates.updatedAt !== undefined) sets.push(`updated_at = ${this._escapeSql(updates.updatedAt)}`);
     if (updates.completedAt !== undefined) sets.push(`completed_at = ${updates.completedAt ? this._escapeSql(updates.completedAt) : 'NULL'}`);
+    if (updates.archived !== undefined) sets.push(`archived = ${this._escapeSql(!!updates.archived)}`);
     if (sets.length === 0) return this.getTask(id);
     const sql = `UPDATE vibe.kanban_tasks SET ${sets.join(', ')} WHERE id = ${Number(id)} RETURNING *`;
     const result = await this._queryVibeSql(sql);
