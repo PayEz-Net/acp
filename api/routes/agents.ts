@@ -399,7 +399,13 @@ export default function agentRoutes(_storage: any): Router {
         }
       }
 
-      // Allocate next agent id from the docstore JSON ids
+      // Allocate next agent id from the docstore JSON ids.
+      // INTENTIONALLY UNSCOPED (no client_id filter): the agent-id space is GLOBAL across
+      // tenants, not per-client — client_id=0 holds 100-260, client_id=9 continues 261-263 as
+      // ONE sequence. So next-id MUST be the global MAX+1 to stay globally unique; scoping to
+      // client_id=0 here would collide (260->261, which client_9 already has). 'No client_id
+      // filter' is correct, not a missing-WHERE (#124 sweep, verified domain). [Known smell,
+      // tracked separately: MAX(id)+1 is race-prone; replace with a global sequence.]
       const nextIdResult = await queryVibeSql(
         `SELECT COALESCE(MAX((data->>'id')::int), 0) + 1 AS next_id
          FROM vibe.documents
