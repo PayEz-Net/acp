@@ -1,0 +1,27 @@
+{
+  "name": "acp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ACP — Agent Collaboration Platform (Pro). Open-source desktop + API for orchestrating AI agent teams on the PayEz Vibe API + IDP.",
+  "license": "Apache-2.0",
+  "author": "PayEz <dev@payez.net>",
+  "homepage": "https://github.com/PayEz-Net/acp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PayEz-Net/acp.git"
+  },
+  "workspaces": [
+    "packages/desktop",
+    "packages/api"
+  ],
+  "scripts": {
+    "build:api": "npm run build --workspace packages/api",
+    "build:desktop": "npm run build:electron --workspace packages/desktop",
+    "dist:win": "npm run dist:win --workspace packages/desktop",
+    "dist:mac": "npm run dist:mac:universal --workspace packages/desktop",
+    "dist:linux": "npm run dist:linux --workspace packages/desktop"
+  },
+  "engines": {
+    "node": ">=20.18.2"
+  }
+}

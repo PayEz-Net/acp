@@ -1,0 +1,707 @@
+import { ipcMain, BrowserWindow, app } from 'electron';
+import * as pty from 'node-pty';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as crypto from 'crypto';
+import * as http from 'http';
+import { IPC_CHANNELS } from '../shared/types';
+import { getSettings } from './store';
+
+interface ManagedPty {
+  id: string;
+  agentName: string;
+  // Project scope — prevents multi-project name collisions (P0 namespace fix).
+  // Undefined for legacy renderer-driven spawns until the caller is updated.
+  projectId: number | undefined;
+  pty: pty.IPty;
+  // Whether Claude Code has enabled bracketed paste mode via ESC[?2004h
+  // on this PTY's output stream. Kept as a diagnostic only — we no
+  // longer wrestle PTY bytes for mail push (that's handled by the MCP
+  // Channels path in acp-mail-channel.js).
+  bracketedPasteEnabled: boolean;
+  // Handle for the Kimi/Codex inbox poller. Claude agents use the MCP
+  // channel server (acp-mail-channel.js) instead and leave this null.
+  mailPollTimer: NodeJS.Timeout | null;
+  // Path to the boot-prompt tmp file passed via --system-prompt (Claude)
+  // or kept for reference when PTY-injected (Kimi/Codex). Cleaned up on
+  // PTY exit. Null when no boot-prompt was provided (legacy 4-pane mode
+  // or the orchestrator passed bootPrompt:null).
+  bootPromptTmpPath: string | null;
+  // Path to the per-spawn MCP config tmp file passed via --mcp-config so
+  // Claude's `--dangerously-load-development-channels server:acp-mail`
+  // resolves the acp-mail push channel. Per-spawn (not a shared cwd
+  // .mcp.json) so each agent's ACP_AGENT_NAME is collision-free. Cleaned
+  // on PTY exit. Null for non-claude / when the channel script is absent.
+  mcpConfigTmpPath: string | null;
+}
+
+export type AgentRuntime = 'claude' | 'kimi' | 'codex';
+
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'max';
+
+export interface SpawnAgentOptions {
+  /** Wave D assembled system prompt from `/v1/projects/:id/boot-prompt/:agent_id`.
+   *  When provided, replaces the legacy "report as <Agent>" kickoff: Claude
+   *  receives it via `--system-prompt <file>`; Kimi/Codex receive it via
+   *  PTY-injection after banner (until those CLIs add a --system-prompt
+   *  flag — code-commented in the spawn paths). */
+  bootPrompt?: string;
+  /** Per-spawn runtime override. When set, overrides the global
+   *  `settings.agentProvider`. Project-driven instantiation per
+   *  `feedback_project_is_instantiation_not_filter` — the renderer
+   *  reads `activeProject.runtime_choice` (and eventually per-member
+   *  `runtime_override`) and threads it through the spawn payload so
+   *  the same project can run different runtimes on different
+   *  machines without electron-store reconfiguration. */
+  runtime?: AgentRuntime;
+  /** Per-agent effort override (Claude-only), consumed at spawn as
+   *  `--effort`. Leg (b) of effort_override consumption (Aurum 1405):
+   *  the spawn resolver defers to ONE chain —
+   *    per-agent override -> single global default (settings.claudeEffort) -> 'high'.
+   *  undefined = inherit (NOT a DB-baked literal; migration 14's
+   *  effort_override column has no DEFAULT, so NULL round-trips as
+   *  "defer to the resolver"). The renderer/orchestrator reads
+   *  project_team_members.effort_override (same path as `runtime`) and
+   *  threads it here — leg (a), NextPert. Kimi/Codex have no effort
+   *  lever, so this is ignored for those runtimes. */
+  effort?: ClaudeEffort;
+  /** Project ID for namespace scoping. Prevents multi-project PTY
+   *  collisions when two projects share agent names. */
+  projectId?: number;
+}
+
+const terminals: Map<string, ManagedPty> = new Map();
+let mainWindowRef: BrowserWindow | null = null;
+
+// ESC [ ? 2 0 0 4 h  — DECSET, enable bracketed paste
+const BRACKETED_PASTE_ON = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x34, 0x68]);
+// ESC [ ? 2 0 0 4 l  — DECRST, disable bracketed paste
+const BRACKETED_PASTE_OFF = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x34, 0x6c]);
+
+function safeSend(channel: string, ...args: unknown[]): void {
+  if (mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()) {
+    mainWindowRef.webContents.send(channel, ...args);
+  }
+}
+
+// Exit callback — set by lifecycle-server to report PTY exits to acp-api
+let onPtyExit: ((agentName: string, terminalId: string, exitCode: number) => void) | null = null;
+
+export function setOnPtyExit(callback: typeof onPtyExit) {
+  onPtyExit = callback;
+}
+
+function getAcpBinDir(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'bin');
+  }
+  return path.join(app.getAppPath(), 'resources', 'bin');
+}
+
+// --- Kimi/Codex mail poller ---------------------------------------------
+// Claude Code has MCP channels for out-of-band push (acp-mail-channel.js).
+// Kimi and Codex have MCP server support but no channels, so we poll the
+// inbox HTTP endpoint and inject a one-line user message into the PTY
+// stdin when new unread mail arrives. The first poll's backlog is
+// recorded without firing so a session starting into N old unread mails
+// doesn't firehose the agent with N simultaneous injections.
+
+const MAIL_POLL_INTERVAL_MS = 30000;
+const MAIL_POLL_JITTER_MAX_MS = 10000;
+const MAIL_POLL_BACKOFF_MAX_MS = 300000; // 5 min cap
+
+function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ response: any; statusCode?: number }> {
+  return new Promise((resolve) => {
+    const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
+    const u = new URL(`/v1/mail/inbox/${encodeURIComponent(agentName)}`, apiBase);
+    u.searchParams.set('unread', 'true');
+    u.searchParams.set('pageSize', '50');
+    if (projectId != null) {
+      u.searchParams.set('project_id', String(projectId));
+    }
+
+    const req = http.get(
+      {
+        hostname: u.hostname,
+        port: u.port || 80,
+        path: u.pathname + u.search,
+        headers: { 'X-ACP-Agent': agentName, 'Accept': 'application/json' },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            return resolve({ response: null, statusCode: res.statusCode ?? undefined });
+          }
+          try { resolve({ response: JSON.parse(body), statusCode: 200 }); } catch { resolve({ response: null, statusCode: res.statusCode ?? undefined }); }
+        });
+      }
+    );
+    req.on('error', () => resolve({ response: null }));
+    req.setTimeout(3000, () => { req.destroy(); resolve({ response: null }); });
+  });
+}
+
+function extractMessages(response: any): any[] {
+  if (!response) return [];
+  const d = response.data ?? response;
+  if (Array.isArray(d)) return d;
+  if (Array.isArray(d?.messages)) return d.messages;
+  if (Array.isArray(d?.inbox)) return d.inbox;
+  if (Array.isArray(d?.rows)) return d.rows;
+  return [];
+}
+
+function startInboxPoller(managed: ManagedPty): void {
+  const { agentName, projectId, pty: ptyProcess } = managed;
+  const seen = new Set<number>();
+  let firstPoll = true;
+  const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
+  let currentInterval = MAIL_POLL_INTERVAL_MS + Math.floor(Math.random() * MAIL_POLL_JITTER_MAX_MS);
+  let consecutive429s = 0;
+  let activeTimer: NodeJS.Timeout | null = null;
+
+  const scheduleNext = () => {
+    if (activeTimer) clearTimeout(activeTimer);
+    activeTimer = setTimeout(poll, currentInterval);
+    managed.mailPollTimer = activeTimer;
+  };
+
+  const poll = async () => {
+    const { response, statusCode } = await fetchUnreadInbox(agentName, projectId);
+
+    // Back off on 429 so we don't DDoS the local API when many agents run.
+    if (statusCode === 429) {
+      consecutive429s++;
+      currentInterval = Math.min(
+        currentInterval * 2,
+        MAIL_POLL_BACKOFF_MAX_MS
+      );
+      console.warn(`[PTY] Mail poll 429 for ${agentName}, backing off to ${currentInterval}ms (streak: ${consecutive429s})`);
+      scheduleNext();
+      return;
+    }
+
+    if (statusCode !== 200) {
+      // Non-429 error — keep current interval but don't reset backoff entirely
+      scheduleNext();
+      return;
+    }
+
+    // Success — gradually restore interval
+    consecutive429s = Math.max(0, consecutive429s - 1);
+    if (consecutive429s === 0 && currentInterval > MAIL_POLL_INTERVAL_MS) {
+      currentInterval = Math.max(MAIL_POLL_INTERVAL_MS, Math.floor(currentInterval / 2));
+    }
+
+    const messages = extractMessages(response);
+    if (firstPoll) {
+      for (const m of messages) {
+        const id = m.message_id ?? m.id;
+        if (id != null) seen.add(Number(id));
+      }
+      firstPoll = false;
+      scheduleNext();
+      return;
+    }
+
+    for (const m of messages) {
+      const id = m.message_id ?? m.id;
+      if (id == null || seen.has(Number(id))) continue;
+      seen.add(Number(id));
+      const from = m.from_agent ?? 'unknown';
+      const subject = m.subject ?? '(no subject)';
+      const line =
+        `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
+        `Read with: curl -s ${apiBase}/v1/mail/messages/${id} -H "X-ACP-Agent: ${agentName}"\r`;
+      ptyProcess.write(line);
+      console.log(`[PTY] Pushed mail ${id} from ${from} into ${agentName} PTY`);
+    }
+
+    scheduleNext();
+  };
+
+  // Kick off an initial poll immediately so the seen-set is primed
+  // before any new mail arrives (avoids a 3s race on startup).
+  poll();
+  console.log(`[PTY] Started inbox poller for ${agentName} (base ${MAIL_POLL_INTERVAL_MS}ms, jitter ${MAIL_POLL_JITTER_MAX_MS}ms)`);
+}
+
+function writeBootPromptTmpFile(agentName: string, bootPrompt: unknown): string {
+  // Guard: never hand writeFileSync a non-string (the cloud boot_prompt
+  // came back as an Object → ERR_INVALID_ARG_TYPE crashed every spawn).
+  // fetchBootPrompt should extract the string; this is the last-line
+  // coercion so a shape surprise can never crash a spawn again.
+  const text = typeof bootPrompt === 'string' ? bootPrompt : JSON.stringify(bootPrompt, null, 2);
+  // Tmp file location: %APPDATA%/agent-collaboration-platform/tmp/
+  // (or platform equivalent) per BAPert msg 1148 Q1 answer. Cleaned up
+  // on PTY exit by the onExit handler. Filename includes ts so a
+  // re-spawn of the same agent doesn't collide with a still-clearing
+  // previous spawn.
+  const dir = path.join(app.getPath('userData'), 'tmp');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const fname = `boot-prompt-${agentName}-${Date.now()}.txt`;
+  const filepath = path.join(dir, fname);
+  fs.writeFileSync(filepath, text, { encoding: 'utf8' });
+  return filepath;
+}
+
+/**
+ * Per-spawn MCP config so Claude's `--dangerously-load-development-
+ * channels server:acp-mail` finds an MCP server named `acp-mail`
+ * (claude-code-guide: that flag requires a registered server of that
+ * name; --mcp-config satisfies it and must precede the flag). Per-spawn
+ * (not a shared-cwd .mcp.json) → each agent's ACP_AGENT_NAME is
+ * collision-free across the 5 concurrent agents sharing the workspace.
+ * channelJs = resources/bin/acp-mail-channel.js (X-ACP-Agent auth, reads
+ * ACP_AGENT_NAME/ACP_API_URL — no secret). Returns the tmp path, or null
+ * if the channel script is missing (skip the flag; no push but spawn
+ * unaffected — same as today, never worse).
+ */
+function writeMcpConfigTmpFile(agentName: string, channelJs: string, apiUrl: string): string | null {
+  if (!fs.existsSync(channelJs)) {
+    console.warn(`[PTY] acp-mail channel script missing (${channelJs}); ${agentName} spawns WITHOUT push (mail still pollable)`);
+    return null;
+  }
+  const cfg = {
+    mcpServers: {
+      'acp-mail': {
+        type: 'stdio',
+        command: 'node',
+        args: [channelJs],
+        env: { ACP_AGENT_NAME: agentName, VIBE_AGENT: agentName, ACP_API_URL: apiUrl },
+      },
+    },
+  };
+  const dir = path.join(app.getPath('userData'), 'tmp');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const filepath = path.join(dir, `mcp-acp-mail-${agentName}-${Date.now()}.json`);
+  fs.writeFileSync(filepath, JSON.stringify(cfg, null, 2), { encoding: 'utf8' });
+  return filepath;
+}
+
+function cleanupBootPromptTmpFile(filepath: string | null): void {
+  if (!filepath) return;
+  try {
+    if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+  } catch (err) {
+    console.warn(`[PTY] Failed to cleanup boot-prompt tmp file ${filepath}:`, err);
+  }
+}
+
+/**
+ * Spawn a PTY for an agent. Returns the terminal UUID.
+ * Called by IPC (renderer) or HTTP (lifecycle-server from acp-api) or
+ * spawn-orchestrator (Wave C, when lifecycle flips to RUNNING).
+ *
+ * When `opts.bootPrompt` is provided (Wave C/D), it overrides the
+ * legacy "report as <Agent>" kickoff string. Claude takes it via
+ * `--system-prompt <file>` (full Wave D assembled prompt). Kimi/Codex
+ * take a shorter PTY-injected form because those CLIs don't expose a
+ * system-prompt flag yet (verify with `kimi --help` / `codex --help`
+ * upstream; migrate when the flag lands per `feedback_no_acknowledged_defect_ships`).
+ */
+/**
+ * THE single workspace-root authority (colonization spec v2 §2.1/§2.2).
+ * ONE input: the explicit installer-recorded root (project.repo_path, or
+ * its known persisted twin settings.installerWorkspaceRoot — the caller
+ * supplies whichever; this never re-derives). It exists as a directory or
+ * it does not: returns the path, or null. NO `process.cwd()/..` infer
+ * backstop — that "last resort" was the hole: in the installed app it
+ * resolves to the ...\Programs install folder, which exists, so spawnAgent
+ * spawned agents THERE (no repo, no colonized .claude) instead of failing
+ * loudly. The value is known (cloud repo_path / handoff json); a missing
+ * dir is a surfaced WorkDirError, never a silent wrong-dir. Never compose,
+ * never a literal, never infer.
+ */
+export function resolveWorkDir(explicit?: string): string | null {
+  const exp = explicit?.trim();
+  if (!exp) return null;
+  try {
+    return fs.statSync(exp).isDirectory() ? exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Thrown synchronously by spawnAgent BEFORE node-pty is touched when the
+ * resolved working directory does not exist. node-pty throws Win32 267
+ * (ERROR_DIRECTORY) ASYNCHRONOUSLY from its pipe-connection callback —
+ * uncatchable by try/catch or the ipcMain chain — surfacing as Electron's
+ * main-process crash dialog. The only robust fix is to never hand
+ * node-pty a bad cwd.
+ */
+export class WorkDirError extends Error {
+  constructor(public readonly agentName: string, public readonly workDir: string) {
+    super(
+      `Cannot spawn ${agentName}: working directory ${JSON.stringify(workDir)} does not exist on this machine. ` +
+      `Colonization resolves the root (single authority) — set a real project repo path.`,
+    );
+    this.name = 'WorkDirError';
+  }
+}
+
+/**
+ * WO#33: durable, packaged/no-terminal-locatable surfacing of a
+ * skipped-supplied-workDir. resolveWorkDir's console.warn is main-console
+ * only. Best-effort: never throws (must not regress 267-immunity).
+ */
+function noteWorkDirSkip(agentName: string, requested: string, resolved: string): void {
+  try {
+    fs.appendFileSync(
+      path.join(app.getPath('userData'), 'workdir-notices.log'),
+      `[${new Date().toISOString()}] ${agentName}: requested work dir ${JSON.stringify(requested)} not found — using ${JSON.stringify(resolved)} instead\n`,
+      'utf8',
+    );
+  } catch { /* best-effort; resolveWorkDir's console.warn is the dev copy */ }
+}
+
+export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgentOptions): string {
+  const id = crypto.randomUUID();
+  const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+  const acpBinDir = getAcpBinDir();
+  const existingPath = process.env.PATH || process.env.Path || '';
+
+  // Guard BEFORE pty.spawn — a non-existent cwd makes node-pty throw
+  // Win32 267 asynchronously and crash the main process (see WorkDirError).
+  const resolvedWorkDir = resolveWorkDir(workDir);
+  if (!resolvedWorkDir) {
+    const tried = (workDir && workDir.trim()) || path.resolve(process.cwd(), '..');
+    const err = new WorkDirError(agentName, tried);
+    console.error(`[PTY] ${err.message}`);
+    throw err;
+  }
+  const requested = workDir?.trim();
+  if (requested && requested !== resolvedWorkDir) {
+    noteWorkDirSkip(agentName, requested, resolvedWorkDir);
+  }
+
+  console.log(`[PTY] Spawning ${agentName} shell=${shell} cwd=${resolvedWorkDir}`);
+
+  const ptyProcess = pty.spawn(shell, [], {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 30,
+    cwd: resolvedWorkDir,
+    env: {
+      ...process.env,
+      VIBE_AGENT: agentName,
+      // ACP_AGENT_NAME is the canonical name the MCP channel server
+      // (acp-mail-channel.js) reads to know which agent it's polling
+      // mail for. VIBE_AGENT is kept for compatibility with older code.
+      ACP_AGENT_NAME: agentName,
+      ACP_SURFACE_ID: id,
+      ACP_AGENT_ID: `agent:${agentName}`,
+      ACP_API_URL: process.env.ACP_API_URL || 'http://localhost:3001',
+      ACP_BIN_DIR: acpBinDir,
+      PATH: `${acpBinDir}${path.delimiter}${existingPath}`,
+    } as Record<string, string>,
+  });
+
+  // Write boot-prompt to a tmp file up-front so the spawn command can
+  // reference it via --system-prompt (Claude) and the orchestrator
+  // can clean it up on PTY exit (any runtime).
+  const bootPromptTmpPath = opts?.bootPrompt
+    ? writeBootPromptTmpFile(agentName, opts.bootPrompt)
+    : null;
+
+  const managed: ManagedPty = {
+    id,
+    agentName,
+    projectId: opts?.projectId,
+    pty: ptyProcess,
+    bracketedPasteEnabled: false,
+    mailPollTimer: null,
+    bootPromptTmpPath,
+    mcpConfigTmpPath: null,
+  };
+  terminals.set(id, managed);
+
+  // Tell the renderer this agent now has a live terminal — covers the
+  // spawn-orchestrator path (main spawned it; the renderer never called
+  // pty:spawn so it has no terminalId and the pane sits idle). Renderer
+  // maps agentName→terminalId and binds its xterm to the running PTY.
+  safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id });
+
+  // Forward PTY output to renderer. Tap the stream just to notice when
+  // Claude Code flips bracketed paste mode on/off — purely diagnostic
+  // now that mail push is handled by the MCP Channels path.
+  ptyProcess.onData((data) => {
+    safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data });
+
+    const buf = Buffer.from(data);
+    if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {
+      managed.bracketedPasteEnabled = true;
+    }
+    if (buf.includes(BRACKETED_PASTE_OFF) && managed.bracketedPasteEnabled) {
+      managed.bracketedPasteEnabled = false;
+    }
+  });
+
+  ptyProcess.onExit(({ exitCode }) => {
+    safeSend(IPC_CHANNELS.PTY_EXIT, { terminalId: id, exitCode });
+    if (managed.mailPollTimer) {
+      clearInterval(managed.mailPollTimer);
+      managed.mailPollTimer = null;
+    }
+    cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
+    cleanupBootPromptTmpFile(managed.mcpConfigTmpPath);
+    terminals.delete(id);
+    // Report to acp-api via callback
+    if (onPtyExit) {
+      onPtyExit(agentName, id, exitCode);
+    }
+  });
+
+  // Auto-inject agent CLI based on runtime resolution chain:
+  //   1. Per-spawn `opts.runtime` (project-driven; renderer reads
+  //      activeProject.runtime_choice from projectStore and passes
+  //      it through the spawn payload) — preferred when present.
+  //   2. Global `settings.agentProvider` (electron-store; legacy
+  //      single-machine default).
+  //   3. Fall back to 'claude' if neither is set.
+  // Per feedback_runtime_choice_vs_platform_llm — runtime here is the
+  // user-team runtime (which CLI we launch for the agent), not the
+  // platform LLM (advisor / data-tab) which is config-driven separately.
+  const settings = getSettings();
+  const provider = opts?.runtime || settings.agentProvider || 'claude';
+  const providerSource = opts?.runtime
+    ? `project (${opts.runtime})`
+    : settings.agentProvider
+      ? `global (${settings.agentProvider})`
+      : 'default (claude)';
+  console.log(`[PTY] Provider for ${agentName}: ${provider} — source: ${providerSource}`);
+
+  setTimeout(() => {
+    // Kimi cold-init of the SHARED ~/.kimi/kimi.json races when agents launch
+    // near-together (the lead spawns first, with no warmup) → WinError 5 →
+    // kimi crashes back to a raw shell. Bounded re-issue of `kimi --yolo`;
+    // report-as is gated on the banner so we NEVER inject into a raw shell.
+    let kimiAttempts = 0;
+    let kimiRetrying = false;
+    const KIMI_MAX_ATTEMPTS = 3;
+    const kimiLaunch = () => {
+      kimiAttempts++;
+      ptyProcess.write(`kimi --yolo\r`);
+      console.log(`[PTY] Starting Kimi (yolo mode) for ${agentName} — attempt ${kimiAttempts}/${KIMI_MAX_ATTEMPTS}`);
+    };
+    if (provider === 'claude') {
+      // Effort precedence (Aurum 1405, single authority — no second 'high'):
+      //   per-agent override (opts.effort) -> global default (settings.claudeEffort) -> 'high'.
+      // opts.effort is undefined until leg (a) plumbs project_team_members.effort_override
+      // through the spawn payload; until then this is identical to the global default.
+      const effort = opts?.effort || settings.claudeEffort || 'high';
+      // Boot-prompt path:
+      //   - Wave C orchestrator → `claude --system-prompt <file>` with
+      //     the assembled Wave D prompt. First positional arg stays
+      //     "report as <Agent>" as a kickoff message (Claude reads the
+      //     system prompt first, then takes the user message). This
+      //     also lets legacy renderer-driven spawns (no bootPrompt)
+      //     keep the original "report as X" behavior unchanged.
+      //   - Legacy path (no bootPrompt) → unchanged "report as <Agent>"
+      //     argv pattern, Claude infers from CLAUDE.md + report-skill.
+      const systemPromptFlag = bootPromptTmpPath
+        ? ` --system-prompt "${bootPromptTmpPath}"`
+        : '';
+      // Register the `acp-mail` MCP server for THIS spawn so
+      // `--dangerously-load-development-channels server:acp-mail`
+      // actually resolves (root cause of "claude has no push" — the
+      // channel server was never configured: "no MCP server configured
+      // with that name"). Tmp-file (not inline JSON) — PowerShell PTY
+      // can't safely carry quoted JSON, same reason boot-prompt is a
+      // file. MUST precede the channels flag (claude-code-guide).
+      const mcpCfg = writeMcpConfigTmpFile(
+        agentName,
+        path.join(acpBinDir, 'acp-mail-channel.js'),
+        process.env.ACP_API_URL || 'http://localhost:3001',
+      );
+      managed.mcpConfigTmpPath = mcpCfg;
+      const mcpConfigFlag = mcpCfg ? ` --mcp-config "${mcpCfg}"` : '';
+      const cmd = `claude "report as ${agentName}"${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort} --dangerously-load-development-channels server:acp-mail${systemPromptFlag}\r`;
+      ptyProcess.write(cmd);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: ${mcpCfg ? 'registered via --mcp-config' : 'MISSING — channel script absent'}, initial prompt: "report as ${agentName}"${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+    } else if (provider === 'codex') {
+      const model = settings.codexModel || 'codex-mini';
+      ptyProcess.write(`codex --full-auto --model ${model}\r`);
+      console.log(`[PTY] Starting Codex (model: ${model}) for ${agentName}`);
+    } else {
+      // Kimi 2025-Q3: no --system-prompt flag exposed via CLI. Wave C
+      // boot-prompt for Kimi PTY-injects after the banner (see data
+      // listener below). Migrate to --system-prompt when upstream
+      // exposes it — feedback_no_acknowledged_defect_ships flag.
+      kimiLaunch();
+    }
+
+    // Claude gets push via acp-mail-channel.js (MCP channels). Kimi and
+    // Codex don't support MCP channels, so poll the inbox and inject
+    // new-mail lines directly into their PTY stdin.
+    if (provider !== 'claude') {
+      startInboxPoller(managed);
+    }
+
+    let reportSent = false;
+    let buffer = '';
+    const dataListener = ptyProcess.onData((data) => {
+      buffer += data;
+
+      if (provider === 'claude') {
+        // Claude receives the initial prompt via positional CLI argv
+        // — no PTY-side injection needed. Dispose the listener after
+        // the first byte of output so we don't sit here forever.
+        if (!reportSent) {
+          reportSent = true;
+          console.log(`[PTY] Claude booted for ${agentName} with initial prompt in argv`);
+          dataListener.dispose();
+        }
+      } else if (provider === 'codex') {
+        // Codex uses ">" as prompt after startup
+        if (!reportSent && (buffer.includes('Codex') || buffer.includes('>')) && buffer.length > 200) {
+          reportSent = true;
+          console.log(`[PTY] Codex ready for ${agentName}, sending report command`);
+          setTimeout(() => {
+            ptyProcess.write(`report as ${agentName}\r`);
+          }, 1000);
+          dataListener.dispose();
+        }
+      } else {
+        // Kimi: a completed banner means it's actually up → send the kickoff.
+        if (!reportSent && buffer.includes('Session:') && buffer.includes('Tip:')) {
+          reportSent = true;
+          console.log(`[PTY] Kimi banner complete for ${agentName}, sending report command`);
+          setTimeout(() => {
+            ptyProcess.write(`report as ${agentName}\r`);
+          }, 1000);
+          dataListener.dispose();
+        } else if (
+          !reportSent && !kimiRetrying &&
+          kimiAttempts < KIMI_MAX_ATTEMPTS &&
+          /Access is denied|WinError 5|\.kimi.*\.json|is not recognized/i.test(buffer)
+        ) {
+          // Cold-init race crashed kimi to a raw shell. Re-issue the launch
+          // (kimi.json now exists → the retry wins, exactly like the manual
+          // relaunch) instead of letting the fallback blind-inject report-as.
+          kimiRetrying = true;
+          console.warn(`[PTY] Kimi cold-init failed for ${agentName}; retrying launch`);
+          setTimeout(() => { buffer = ''; kimiRetrying = false; kimiLaunch(); }, 800);
+        }
+      }
+    });
+
+    // Staggered fallback only needed for codex/kimi — claude gets
+    // its initial prompt from argv, no PTY fallback required.
+    if (provider !== 'claude') {
+      const fallbackDelay = 5000 + (agentName.length * 500);
+      setTimeout(() => {
+        if (reportSent) return;
+        if (provider === 'kimi') {
+          // NEVER blind-inject `report as` for kimi — if it crashed, that
+          // lands in a raw PowerShell prompt (the BAPert-lead "report not
+          // recognized" bug). No banner in-window → retry the launch if
+          // attempts remain (the data listener catches the retry's banner).
+          // If exhausted, surface the failure (kanban #12), don't bury it.
+          if (kimiAttempts < KIMI_MAX_ATTEMPTS && !kimiRetrying) {
+            kimiRetrying = true;
+            console.warn(`[PTY] Kimi no-banner for ${agentName} after ${fallbackDelay}ms; retrying launch`);
+            setTimeout(() => { buffer = ''; kimiRetrying = false; kimiLaunch(); }, 500);
+            return;
+          }
+          console.error(`[PTY] Kimi FAILED to start for ${agentName} after ${KIMI_MAX_ATTEMPTS} attempts — surfacing, not injecting report-as into a dead shell`);
+          safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data: `\r\n\x1b[31m[ACP] ${agentName} failed to start (kimi cold-init race). Restart the pane, or run: kimi --yolo\x1b[0m\r\n` });
+          dataListener.dispose();
+          return;
+        }
+        // codex — unchanged
+        reportSent = true;
+        console.log(`[PTY] Fallback: sending report command for ${agentName}`);
+        ptyProcess.write(`report as ${agentName}\r`);
+        dataListener.dispose();
+      }, fallbackDelay);
+    }
+  }, 500);
+
+  return id;
+}
+
+/** Kill a PTY by terminal ID */
+export function killTerminal(terminalId: string): boolean {
+  const terminal = terminals.get(terminalId);
+  if (terminal) {
+    if (terminal.mailPollTimer) {
+      clearInterval(terminal.mailPollTimer);
+      terminal.mailPollTimer = null;
+    }
+    terminal.pty.kill();
+    terminals.delete(terminalId);
+    return true;
+  }
+  return false;
+}
+
+/** Resize a PTY */
+export function resizeTerminal(terminalId: string, cols: number, rows: number): boolean {
+  const terminal = terminals.get(terminalId);
+  if (terminal) {
+    terminal.pty.resize(cols, rows);
+    return true;
+  }
+  return false;
+}
+
+/** Get terminal info by agent name.
+ *  When projectId is provided, scopes to that project (P0 namespace fix).
+ *  When omitted, falls back to global-by-name for legacy callers. */
+export function getTerminalByAgent(agentName: string, projectId?: number): ManagedPty | undefined {
+  for (const t of terminals.values()) {
+    if (t.agentName === agentName) {
+      if (projectId == null || t.projectId === projectId) return t;
+    }
+  }
+  return undefined;
+}
+
+/** Get all active terminals */
+export function getActiveTerminals(): Array<{ id: string; agentName: string; projectId?: number }> {
+  return Array.from(terminals.values()).map(t => ({ id: t.id, agentName: t.agentName, projectId: t.projectId }));
+}
+
+export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
+  mainWindowRef = mainWindow;
+
+  ipcMain.handle(IPC_CHANNELS.PTY_SPAWN, (_, agentName: string, workDir: string, runtime?: AgentRuntime, projectId?: number, effort?: ClaudeEffort) => {
+    // a-renderer IPC-fallback receiver: thread the per-agent effort through.
+    // Omit when undefined — the resolver (:479) owns the default 'high' (Aurum 1413).
+    const opts: SpawnAgentOptions = { projectId };
+    if (runtime) opts.runtime = runtime;
+    if (effort) opts.effort = effort;
+    return spawnAgent(agentName, workDir, opts);
+  });
+
+  ipcMain.on(IPC_CHANNELS.PTY_WRITE, (_, terminalId: string, data: string) => {
+    const terminal = terminals.get(terminalId);
+    if (terminal) {
+      terminal.pty.write(data);
+    }
+  });
+
+  ipcMain.on(IPC_CHANNELS.PTY_RESIZE, (_, terminalId: string, cols: number, rows: number) => {
+    resizeTerminal(terminalId, cols, rows);
+  });
+
+  ipcMain.on(IPC_CHANNELS.PTY_KILL, (_, terminalId: string) => {
+    killTerminal(terminalId);
+  });
+}
+
+export function killAllPty() {
+  terminals.forEach((terminal) => {
+    if (terminal.mailPollTimer) {
+      clearInterval(terminal.mailPollTimer);
+      terminal.mailPollTimer = null;
+    }
+    terminal.pty.kill();
+  });
+  terminals.clear();
+}

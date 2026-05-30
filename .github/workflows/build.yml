@@ -1,0 +1,154 @@
+# =============================================================================
+# ACP Pro — cross-platform build (monorepo, single checkout)
+# =============================================================================
+# Public repo => free GitHub-hosted runners, including macos-14 (Apple Silicon).
+# Build -> GitHub Releases (also the electron-updater feed). Distribution is the
+# installer; Releases is the update channel.
+#
+# Single checkout: desktop + api both live in this repo, so prepare-acp-api.cjs
+# resolves ../../api directly. No cross-repo checkout, no PAT.
+#
+# Signing is OFF by default. CSC/APPLE env vars are NEVER set empty (electron-
+# builder treats an empty CSC_LINK as a missing cert PATH and fails) — they are
+# written to $GITHUB_ENV only by a guarded step when signWin/signMac is on AND
+# the secret exists. Unsigned just builds.
+# =============================================================================
+name: Build ACP Pro
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      buildWindows: { description: 'Windows (NSIS x64)', type: boolean, default: true }
+      buildMac:     { description: 'macOS (Apple Silicon runner)', type: boolean, default: true }
+      buildLinux:   { description: 'Linux (AppImage x64)', type: boolean, default: true }
+      signWin:      { description: 'Sign Windows (needs WIN_CSC_LINK secret)', type: boolean, default: false }
+      signMac:      { description: 'Sign+notarize macOS (needs MAC_CSC_LINK + APPLE_* secrets)', type: boolean, default: false }
+      macArch:
+        description: 'mac arch — universal, or per-arch fallback if native-merge fails'
+        type: choice
+        options: ['universal', 'arm64', 'x64']
+        default: 'universal'
+      publishRelease: { description: 'Publish to GitHub Releases', type: boolean, default: false }
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: '20.18.2'
+
+jobs:
+  windows:
+    if: ${{ github.event_name == 'push' || inputs.buildWindows }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20.18.2', cache: 'npm' }
+      - run: npm ci
+      - name: electron-rebuild (native x64)
+        run: npx electron-rebuild
+        working-directory: packages/desktop
+      - name: Configure Windows signing
+        if: ${{ inputs.signWin }}
+        shell: bash
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if [ -n "$WIN_CSC_LINK" ]; then
+            echo "CSC_LINK=$WIN_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "signWin=true but WIN_CSC_LINK secret is empty — building UNSIGNED"
+          fi
+      - name: Build Windows
+        working-directory: packages/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:win -- --publish ${{ (github.event_name == 'push' || inputs.publishRelease) && 'always' || 'never' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-windows
+          path: |
+            packages/desktop/release/*.exe
+            packages/desktop/release/latest.yml
+            packages/desktop/release/*.blockmap
+          if-no-files-found: error
+
+  mac:
+    if: ${{ github.event_name == 'push' || inputs.buildMac }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: uname -m
+      - uses: actions/setup-node@v4
+        with: { node-version: '20.18.2', cache: 'npm' }
+      - run: npm ci
+      - name: electron-rebuild (native)
+        run: npx electron-rebuild
+        working-directory: packages/desktop
+      - name: Configure macOS signing
+        if: ${{ inputs.signMac }}
+        shell: bash
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          A_ID: ${{ secrets.APPLE_ID }}
+          A_PW: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          A_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$MAC_CSC_LINK" ]; then
+            echo "CSC_LINK=$MAC_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$A_ID" >> "$GITHUB_ENV"
+            echo "APPLE_APP_SPECIFIC_PASSWORD=$A_PW" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$A_TEAM" >> "$GITHUB_ENV"
+          else
+            echo "signMac=true but MAC_CSC_LINK secret is empty — building UNSIGNED"
+          fi
+      - name: Build macOS (${{ github.event_name == 'push' && 'universal' || inputs.macArch }})
+        working-directory: packages/desktop
+        env:
+          # Unsigned unless the signing step above set CSC_LINK. Disable identity
+          # auto-discovery so electron-builder doesn't hunt for a keychain cert.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.signMac }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          npm run dist -- --mac --${{ github.event_name == 'push' && 'universal' || inputs.macArch }}
+          --publish ${{ (github.event_name == 'push' || inputs.publishRelease) && 'always' || 'never' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-mac
+          path: |
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.zip
+            packages/desktop/release/latest-mac.yml
+            packages/desktop/release/*.blockmap
+          if-no-files-found: error
+
+  linux:
+    if: ${{ github.event_name == 'push' || inputs.buildLinux }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20.18.2', cache: 'npm' }
+      - run: npm ci
+      - name: electron-rebuild (native x64)
+        run: npx electron-rebuild
+        working-directory: packages/desktop
+      - name: Build Linux
+        working-directory: packages/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:linux -- --publish ${{ (github.event_name == 'push' || inputs.publishRelease) && 'always' || 'never' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-linux
+          path: |
+            packages/desktop/release/*.AppImage
+            packages/desktop/release/latest-linux.yml
+            packages/desktop/release/*.blockmap
+          if-no-files-found: error

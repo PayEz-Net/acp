@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+out/
+
+# Vite
+*.local
+
+# Editor
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+
+# npm publish artifacts
+npm-dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Electron
+*.asar
+
+# TypeScript
+*.tsbuildinfo
+.gitnexus
+
+acp-api-release/

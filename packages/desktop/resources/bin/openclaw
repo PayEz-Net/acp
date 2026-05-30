@@ -1,0 +1,50 @@
+#!/bin/sh
+# ACP launch wrapper for openclaw — injects lifecycle hooks transparently.
+# If not running inside ACP (no ACP_SURFACE_ID), passes through to real binary.
+
+WRAPPER_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+find_real_binary() {
+  SAVED_IFS="$IFS"
+  IFS=":"
+  for dir in $PATH; do
+    IFS="$SAVED_IFS"
+    case "$dir" in
+      "$WRAPPER_DIR"|"$WRAPPER_DIR/") continue ;;
+    esac
+    if [ -x "$dir/openclaw" ]; then
+      echo "$dir/openclaw"
+      return 0
+    fi
+  done
+  IFS="$SAVED_IFS"
+  return 1
+}
+
+REAL_OPENCLAW="$(find_real_binary)"
+if [ -z "$REAL_OPENCLAW" ]; then
+  echo "acp-wrapper: openclaw not found in PATH (excluding $WRAPPER_DIR)" >&2
+  exit 127
+fi
+
+# Pass-through if not inside ACP surface
+if [ -z "$ACP_SURFACE_ID" ] || [ "$ACP_HOOKS_DISABLED" = "1" ]; then
+  exec "$REAL_OPENCLAW" "$@"
+fi
+
+# Pass-through for non-session subcommands
+case "${1:-}" in
+  --version|--help)
+    exec "$REAL_OPENCLAW" "$@"
+    ;;
+esac
+
+# Unset CLAUDECODE to prevent nested session detection
+unset CLAUDECODE
+
+# Build hooks JSON
+HOOKS_JSON="{\"hooks\":{\"SessionStart\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook session-start\",\"timeout\":10}]}],\"Stop\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook stop\",\"timeout\":10}]}],\"Notification\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook notification\",\"timeout\":10}]}]}}"
+
+SESSION_ID="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "acp-$(date +%s)-$$")"
+
+exec "$REAL_OPENCLAW" --session-id "$SESSION_ID" --settings "$HOOKS_JSON" "$@"

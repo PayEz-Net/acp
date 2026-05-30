@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+build/out/
+packages/desktop/release/
+packages/desktop/release-*/
+packages/desktop/acp-api-release/
+*.tsbuildinfo
+
+# Packaged binaries (never commit installers/artifacts)
+*.exe
+*.dmg
+*.AppImage
+*.blockmap
+*.zip
+
+# Secrets / local config — NEVER commit real values
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Logs / scratch
+*.log
+_*.txt
+_*test*.js
+
+# Editor / OS
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
