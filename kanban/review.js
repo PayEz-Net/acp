@@ -1,4 +1,4 @@
-import { getTask } from './board.js';
+import { getTask, recordActivity } from './board.js';
 
 export async function reviewTask(storage, mailSender, id, action, opts = {}, projectId) {
   const task = await getTask(storage, id, projectId);
@@ -15,6 +15,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}, pro
   if (action === 'approve') {
     const updates = { status: 'done', completedAt: now, updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || null };
     await storage.updateTask(id, updates, projectId);
+    await recordActivity(storage, id, reviewer, 'reviewed', { from: task.status, to: 'done', detail: 'approved', projectId });
     if (mailSender && task.assignedTo) {
       await mailSender(storage, {
         from: reviewer,
@@ -39,6 +40,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}, pro
   if (action === 'reject') {
     const updates = { status: 'in_progress', updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || 'Rejected — needs rework' };
     await storage.updateTask(id, updates, projectId);
+    await recordActivity(storage, id, reviewer, 'reviewed', { from: task.status, to: 'in_progress', detail: 'rejected', projectId });
     if (mailSender && task.assignedTo) {
       await mailSender(storage, {
         from: reviewer,
@@ -54,6 +56,7 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}, pro
   if (action === 'comment') {
     const updates = { updatedAt: now, reviewedBy: reviewer, reviewNotes: opts.notes || '' };
     await storage.updateTask(id, updates, projectId);
+    await recordActivity(storage, id, reviewer, 'reviewed', { detail: 'review-comment', projectId });
     return { ...task, ...updates };
   }
 

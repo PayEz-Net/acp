@@ -38,8 +38,15 @@ async function recordActivity(storage, taskId, actor, action, { from, to, detail
         projectId: projectId ?? null,
       });
     }
-  } catch { /* audit is best-effort; a logging failure must not block the board */ }
+  } catch (err) {
+    // Best-effort = never BLOCK the mutation, but never SILENT either (Aurum 2036):
+    // a dropped audit on a real mutation is an anomaly — log it LOUD so it's
+    // diagnosable, not a silent hole.
+    console.error(`[kanban] AUDIT append FAILED for task ${taskId} action '${action}': ${err?.message || err}`);
+  }
 }
+
+export { recordActivity };
 
 export async function createTask(storage, task, projectId) {
   if (!task.title) throw invalid('Task title is required');
