@@ -147,9 +147,17 @@ export async function assignTask(storage, id, agentName, opts = {}, projectId) {
     err.code = 'CONFLICT';
     throw err;
   }
+  // #64(b): capture the prior assignee BEFORE the update so the activity event can
+  // distinguish a first-assign (from=null) from a reassign (from=prevAssignee). This
+  // lights up the renderer's existing `action==='assigned' && a.from -> "reassigned"`
+  // branch — which was dead code while from was always null (QAPert 2108, Aurum 2111).
+  // detail stays the NEW assignee name (the panel renders it); to mirrors detail.
+  const prevAssignee = task.assignedTo || null;
   const updates = { assignedTo: agentName, updatedAt: new Date().toISOString() };
   await storage.updateTask(id, updates, projectId);
-  await recordActivity(storage, id, actor || agentName, 'assigned', { detail: agentName, projectId });
+  await recordActivity(storage, id, actor || agentName, 'assigned', {
+    from: prevAssignee, to: agentName, detail: agentName, projectId,
+  });
   return { ...task, ...updates };
 }
 
