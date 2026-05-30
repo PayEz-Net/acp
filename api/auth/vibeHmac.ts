@@ -32,7 +32,7 @@
 import { createHmac } from 'crypto';
 
 export interface VibeHmacConfig {
-  clientId: string;
+  clientId: string | undefined;  // vibe_ HMAC client id; undefined in bearer mode (guarded at the chokepoint in signVibeRequest) — #105
   signingKey: string | undefined; // base64-encoded 32-byte key; undefined in bearer mode (guarded at the chokepoint in signVibeRequest)
 }
 
@@ -78,11 +78,13 @@ export function signVibeRequest(
   // narrows cfg.signingKey to string for computeVibeHmacSignature below —
   // the GUARD narrows; no !, no `as`, no ||. Plain Error + .code only (the 3
   // NotAuthenticatedError classes diverge / team.ts is out of scope).
-  if (!cfg.signingKey) {
+  if (!cfg.signingKey || !cfg.clientId) {
     const e: NodeJS.ErrnoException = new Error('No active IDP session — user must log in via POST /v1/auth/login');
     e.code = 'NOT_AUTHENTICATED';
     throw e;
   }
+  // The guard above narrows BOTH cfg.signingKey and cfg.clientId to string for the
+  // signature + header build below — same chokepoint discipline (no !, no `as`, no ||).
   const qIdx = pathWithPossibleQuery.indexOf('?');
   const path = qIdx === -1 ? pathWithPossibleQuery : pathWithPossibleQuery.slice(0, qIdx);
   const timestamp = Math.floor(Date.now() / 1000).toString();

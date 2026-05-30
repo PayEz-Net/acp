@@ -54,7 +54,16 @@ export const config = {
   // minted tokens to prod → 401. Use the dedicated VIBE_API_URL (see
   // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
-  vibeClientId: required('VIBE_CLIENT_ID'),
+  // #104/#105: the vibe_ HMAC client id is ONLY consumed by the HMAC signer, so it
+  // must be required ONLY in hmac mode — same conditional shape as vibeHmacKey below.
+  // It was unconditionally required(), which hard-threw at startup in the DEFAULT bearer
+  // mode even though bearer never uses it (and the configured dev id is stale on 93 →
+  // #104). Conditional-require is the bug-fix, NOT a soften: hmac mode still hard-throws;
+  // bearer mode leaves it undefined (and unused). Bearer's X-Client-Id uses the baked
+  // non-secret vibeIdealVibeClientNum below, not this.
+  vibeClientId: process.env.VIBE_AUTH_MODE === 'hmac'
+    ? required('VIBE_CLIENT_ID')
+    : process.env.VIBE_CLIENT_ID,
   // Non-secret NUMERIC IdealVibe tenant id (cloud's authoritative
   // enumeration: 2 PayEz API, 8 Ideal Resume Online, 9 Ideal Vibe - Online).
   // ACP IS the IdealVibe product => 9. Single explicit baked source for the
