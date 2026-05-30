@@ -380,7 +380,12 @@ export default function agentRoutes(_storage: any): Router {
       let templateData: any = {};
       if (template_name) {
         const pool = await queryVibeSql(
-          `SELECT data FROM vibe.documents WHERE client_id = 8 AND collection = 'vibe_agents' AND table_name = 'contractor_pool' ORDER BY data->>'name'`
+          // #127 WIDEN (zero-window migration step 1 of 2): accept BOTH client_id
+          // 0 AND 8 while DNP moves the 18 contractor_pool docs 8->0. Never an
+          // empty shelf at any point. NARROW to client_id=0 only after the data
+          // move lands + QA verifies (step 2). Convention: shared template pool
+          // belongs at the client_id=0 global sentinel, not a magic tenant 8.
+          `SELECT data FROM vibe.documents WHERE client_id IN (0, 8) AND collection = 'vibe_agents' AND table_name = 'contractor_pool' ORDER BY data->>'name'`
         );
         if (pool.success && pool.data) {
           const match = pool.data.find((r: any) => {
