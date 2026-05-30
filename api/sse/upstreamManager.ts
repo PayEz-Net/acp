@@ -1,6 +1,6 @@
 import type { Config } from '../../config.js';
 import { ensureValidToken } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
+
 
 export type AgentSseState = 'connected' | 'reconnecting' | 'failed' | 'stopped';
 
@@ -105,19 +105,13 @@ export class UpstreamSseManager {
     this.start(agents);
   }
 
-  private async buildStreamAuthHeaders(path: string): Promise<Record<string, string>> {
+  // Decision-C: user-session SSE is Bearer-only (no Vibe HMAC secret in the build).
+  private async buildStreamAuthHeaders(_path: string): Promise<Record<string, string>> {
     const token = await ensureValidToken(this.cfg.idpUrl, 'ensureValidToken@sse');
     if (!token) {
       throw new Error('NO_SESSION');
     }
-    const hmac = process.env.VIBE_AUTH_MODE === 'hmac'
-      ? signVibeRequest('GET', path, {
-      clientId: this.cfg.vibeClientId,
-      signingKey: this.cfg.vibeHmacKey,
-    })
-      : {};
     return {
-      ...hmac,
       'Authorization': `Bearer ${token}`,
       'X-Client-Id': String(this.cfg.vibeIdealVibeClientNum),
       'X-Vibe-Via': 'idp-proxy',

@@ -54,14 +54,24 @@ export const config = {
   // minted tokens to prod → 401. Use the dedicated VIBE_API_URL (see
   // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
-  vibeClientId: required('VIBE_CLIENT_ID'),
+  // Decision-C / durable #104: the vibe_ HMAC client SLUG is MACHINE-AUTH ONLY now.
+  // User-session proxies (mail/standup/projects/agents/team) are bearer-only and
+  // never touch it. So it is required ONLY when the machine path is active —
+  // contractors enabled, or explicit hmac mode. A pure user-session build boots
+  // with NO baked Vibe HMAC secret (the public unlock). HMAC stays the machine-
+  // auth-only fallback per Bearer-primary policy.
+  vibeClientId: (process.env.ENABLE_CONTRACTORS === 'true' || process.env.VIBE_AUTH_MODE === 'hmac')
+    ? required('VIBE_CLIENT_ID')
+    : (process.env.VIBE_CLIENT_ID || ''),
   // Non-secret NUMERIC IdealVibe tenant id (cloud's authoritative
   // enumeration: 2 PayEz API, 8 Ideal Resume Online, 9 Ideal Vibe - Online).
   // ACP IS the IdealVibe product => 9. Single explicit baked source for the
   // bearer X-Client-Id header (NOT the vibe_ HMAC string above; NO env/||
   // fallback — C1).
   vibeIdealVibeClientNum: 9,
-  vibeHmacKey: process.env.VIBE_AUTH_MODE === 'hmac'
+  // Required when the machine path is active (contractors sign HMAC unconditionally;
+  // hmac mode signs everywhere). User-session bearer build needs none.
+  vibeHmacKey: (process.env.VIBE_AUTH_MODE === 'hmac' || process.env.ENABLE_CONTRACTORS === 'true')
     ? required('VIBE_HMAC_KEY')
     : process.env.VIBE_HMAC_KEY,
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',

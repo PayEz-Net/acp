@@ -2,7 +2,6 @@ import { Router, type Request, type Response } from 'express';
 import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
 
 /**
  * Standup (Team Check-in) proxy — #66 W1, contract step 4.
@@ -17,7 +16,10 @@ import { signVibeRequest } from '../auth/vibeHmac.js';
  * Mounted at /v1/projects (BEFORE projectRoutes) so the deeper /standup/* paths
  * match here; non-standup /v1/projects/* fall through to the projects proxy.
  *
- * Auth mirrors mailProxy: Bearer (refresh-on-401) + optional HMAC envelope.
+ * Auth: Bearer-only (refresh-on-401). Decision-C — no Vibe HMAC secret in the
+ * user-session build; HMAC stays machine-only (contractors). The cloud's
+ * VibeClientAuthMiddleware accepts a validated IDP Bearer with a client_id claim
+ * in lieu of HMAC, so the session token is sufficient (same as mailProxy).
  */
 
 const PROXY_TIMEOUT_MS = 10_000;
@@ -29,20 +31,8 @@ class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(
-  cfg: Config,
-  token: string,
-  method: string,
-  signedPath: string,
-): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest(method as 'GET' | 'POST', signedPath, {
-        clientId: cfg.vibeClientId,
-        signingKey: cfg.vibeHmacKey,
-      })
-    : {};
+function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -80,7 +70,7 @@ async function proxyToCloud(
   }
 
   const doFetch = async (bearer: string): Promise<{ status: number; data: unknown }> => {
-    const headers = buildAuthHeaders(cfg, bearer, method, path);
+    const headers = buildAuthHeaders(cfg, bearer);
     // Forward the agent identity (report-filing authz, #67 W2 / S8a). The sidecar
     // is the trusted local boundary; the cloud reads X-ACP-Agent when no agent JWT.
     if (agentName) {

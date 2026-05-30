@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { error, success } from '../response.js';
 import type { Config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
+
 import * as teamCache from '../team/cache.js';
 import { type NormalizedAgent } from '../team/mapper.js';
 
@@ -20,19 +20,9 @@ class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(
-  cfg: Config,
-  token: string,
-  signedPath: string,
-): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest('GET', signedPath, {
-    clientId: cfg.vibeClientId,
-    signingKey: cfg.vibeHmacKey,
-  })
-    : {};
+// Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
+function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -62,7 +52,7 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
   }
 
   const doFetch = async (bearer: string): Promise<{ status: number; body: any; raw: string }> => {
-    const headers = buildAuthHeaders(cfg, bearer, signedPath);
+    const headers = buildAuthHeaders(cfg, bearer);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {
@@ -149,7 +139,7 @@ export async function resolveMemberEffort(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer, signedPath), signal: controller.signal });
+      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer), signal: controller.signal });
       const raw = await res.text();
       let body: any = null;
       try { body = raw ? JSON.parse(raw) : null; } catch { /* leave null */ }

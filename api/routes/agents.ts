@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { config } from '../../config.js';
 import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
+
 import { fileURLToPath } from 'url';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -29,15 +29,9 @@ const nameToIdCache = new Map<string, number>();
 let nameToIdCachePopulatedAt = 0;
 const NAME_TO_ID_TTL_MS = 5 * 60 * 1000; // 5 min — refresh occasionally so new agents resolve
 
-function buildCloudAuthHeaders(token: string, signedPath: string): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest('GET', signedPath, {
-    clientId: config.vibeClientId,
-    signingKey: config.vibeHmacKey,
-  })
-    : {};
+// Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
+function buildCloudAuthHeaders(token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(config.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -56,7 +50,7 @@ async function cloudFetch(signedPath: string): Promise<{ status: number; body: a
     try {
       const res = await fetch(url, {
         method: 'GET',
-        headers: buildCloudAuthHeaders(bearer, signedPath),
+        headers: buildCloudAuthHeaders(bearer),
         signal: controller.signal,
       });
       const text = await res.text();
@@ -572,7 +566,14 @@ export default function agentRoutes(_storage: any): Router {
       const identity = getBearerIdentity(req);
       const email = identity.email;
       const userId = identity.sub ? parseInt(identity.sub, 10) : null;
-      const clientId = identity.clientId ?? config.vibeIdealVibeClientNum;
+      // Decision-C / no-unjustified-fallback: the tenant MUST come from the session
+      // JWT's client_id claim — never default to a baked client number (that silently
+      // provisions the project under the wrong tenant). Absent claim -> hard 401.
+      const clientId = identity.clientId;
+      if (clientId == null) {
+        res.status(401).json(error('CLIENT_REQUIRED', 'Session JWT has no client_id (tenant) claim — cannot provision a project', 'agent_init_project', (req as any).requestId));
+        return;
+      }
       const { project_name, runtime_choice } = req.body || {};
 
       let derivedName = project_name;

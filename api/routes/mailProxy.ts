@@ -4,7 +4,6 @@ import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
 import * as projectsCache from '../projects/cache.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
@@ -17,20 +16,10 @@ export class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(
-  cfg: Config,
-  token: string,
-  method: 'GET' | 'POST',
-  signedPath: string,
-): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest(method, signedPath, {
-    clientId: cfg.vibeClientId,
-    signingKey: cfg.vibeHmacKey,
-  })
-    : {};
+// Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build). The
+// cloud accepts a validated IDP Bearer with a client_id claim in lieu of HMAC.
+function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -97,10 +86,9 @@ async function proxyToCloud(
     throw new NotAuthenticatedError();
   }
 
-  const signedPath = `${AGENTMAIL_BASE}${path}`;
 
   const doFetch = async (bearer: string): Promise<{ status: number; data: unknown }> => {
-    const headers = buildAuthHeaders(cfg, bearer, method, signedPath);
+    const headers = buildAuthHeaders(cfg, bearer);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {

@@ -41,7 +41,7 @@ import { success, error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
+
 import {
   extractAndMapList,
   extractAndMapCurrent,
@@ -65,20 +65,9 @@ class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(
-  cfg: Config,
-  token: string,
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
-  signedPath: string,
-): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest(method, signedPath, {
-    clientId: cfg.vibeClientId,
-    signingKey: cfg.vibeHmacKey,
-  })
-    : {};
+// Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
+function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -110,10 +99,9 @@ async function callCloud(
 
   const qs = buildQueryString(query);
   const url = `${cfg.vibeApiUrl}${path}${qs}`;
-  const signedPath = path; // HMAC signs path-only, never query
 
   const doFetch = async (bearer: string): Promise<{ status: number; payload: unknown }> => {
-    const headers = buildAuthHeaders(cfg, bearer, method, signedPath);
+    const headers = buildAuthHeaders(cfg, bearer);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {
