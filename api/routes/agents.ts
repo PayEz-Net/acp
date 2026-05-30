@@ -401,13 +401,9 @@ export default function agentRoutes(_storage: any): Router {
 
       // Allocate next agent id from the docstore JSON ids
       const nextIdResult = await queryVibeSql(
-        // Scope the next-id MAX to client_id=0 — the SAME id space this profile is inserted
-        // into (the INSERT below is VALUES (0, ...)). Unscoped, it MAXed across all tenants'
-        // agent_profiles (wrong id space) and would collide under RLS (a scoped read returns a
-        // lower MAX -> duplicate id). #124 sweep (QAPert 2313, missing-WHERE class).
         `SELECT COALESCE(MAX((data->>'id')::int), 0) + 1 AS next_id
          FROM vibe.documents
-         WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles'`
+         WHERE collection = 'vibe_agents' AND table_name = 'agent_profiles'`
       );
       const nextId = nextIdResult.success && nextIdResult.data?.length ? nextIdResult.data[0].next_id : 1;
 
