@@ -898,6 +898,72 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     }
   });
 
+  // ── Standup Rounds (#120) — proxy the project-nested durable-rounds surface
+  // to cloud (PayEz-Core StandupRoundsController). The cockpit reads the round +
+  // its reports[] in one shot for the W4 check-in board. Cloud bodies are
+  // FE-shaped ({round}/{rounds}/{schedule}) — they may or may not carry the
+  // {success,data} envelope, so we gate on HTTP status (+ an explicit
+  // success===false) and forward `payload.data ?? payload` verbatim. This makes
+  // the StandupRoundsController's "the acp-api sidecar proxies this verbatim"
+  // comment actually true (it described intent; the route didn't exist).
+  // NOTE: report-FILING (POST .../report) is the agent skill's path — it needs
+  // X-ACP-Agent identity forwarding which this bearer proxy doesn't do, and the
+  // desktop board is observe-only — so it is intentionally NOT proxied here.
+  const proxyStandup = (
+    method: 'GET' | 'POST' | 'PUT',
+    matchPath: string,
+    op: string,
+    buildCloudPath: (id: number, req: Request) => string,
+    getQuery?: (req: Request) => Record<string, unknown> | undefined,
+    getBody?: (req: Request) => unknown,
+  ) => {
+    const handler = async (req: Request, res: Response) => {
+      try {
+        const session = getSession();
+        if (!session) throw new NotAuthenticatedError();
+        const id = parseInt(req.params.id as string, 10);
+        if (isNaN(id)) {
+          res.status(400).json(error('VALIDATION_ERROR', 'id must be an integer', op, (req as any).requestId));
+          return;
+        }
+        const { status, payload } = await callCloud(
+          cfg, method, buildCloudPath(id, req),
+          getQuery?.(req), getBody?.(req),
+        );
+        // VERBATIM passthrough — these endpoints are FE-shaped ({round}/{rounds}/
+        // {schedule}) and the board reads them directly (matches the controller's
+        // "proxies this verbatim" contract + the running sidecar's existing
+        // behavior). Forward the cloud status + body unwrapped, NOT the acp-api
+        // {success,data} envelope, so callers see one stable shape live-or-built.
+        res.status(status).json(payload);
+      } catch (err: any) {
+        sendProxyError(res, req, err, op);
+      }
+    };
+    if (method === 'GET') router.get(matchPath, handler);
+    else if (method === 'POST') router.post(matchPath, handler);
+    else router.put(matchPath, handler);
+  };
+
+  const STANDUP = (id: number) => `${CLOUD_PROJECTS_PATH}/${id}/standup`;
+  // Reads (the board): current open round, history list, one round.
+  proxyStandup('GET', '/:id/standup/rounds/current', 'project_standup_round_current',
+    (id) => `${STANDUP(id)}/rounds/current`);
+  proxyStandup('GET', '/:id/standup/rounds', 'project_standup_rounds_list',
+    (id) => `${STANDUP(id)}/rounds`, (req) => ({ status: req.query.status }));
+  proxyStandup('GET', '/:id/standup/rounds/:roundId', 'project_standup_round_get',
+    (id, req) => `${STANDUP(id)}/rounds/${parseInt(req.params.roundId as string, 10)}`);
+  // Human cockpit actions: call standup (open) + close.
+  proxyStandup('POST', '/:id/standup/rounds', 'project_standup_round_open',
+    (id) => `${STANDUP(id)}/rounds`, undefined, (req) => req.body || {});
+  proxyStandup('POST', '/:id/standup/rounds/:roundId/close', 'project_standup_round_close',
+    (id, req) => `${STANDUP(id)}/rounds/${parseInt(req.params.roundId as string, 10)}/close`);
+  // Durable schedule (out of localStorage, #69).
+  proxyStandup('GET', '/:id/standup/schedule', 'project_standup_schedule_get',
+    (id) => `${STANDUP(id)}/schedule`);
+  proxyStandup('PUT', '/:id/standup/schedule', 'project_standup_schedule_set',
+    (id) => `${STANDUP(id)}/schedule`, undefined, (req) => req.body || {});
+
   // GET /v1/projects/:id/boot-prompt/:agent_id — proxy to cloud Wave D
   // boot-prompt assembly. Returns `{template_version, project_id,
   // agent_id, agent_name, boot_prompt, assembled_at}`. The boot_prompt
