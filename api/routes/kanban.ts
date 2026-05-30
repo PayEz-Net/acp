@@ -104,9 +104,16 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       }
       const requireUnassigned = req.body.requireUnassigned === true;
       const task = await assignTask(storage, parseInt(req.params.id as string, 10), agent, { requireUnassigned });
+      // #109: emit from=<prevAssignee> only on a TRUE reassignment (the task already had a
+      // different owner) so the audit trail distinguishes "reassigned" from a first-time
+      // "assigned". The renderer re-lights 'reassigned' for free on action==='assigned' && from.
+      // First-assign (no prior owner) or re-assign to the same agent stay a plain 'assigned'.
+      const reassigned = task.previousAssignee && task.previousAssignee !== agent;
       localEventBus?.emit({
         event: 'kanban-update',
-        data: { action: 'assigned', task_id: req.params.id, agent },
+        data: reassigned
+          ? { action: 'assigned', task_id: req.params.id, agent, from: task.previousAssignee, to: agent }
+          : { action: 'assigned', task_id: req.params.id, agent },
       });
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(success(task, 'kanban_assign', (req as any).requestId, {

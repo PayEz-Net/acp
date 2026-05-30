@@ -67,7 +67,11 @@ export async function assignTask(storage, id, agentName, { requireUnassigned = f
     err.code = 'CONFLICT';
     throw err;
   }
+  // #109: capture the prior owner BEFORE the overwrite so the caller can emit a true
+  // "reassigned" activity (from=<prevAssignee>) vs a first-time "assigned". Non-persisted —
+  // it's only on the returned object for the activity-emit, never written to storage.
+  const previousAssignee = task.assignedTo ?? null;
   const updates = { assignedTo: agentName, updatedAt: new Date().toISOString() };
   await storage.updateTask(id, updates);
-  return { ...task, ...updates };
+  return { ...task, ...updates, previousAssignee };
 }

@@ -95,6 +95,23 @@ describe('assignTask', () => {
     expect(result.assignedTo).toBe('DotNetPert');
     expect(storage.updateTask).toHaveBeenCalledWith(1, expect.objectContaining({ assignedTo: 'DotNetPert' }));
   });
+
+  // #109: previousAssignee exposed for the reassigned-vs-assigned activity distinction
+  test('first-assign (no prior owner) -> previousAssignee null', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, assignedTo: null });
+    const result = await assignTask(storage, 1, 'DotNetPert');
+    expect(result.previousAssignee).toBeNull();
+    expect(result.assignedTo).toBe('DotNetPert');
+  });
+
+  test('reassign (prior owner) -> previousAssignee = old owner', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, assignedTo: 'QAPert' });
+    const result = await assignTask(storage, 1, 'DotNetPert');
+    expect(result.previousAssignee).toBe('QAPert');
+    expect(result.assignedTo).toBe('DotNetPert');
+  });
 });
 
 describe('TRANSITIONS', () => {
