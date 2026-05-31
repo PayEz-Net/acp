@@ -43,7 +43,9 @@ describe('Supervisor', () => {
     await expect(sup.stop()).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
   });
 
-  test('checkStopConditions returns blocker when 2+ blocked', async () => {
+  // #82: review/blocked are NO LONGER terminal stops — a working board (cards in review or
+  // blocked) must NOT kill the keep-alive. They're FYI signals in the ping body now.
+  test('#82: checkStopConditions does NOT stop on 2+ blocked (FYI signal, not terminal)', async () => {
     const storage = createMockStorage({ enabled: true, startedAt: new Date().toISOString(), maxRuntimeHours: 4 });
     const sup = new Supervisor(storage);
     const tasks = [
@@ -51,18 +53,16 @@ describe('Supervisor', () => {
       { status: 'blocked' },
       { status: 'in_progress' },
     ];
-    expect(await sup.checkStopConditions(tasks)).toBe('blocker');
+    expect(await sup.checkStopConditions(tasks)).toBeNull();
   });
 
-  test('checkStopConditions returns review_queue when 3+ in review', async () => {
+  test('#82: checkStopConditions does NOT stop on a full review queue (the self-stop bug)', async () => {
     const storage = createMockStorage({ enabled: true, startedAt: new Date().toISOString(), maxRuntimeHours: 4 });
     const sup = new Supervisor(storage);
-    const tasks = [
-      { status: 'review' },
-      { status: 'review' },
-      { status: 'review' },
-    ];
-    expect(await sup.checkStopConditions(tasks)).toBe('review_queue');
+    // mirror the live board that triggered the self-stop right after the init ping: 21 in
+    // review is a HEALTHY, actively-worked state, not a halt condition.
+    const tasks = Array.from({ length: 21 }, () => ({ status: 'review' }));
+    expect(await sup.checkStopConditions(tasks)).toBeNull();
   });
 
   test('checkStopConditions returns milestone when all milestone tasks done', async () => {

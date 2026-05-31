@@ -285,12 +285,13 @@ export class Supervisor {
     const state = await this.getState();
     if (!state?.enabled) return null;
 
-    const blockedCount = tasks.filter((t) => t.status === 'blocked').length;
-    if (blockedCount >= 2) return 'blocker';
-
-    const reviewCount = tasks.filter((t) => t.status === 'review').length;
-    if (reviewCount >= 3) return 'review_queue';
-
+    // #82: review_queue (review>=3) and blocker (blocked>=2) are NO LONGER terminal stops.
+    // A board with cards in review or blocked is a NORMAL, actively-worked state — not a
+    // "halt and wait" one. Auto-stopping there killed the keep-alive on basically every real
+    // board immediately after the init ping (live board has 21 in review). Jon directive:
+    // keep the pings coming while there's active work. These are now FYI-only signals surfaced
+    // in the ping body (see _sendPing). Hard-stops stay reserved for milestone-complete,
+    // max_runtime, and the memory guardrail below.
     if (state.currentMilestone) {
       const milestoneTasks = tasks.filter((t) => t.milestone === state.currentMilestone);
       if (milestoneTasks.length > 0 && milestoneTasks.every((t) => t.status === 'done')) {
@@ -411,9 +412,19 @@ export class Supervisor {
         }
       }
 
+      // #82: review/blocked are FYI signals now (NOT stop triggers — see checkStopConditions).
+      // Surface the counts so the lead sees board state without the keep-alive self-terminating
+      // on a healthy board. byStatus is already computed above.
+      const reviewN = byStatus['review'] || 0;
+      const blockedN = byStatus['blocked'] || 0;
+      if (reviewN >= 3 || blockedN >= 2) {
+        headlines += `\n\nBoard signals (FYI — not a stop): ${reviewN} in review, ${blockedN} blocked. Keep working; triage the review queue / unblock as you go.`;
+      }
+
       // Stop condition check moved to AFTER mail send — checking here caused an
       // early return that swallowed the initial startup notification entirely.
-      // Capture tasks for the post-send check below.
+      // The post-send check below now only fires the REMAINING terminal stops
+      // (milestone / max_runtime / memory) — never review_queue/blocker (#82).
     } catch {
       taskSummary = '(could not fetch kanban)';
     }
