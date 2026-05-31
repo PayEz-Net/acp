@@ -1,4 +1,4 @@
-import { signVibeRequest } from '../api/auth/vibeHmac.js';
+// sendMail/markRead removed — _sendPing uses direct fetch to local mail API
 
 export class Supervisor {
   constructor(storage, cfg = {}) {
@@ -173,8 +173,12 @@ export class Supervisor {
       });
     }
 
-    // Fire first ping immediately so lead agent gets notified on start
-    this._sendPing().catch(() => {});
+    // Fire first ping immediately so lead agent gets notified on start.
+    // The start notification arrives UNREAD (like interval pings) so the lead
+    // actually SEES it — the previous auto read-all clobbered the just-sent
+    // ping itself, leaving the lead with no visible start notification (#81).
+    // isInitial is retained only as a log label now.
+    this._sendPing(true).catch(err => console.error('[Supervisor] Initial ping failed:', err.message || err));
 
     return this.getState();
   }
@@ -360,7 +364,7 @@ export class Supervisor {
     // the SSE emit that reads _pingConfig after _startPingTimer returns.
   }
 
-  async _sendPing() {
+  async _sendPing(isInitial = false) {
     if (!this.unattendedMode || !this._pingConfig) return;
 
     // Read lead agent from DB (source of truth — written by config modal on start)
@@ -379,7 +383,8 @@ export class Supervisor {
     let taskSummary = '';
     let headlines = '';
     try {
-      const tasks = await this._storage.listTasks();
+      const activeProjectId = await this._storage.getActiveProjectId();
+      const tasks = await this._storage.listTasks(activeProjectId != null ? { projectId: activeProjectId } : {});
       const byStatus = {};
       for (const t of tasks) {
         byStatus[t.status] = (byStatus[t.status] || 0) + 1;
@@ -406,35 +411,23 @@ export class Supervisor {
         }
       }
 
-      // Check stop conditions while we have tasks
-      const stopReason = await this.checkStopConditions(tasks);
-      if (stopReason) {
-        console.log(`[Supervisor] Stop condition met: ${stopReason}`);
-        await this.stopUnattended(stopReason);
-        return;
-      }
+      // Stop condition check moved to AFTER mail send — checking here caused an
+      // early return that swallowed the initial startup notification entirely.
+      // Capture tasks for the post-send check below.
     } catch {
       taskSummary = '(could not fetch kanban)';
     }
 
-    // Send ping via agent mail (HMAC service-account path — no IDP session needed).
-    const cfg = this._cfg;
-    const vibeApiUrl = cfg.vibeApiUrl || 'https://api.idealvibe.online';
+    // Send ping via local mail (avoids HMAC cloud dependency).
     const body = `UNATTENDED MODE — Nightly Kanban Ping\n\nElapsed: ${elapsedMin} minutes\nKanban: ${taskSummary}\nMax runtime: ${state?.maxRuntimeHours || this._maxRuntimeHours}h${headlines}\n\nCheck kanban, check mail, report status, keep working.`;
 
-    const hmacCfg = {
-      clientId: cfg.vibeClientId,
-      signingKey: cfg.vibeHmacKey,
-    };
-
     try {
-      const sendPath = '/v1/agentmail/send';
-      const sendRes = await fetch(`${vibeApiUrl}${sendPath}`, {
+      const port = this._cfg?.port || 3001;
+      const mailRes = await fetch(`http://127.0.0.1:${port}/v1/mail/send`, {
         method: 'POST',
         headers: {
-          ...signVibeRequest('POST', sendPath, hmacCfg),
-          'X-Vibe-Via': 'idp-proxy',
           'Content-Type': 'application/json',
+          'X-ACP-Agent': leadAgent,
         },
         body: JSON.stringify({
           from_agent: leadAgent,
@@ -444,23 +437,33 @@ export class Supervisor {
           importance: 'normal',
         }),
       });
+      if (!mailRes.ok) throw new Error(`Mail send failed: ${mailRes.status}`);
+      await mailRes.json().catch(() => {}); // consume the response body
 
-      if (!sendRes.ok) {
-        const errText = await sendRes.text().catch(() => '(unreadable)');
-        console.error(`[Supervisor] Ping send failed: HTTP ${sendRes.status} — ${errText.slice(0, 400)}`);
-        return;
-      }
-      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed)`);
+      // #81: the start ping (and interval pings) intentionally arrive UNREAD —
+      // the ping IS the lead's "you're up / check in now" trigger, so it must be
+      // visible. The previous isInitial read-all cleared the inbox AFTER sending,
+      // which marked the just-sent ping read and left the lead with no visible
+      // start notification. Removed — no auto read-all on any ping.
 
-      // NOTE: Do NOT auto-mark the ping as read here. The inbox-poll push
-      // channels (acp-mail-channel.js for Claude, the Kimi/Codex PTY poller
-      // in acp-desktop/src/main/pty.ts) only surface UNREAD mail. Marking
-      // the ping read immediately after send hides it from the channel
-      // push path, which is why "he got the mail but not the notification"
-      // happened. Leave it unread; the lead agent marks it read when they
-      // act on it, same as any normal mail.
+      console.log(`[Supervisor] Ping sent to ${leadAgent} (${elapsedMin}m elapsed, isInitial=${isInitial})`);
     } catch (err) {
       console.error(`[Supervisor] Failed to send ping mail:`, err.message || err);
+    }
+
+    // Check stop conditions AFTER the mail has been sent. This ensures the lead
+    // agent always receives the startup notification even when the kanban is
+    // already in a stop-eligible state (e.g. review_queue full on day-start).
+    try {
+      const activeProjectId = await this._storage.getActiveProjectId();
+      const tasks = await this._storage.listTasks(activeProjectId != null ? { projectId: activeProjectId } : {});
+      const stopReason = await this.checkStopConditions(tasks);
+      if (stopReason) {
+        console.log(`[Supervisor] Stop condition met: ${stopReason}`);
+        await this.stopUnattended(stopReason);
+      }
+    } catch {
+      // Non-fatal — unattended continues if stop-condition check fails
     }
   }
 

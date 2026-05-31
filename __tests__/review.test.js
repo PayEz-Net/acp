@@ -26,7 +26,9 @@ describe('reviewTask', () => {
     expect(result.status).toBe('done');
     expect(result.reviewedBy).toBe('QAPert');
     expect(result.completedAt).toBeTruthy();
-    expect(storage.updateTask).toHaveBeenCalledWith(5, expect.objectContaining({ status: 'done' }));
+    const call = storage.updateTask.mock.calls[0];
+    expect(call[0]).toBe(5);
+    expect(call[1]).toMatchObject({ status: 'done' });
     expect(mailSender).toHaveBeenCalledTimes(2);
     const assigneeMail = mailSender.mock.calls[0][1];
     expect(assigneeMail.to).toBe('DotNetPert');

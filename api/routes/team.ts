@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { error, success } from '../response.js';
 import type { Config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
-import { signVibeRequest } from '../auth/vibeHmac.js';
+
 import * as teamCache from '../team/cache.js';
 import { type NormalizedAgent } from '../team/mapper.js';
 
@@ -20,19 +20,9 @@ class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(
-  cfg: Config,
-  token: string,
-  signedPath: string,
-): Record<string, string> {
-  const hmacHeaders = process.env.VIBE_AUTH_MODE === 'hmac'
-    ? signVibeRequest('GET', signedPath, {
-    clientId: cfg.vibeClientId,
-    signingKey: cfg.vibeHmacKey,
-  })
-    : {};
+// Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
+function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
   return {
-    ...hmacHeaders,
     'Authorization': `Bearer ${token}`,
     'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
     'X-Vibe-Via': 'idp-proxy',
@@ -62,7 +52,7 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
   }
 
   const doFetch = async (bearer: string): Promise<{ status: number; body: any; raw: string }> => {
-    const headers = buildAuthHeaders(cfg, bearer, signedPath);
+    const headers = buildAuthHeaders(cfg, bearer);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
     try {
@@ -118,6 +108,63 @@ async function fetchTeamFromCloud(cfg: Config, projectId: number): Promise<Cloud
     }));
 
   return { ok: true, agents };
+}
+
+/**
+ * #16b — resolve a single team member's effort_override FRESH from the DB
+ * (vibe_projects.project_team_members via vibe-api) at agent respawn.
+ *
+ * ONE source of truth, always current: a backoff-state cache of the effort
+ * VALUE would drift if the user edits effort during the crash/backoff window
+ * (Aurum 1421 mini-hydra; QA drift test: edit max->medium mid-crash -> the
+ * restart must respawn at MEDIUM). This does a fresh authoritative read every
+ * time (no teamCache — that has a 60s TTL and could also be stale).
+ *
+ * Returns the narrowed effort, or undefined when: unknown agent, no override
+ * (null), no active session, or any fetch failure. undefined -> the caller
+ * OMITS effort -> the single spawn resolver defers to the global default.
+ * Never substitutes 'high' here (Aurum 1413: one resolver owns 'high').
+ */
+export async function resolveMemberEffort(
+  cfg: Config,
+  projectId: number,
+  agentName: string,
+): Promise<'low' | 'medium' | 'high' | 'max' | undefined> {
+  const signedPath = `${PROJECT_TEAM_PATH}/${projectId}/team`;
+  const url = `${cfg.vibeApiUrl}${signedPath}`;
+  let token = await ensureValidToken(cfg.idpUrl);
+  if (!token) return undefined; // no session -> can't look up -> defer to global
+
+  const doFetch = async (bearer: string): Promise<{ status: number; body: any }> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer), signal: controller.signal });
+      const raw = await res.text();
+      let body: any = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* leave null */ }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(cfg.idpUrl);
+      if (!refreshed) return undefined;
+      attempt = await doFetch(refreshed);
+    }
+    if (attempt.status < 200 || attempt.status >= 300) return undefined;
+    const team = attempt.body?.data?.team;
+    if (!Array.isArray(team)) return undefined;
+    const member = team.find((m: any) => m && m.agent_name === agentName);
+    const e = member?.effort_override;
+    return (e === 'low' || e === 'medium' || e === 'high' || e === 'max') ? e : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 interface SyncPayload {

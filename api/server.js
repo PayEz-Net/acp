@@ -23,6 +23,7 @@ import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
+import { resolveMemberEffort } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
 import { LifecycleHooks } from './lifecycle/hooks.js';
@@ -34,14 +35,27 @@ import { SessionManager as ContractorSessionManager } from './contractors/sessio
 import contractorRoutes from './routes/contractors.js';
 import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
+import standupProxyRoutes from './routes/standupProxy.js';
 import documentRoutes from './routes/documents.js';
 import agentRoutes from './routes/agents.js';
 import teamRoutes from './routes/team.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
+import authDiagRoutes from './routes/authDiag.js';
+import { setTerminalDeadEmitter } from './auth/tokenManager.js';
 import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
 
 import { validateConfig } from './lifecycle/configValidator.js';
+
+// Crash logger — never fly blind on uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException:', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+  process.exit(1);
+});
 
 const startTime = Date.now();
 
@@ -111,6 +125,20 @@ export async function createApp(cfg) {
   // Local event bus for party/autonomy SSE events
   const localEventBus = new LocalEventBus();
 
+  // WO-1 Deliverable C seam: sidecar = SOLE terminal-dead authority (§9
+  // Option A). Inject the one-shot AUTH_SESSION_DEAD emitter so tokenManager
+  // can push to the renderer over the EXISTING SSE stream without importing
+  // express/SSE (no circular dep; tokenManager stays unit-testable).
+  // tokenManager guards idempotency — this fires exactly once per dead session.
+  setTerminalDeadEmitter((reason) => {
+    console.error(`[Auth] session terminally dead (${reason.code}) — emitting AUTH_SESSION_DEAD once`);
+    localEventBus.emitAuthSessionDead({
+      code: reason.code,
+      message: reason.message,
+      ts: reason.ts,
+    });
+  });
+
   // Contractor service — disabled by default (not stable yet)
   const contractorService = appConfig.enableContractors 
     ? new ContractorService(storage, localEventBus, appConfig)
@@ -140,6 +168,10 @@ export async function createApp(cfg) {
   const upstreamSse = new UpstreamSseManager(appConfig);
   app.use('/v1/sse', sseStreamRoutes(upstreamSse, localEventBus));
 
+  // WO-1 Deliverable D §5.6 — queryable [AuthRC] ring-buffer surface.
+  // Authenticated (mounted after localAuth) — renderer/diagnostics only.
+  app.use('/v1/auth-rc', authDiagRoutes());
+
   // Agent lifecycle — spawn/kill/restart via Electron callback, crash-loop backoff
   const backoffManager = new BackoffManager();
   const callbackPort = appConfig.acpCallbackPort;
@@ -149,13 +181,20 @@ export async function createApp(cfg) {
     state.restartTimer = setTimeout(async () => {
       try {
         const { session } = await bootstrap(sessionManager, agentName);
+        // #16b: re-resolve effort FRESH from the DB at crash auto-restart
+        // (Aurum 1421 — a cached value drifts if effort was edited during the
+        // crash/backoff window; the drift test demands the CURRENT DB value).
+        // Defers to the global resolver if no project ctx / no active session.
+        const freshEffort = state.projectId != null
+          ? await resolveMemberEffort(appConfig, state.projectId, agentName)
+          : undefined;
         const result = await fetch(`http://127.0.0.1:${callbackPort}/internal/pty/spawn`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport }),
+          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}) }),
         });
         if (result.ok) {
           const data = await result.json();
@@ -215,6 +254,10 @@ export async function createApp(cfg) {
     app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
     app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
   }
+  // Standup (Team Check-in) proxy — #66 W1. MOUNTED BEFORE projectRoutes so the
+  // deeper /v1/projects/:id/standup/* paths forward to the typed .NET vibe-api;
+  // all other /v1/projects/* fall through to the projects proxy below.
+  app.use('/v1/projects', standupProxyRoutes(appConfig));
   app.use('/v1/projects', projectRoutes(localEventBus, appConfig));
   app.use('/v1/documents', documentRoutes(storage));
   // Team sync — soft-cached proxy of vibe-publicapi /v1/agentmail/agents?type=team.
@@ -284,35 +327,12 @@ if (process.argv[1]?.endsWith('server.js')) {
     // Start health monitor for Electron callback server
     app._healthMonitor.start();
 
-    // Auto-spawn agents via Electron callback (if enabled and callback port configured)
-    if (config.acpAutoSpawn && config.acpCallbackPort) {
-      console.log(`[ACP] Auto-spawning ${agents.length} agents via callback port ${config.acpCallbackPort}`);
-      for (const agentName of agents) {
-        const state = app._backoffManager.getOrCreate(agentName);
-        state.status = 'spawning';
-        fetch(`http://127.0.0.1:${config.acpCallbackPort}/internal/pty/spawn`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${config.acpLocalSecret}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ agentName, autoReport: true }),
-        }).then(async (res) => {
-          if (res.ok) {
-            const data = await res.json();
-            const terminalId = data?.terminalId || data?.data?.terminalId || '';
-            app._backoffManager.markSpawned(agentName, terminalId, '');
-            console.log(`[ACP] Auto-spawned ${agentName}`);
-          } else {
-            state.status = 'error';
-            console.warn(`[ACP] Auto-spawn failed for ${agentName}: HTTP ${res.status}`);
-          }
-        }).catch((err) => {
-          state.status = 'error';
-          console.warn(`[ACP] Auto-spawn failed for ${agentName}: ${err.message}`);
-        });
-      }
-    }
+    // The config-gated boot auto-spawn loop was REMOVED (BAPert 1425; Aurum
+    // 1413 greenfield-no-dead-code). It was a dead, competing autostart path:
+    // ACP_AUTO_SPAWN defaulted OFF and no surface set it true, while the
+    // CANONICAL autostart is the lifecycle-hub -> spawn-orchestrator (main
+    // process). A second autostart authority here would be a hydra. Spawns
+    // now come from the orchestrator or explicit /v1/lifecycle/agents/:name/spawn.
 
     // Register graceful shutdown handlers
     registerShutdownHandlers({

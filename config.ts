@@ -46,7 +46,7 @@ function required(name: string): string {
 export const config = {
   port: parseInt(process.env.PORT ?? '', 10) || 3001,
   host: '127.0.0.1',
-  idpUrl: process.env.IDP_URL || 'http://10.0.0.93:32785',
+  idpUrl: required('IDP_URL'),
   // De-conflated: acp-api's cloud Vibe API endpoint is its OWN concern,
   // NOT the same as acp-stable's ACP_API_URL (= the local acp-api backend
   // at 127.0.0.1:3001). Reading ACP_API_URL here cross-wired the two: an
@@ -54,29 +54,29 @@ export const config = {
   // minted tokens to prod → 401. Use the dedicated VIBE_API_URL (see
   // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
   vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
-  // #104/#105: the vibe_ HMAC client id is ONLY consumed by the HMAC signer, so it
-  // must be required ONLY in hmac mode — same conditional shape as vibeHmacKey below.
-  // It was unconditionally required(), which hard-threw at startup in the DEFAULT bearer
-  // mode even though bearer never uses it (and the configured dev id is stale on 93 →
-  // #104). Conditional-require is the bug-fix, NOT a soften: hmac mode still hard-throws;
-  // bearer mode leaves it undefined (and unused). Bearer's X-Client-Id uses the baked
-  // non-secret vibeIdealVibeClientNum below, not this.
-  vibeClientId: process.env.VIBE_AUTH_MODE === 'hmac'
+  // Decision-C / durable #104: the vibe_ HMAC client SLUG is MACHINE-AUTH ONLY now.
+  // User-session proxies (mail/standup/projects/agents/team) are bearer-only and
+  // never touch it. So it is required ONLY when the machine path is active —
+  // contractors enabled, or explicit hmac mode. A pure user-session build boots
+  // with NO baked Vibe HMAC secret (the public unlock). HMAC stays the machine-
+  // auth-only fallback per Bearer-primary policy.
+  vibeClientId: (process.env.ENABLE_CONTRACTORS === 'true' || process.env.VIBE_AUTH_MODE === 'hmac')
     ? required('VIBE_CLIENT_ID')
-    : process.env.VIBE_CLIENT_ID,
+    : (process.env.VIBE_CLIENT_ID || ''),
   // Non-secret NUMERIC IdealVibe tenant id (cloud's authoritative
   // enumeration: 2 PayEz API, 8 Ideal Resume Online, 9 Ideal Vibe - Online).
   // ACP IS the IdealVibe product => 9. Single explicit baked source for the
   // bearer X-Client-Id header (NOT the vibe_ HMAC string above; NO env/||
   // fallback — C1).
   vibeIdealVibeClientNum: 9,
-  vibeHmacKey: process.env.VIBE_AUTH_MODE === 'hmac'
+  // Required when the machine path is active (contractors sign HMAC unconditionally;
+  // hmac mode signs everywhere). User-session bearer build needs none.
+  vibeHmacKey: (process.env.VIBE_AUTH_MODE === 'hmac' || process.env.ENABLE_CONTRACTORS === 'true')
     ? required('VIBE_HMAC_KEY')
     : process.env.VIBE_HMAC_KEY,
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',
   acpCallbackPort: parseInt(process.env.ACP_CALLBACK_PORT ?? '', 10) || 40030,
   acpAgents: (process.env.ACP_AGENTS || 'DotNetPert,BAPert,NextPert,QAPert,Aurum').split(',').map(a => a.trim()),
-  acpAutoSpawn: process.env.ACP_AUTO_SPAWN === 'true',
   vibeTokenCmd: process.env.VIBE_TOKEN_CMD || './cli.js token',
   vibeTokenRefreshS: parseInt(process.env.VIBE_TOKEN_REFRESH_S ?? '', 10) || 300,
   vibeAuthMode: process.env.VIBE_AUTH_MODE || 'bearer',
@@ -84,7 +84,6 @@ export const config = {
   execTimeoutMs: parseInt(process.env.EXEC_TIMEOUT_MS ?? '', 10) || 5000,
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
-  redisUrl: process.env.REDIS_URL || 'redis://10.0.0.93:6379',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',
   enableContractors: process.env.ENABLE_CONTRACTORS === 'true', // Disabled by default - not stable yet
   partyTickMs: parseInt(process.env.PARTY_TICK_MS ?? '', 10) || 5000,

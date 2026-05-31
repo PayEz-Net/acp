@@ -11,6 +11,13 @@ export interface AgentState {
   terminalId: string | null;
   sessionId: string | null;
   workDir: string | null;
+  /** Project the agent was spawned under — the LOOKUP KEY (not the effort
+   *  value) for re-resolving effort_override FRESH from the DB at respawn
+   *  (#16b). Caching the stable routing key is fine; caching the effort
+   *  VALUE would drift if the user edits it mid-crash-window (Aurum 1421
+   *  mini-hydra). null = caller didn't send projectId -> restart can't
+   *  look up -> defers to the global resolver (documented micro-gap). */
+  projectId: number | null;
   autoReport: boolean;
   consecutiveCrashes: number;
   restartCount: number;
@@ -37,6 +44,7 @@ export class BackoffManager {
         terminalId: null,
         sessionId: null,
         workDir: null,
+        projectId: null,
         autoReport: true,
         consecutiveCrashes: 0,
         restartCount: 0,
@@ -91,6 +99,17 @@ export class BackoffManager {
     if (state.stabilityTimer) {
       clearTimeout(state.stabilityTimer);
       state.stabilityTimer = null;
+    }
+
+    // Intentional stop: the kill/stop route sets status='stopped' BEFORE
+    // tearing down the PTY. On Windows a user-initiated kill exits non-zero
+    // (STATUS_CONTROL_C_EXIT = -1073741510), which the exitCode-only logic
+    // below would misclassify as a crash and auto-restart — the "stop then
+    // it respawns" bug. Honor the recorded intent: never resurrect an agent
+    // the user explicitly stopped. A genuine crash leaves status at
+    // 'ready'/'busy'/'idle', so this guard only catches deliberate stops.
+    if (state.status === 'stopped') {
+      return { shouldRestart: false, delay: 0 };
     }
 
     // Clean exit
