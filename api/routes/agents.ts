@@ -406,8 +406,8 @@ export default function agentRoutes(_storage: any): Router {
       // The id space is GLOBAL across tenants (NOT per-client): client_id=0 holds 100-260,
       // client_id=9 continues 261+ as ONE sequence, so allocation must be globally unique. The
       // former `SELECT COALESCE(MAX((data->>'id')::int),0)+1` was a non-reserving read — two
-      // concurrent creates both saw the same MAX and minted the same id (duplicate ids already
-      // exist in the live docstore from exactly this race). nextval() reserves atomically, so
+      // concurrent creates both see the same MAX and mint the same id. nextval() reserves
+      // atomically, so
       // concurrent callers always get distinct values. vibe.agent_profiles_doc_id_seq was seeded
       // to the current global MAX, so it continues the space (264+) and never restarts into the
       // existing range. (Global, unscoped allocation is correct here — #124 verified domain.)
