@@ -186,8 +186,18 @@ export async function listActivity(storage, id, projectId) {
 
 // G5 — soft-archive (not hard-delete; preserves trail).
 export async function archiveTask(storage, id, archived, actor, projectId) {
-  const task = await getTask(storage, id, projectId);
-  await storage.updateTask(id, { archived: !!archived, updatedAt: new Date().toISOString() }, projectId);
+  await getTask(storage, id, projectId); // 404 if missing
+  // #152: return the RE-READ persisted row from updateTask (RETURNING *), never an optimistic
+  // {...task, archived} merge. updateTask throws on a query error and returns null when no row
+  // matched (id+project_id). A null here means the archive did NOT take effect — surface it as a
+  // hard failure rather than fake-green {archived:true}. The response must reflect real DB state.
+  const updated = await storage.updateTask(
+    id, { archived: !!archived, updatedAt: new Date().toISOString() }, projectId);
+  if (!updated) {
+    const err = new Error(`Archive did not persist for task ${id} (no row updated)`);
+    err.code = 'ARCHIVE_NOT_PERSISTED';
+    throw err;
+  }
   await recordActivity(storage, id, actor, archived ? 'archived' : 'unarchived', { projectId });
-  return { ...task, archived: !!archived };
+  return updated;
 }
