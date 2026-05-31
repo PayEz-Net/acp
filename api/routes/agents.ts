@@ -402,19 +402,25 @@ export default function agentRoutes(_storage: any): Router {
         }
       }
 
-      // Allocate next agent id from the docstore JSON ids.
-      // INTENTIONALLY UNSCOPED (no client_id filter): the agent-id space is GLOBAL across
-      // tenants, not per-client — client_id=0 holds 100-260, client_id=9 continues 261-263 as
-      // ONE sequence. So next-id MUST be the global MAX+1 to stay globally unique; scoping to
-      // client_id=0 here would collide (260->261, which client_9 already has). 'No client_id
-      // filter' is correct, not a missing-WHERE (#124 sweep, verified domain). [Known smell,
-      // tracked separately: MAX(id)+1 is race-prone; replace with a global sequence.]
+      // #129: allocate the next agent id from a race-free GLOBAL sequence.
+      // The id space is GLOBAL across tenants (NOT per-client): client_id=0 holds 100-260,
+      // client_id=9 continues 261+ as ONE sequence, so allocation must be globally unique. The
+      // former `SELECT COALESCE(MAX((data->>'id')::int),0)+1` was a non-reserving read — two
+      // concurrent creates both saw the same MAX and minted the same id (duplicate ids already
+      // exist in the live docstore from exactly this race). nextval() reserves atomically, so
+      // concurrent callers always get distinct values. vibe.agent_profiles_doc_id_seq was seeded
+      // to the current global MAX, so it continues the space (264+) and never restarts into the
+      // existing range. (Global, unscoped allocation is correct here — #124 verified domain.)
       const nextIdResult = await queryVibeSql(
-        `SELECT COALESCE(MAX((data->>'id')::int), 0) + 1 AS next_id
-         FROM vibe.documents
-         WHERE collection = 'vibe_agents' AND table_name = 'agent_profiles'`
+        `SELECT nextval('vibe.agent_profiles_doc_id_seq')::int AS next_id`
       );
-      const nextId = nextIdResult.success && nextIdResult.data?.length ? nextIdResult.data[0].next_id : 1;
+      if (!nextIdResult.success || !nextIdResult.data?.length) {
+        // #129: never fabricate an id — the old `?? 1` fallback would collide with existing
+        // agents. If allocation fails, fail loud and let the caller retry.
+        res.status(500).json(error('INTERNAL_ERROR', nextIdResult.error?.message || 'Agent id allocation failed', 'agent_hire', (req as any).requestId));
+        return;
+      }
+      const nextId = nextIdResult.data[0].next_id;
 
       const agentJson = escapeJsonb({
         id: nextId,
