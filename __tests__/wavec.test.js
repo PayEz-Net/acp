@@ -10,6 +10,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  jest.spyOn(global, 'setInterval').mockReturnValue(123);
   app = await createApp({
     vibesqlUrl: 'http://localhost:0',
     vibeApiUrl: 'http://localhost:0',

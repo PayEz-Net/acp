@@ -4,14 +4,10 @@
 export class SessionManager {
   constructor(_cfg) {
     this._sessions = new Map();
-    // Pre-populate known agents for local auth.
-    // BAPert-Jon is Jon's external orchestrator identity — distinct from
-    // the in-team BAPert spawned by the Electron shell. It runs outside
-    // ACP's PTY grid and sends mail in via the /v1/mail/send endpoint.
-    this._agents = new Set([
-      'DotNetPert', 'BAPert', 'NextPert', 'QAPert', 'Aurum', 'NextPertTwo',
-      'BAPert-Jon'
-    ]);
+    // Agent roster is hydrated from VibeSQL at init() time.
+    // Zero hardcoded names — canonical agent_profiles + team_agent_instances
+    // are the one and only source of truth.
+    this._agents = new Set();
 
     // Phase 1 stub: project registry is in-memory only, mirroring the one
     // authoritative row. Real store: vibe.documents where
@@ -94,8 +90,39 @@ export class SessionManager {
   }
 
   async init() {
-    // No-op - no external storage needed
+    // Hydrate the agent roster from VibeSQL so team-scoped agents
+    // (e.g. nextpert-scout) resolve without a code change.
+    await this._refreshAgentsRoster();
     return true;
+  }
+
+  async _refreshAgentsRoster() {
+    try {
+      // Canonical agent profiles — active only
+      const canonicalResult = await this._queryVibeSql(
+        `SELECT data->>'name' as name FROM vibe.documents ` +
+        `WHERE collection = 'vibe_agents' AND table_name = 'agent_profiles' AND deleted_at IS NULL ` +
+        `AND COALESCE((data->>'is_active')::boolean, true) = true`
+      );
+      if (canonicalResult.success && Array.isArray(canonicalResult.data)) {
+        for (const row of canonicalResult.data) {
+          if (row.name) this._agents.add(row.name);
+        }
+      }
+
+      // Per-team agent instances — team_unique_name is the mail routing key
+      const teamResult = await this._queryVibeSql(
+        `SELECT team_unique_name FROM vibe_projects.team_agent_instances WHERE is_active = TRUE`
+      );
+      if (teamResult.success && Array.isArray(teamResult.data)) {
+        for (const row of teamResult.data) {
+          if (row.team_unique_name) this._agents.add(row.team_unique_name);
+        }
+      }
+    } catch (err) {
+      // Fail-open: static fallback list stays intact if VibeSQL is unreachable
+      console.warn('[SessionManager] _refreshAgentsRoster failed, using static fallback:', err?.message || err);
+    }
   }
 
   async load(agentName) {

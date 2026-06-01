@@ -7,6 +7,7 @@ function createMockStorage() {
   return {
     createMessage: jest.fn(async () => 42),
     getMessages: jest.fn(async () => []),
+    getMessageById: jest.fn(async () => null),
     markRead: jest.fn(async () => {}),
     markAllRead: jest.fn(async () => {}),
     archiveMessage: jest.fn(async () => {}),
@@ -44,22 +45,28 @@ describe('getInbox', () => {
   test('queries for mail to agent, not archived', async () => {
     const storage = createMockStorage();
     await getInbox(storage, 'BAPert');
-    expect(storage.getMessages).toHaveBeenCalledWith({
-      toAgent: 'BAPert',
-      messageType: 'mail',
-      isArchived: false,
-    });
+    expect(storage.getMessages).toHaveBeenCalledWith(
+      {
+        toAgent: 'BAPert',
+        messageType: 'mail',
+        isArchived: false,
+      },
+      undefined,
+    );
   });
 
   test('unreadOnly adds isRead filter', async () => {
     const storage = createMockStorage();
     await getInbox(storage, 'BAPert', { unreadOnly: true });
-    expect(storage.getMessages).toHaveBeenCalledWith({
-      toAgent: 'BAPert',
-      messageType: 'mail',
-      isArchived: false,
-      isRead: false,
-    });
+    expect(storage.getMessages).toHaveBeenCalledWith(
+      {
+        toAgent: 'BAPert',
+        messageType: 'mail',
+        isArchived: false,
+        isRead: false,
+      },
+      undefined,
+    );
   });
 });
 
@@ -67,16 +74,18 @@ describe('getMail', () => {
   test('returns message by id', async () => {
     const storage = createMockStorage();
     const mail = { id: 5, subject: 'Test', body: 'Hello' };
-    storage.getMessages.mockResolvedValue([mail, { id: 6, subject: 'Other' }]);
+    storage.getMessageById.mockResolvedValue(mail);
     const result = await getMail(storage, 5);
     expect(result).toEqual(mail);
+    expect(storage.getMessageById).toHaveBeenCalledWith(5);
   });
 
   test('returns null when not found', async () => {
     const storage = createMockStorage();
-    storage.getMessages.mockResolvedValue([]);
+    storage.getMessageById.mockResolvedValue(null);
     const result = await getMail(storage, 999);
     expect(result).toBeNull();
+    expect(storage.getMessageById).toHaveBeenCalledWith(999);
   });
 });
 

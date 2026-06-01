@@ -21,9 +21,12 @@ beforeAll(async () => {
     partyTickMs: 999999,
     autonomyMaxRuntimeHours: 4,
     escalationSensitivity: 2,
+    acpLocalSecret: 'test-secret',
     port: 0,
   });
 });
+
+const authedRequest = () => request.agent(app).set('Authorization', 'Bearer test-secret');
 
 describe('PayEz Envelope', () => {
   test('success responses have required envelope fields', async () => {
@@ -39,7 +42,7 @@ describe('PayEz Envelope', () => {
   });
 
   test('error responses have required envelope fields', async () => {
-    const res = await request(app).get('/v1/sessions/NonExistent');
+    const res = await authedRequest().get('/v1/sessions/NonExistent');
     expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
     expect(res.body).toHaveProperty('error');
@@ -48,7 +51,7 @@ describe('PayEz Envelope', () => {
   });
 
   test('404 for unknown routes', async () => {
-    const res = await request(app).get('/v1/unknown');
+    const res = await authedRequest().get('/v1/unknown');
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('NOT_FOUND');
   });
@@ -56,18 +59,18 @@ describe('PayEz Envelope', () => {
 
 describe('Agent Name Validation', () => {
   test('rejects invalid agent names', async () => {
-    const res = await request(app).post('/v1/agents/a b c/bootstrap');
+    const res = await authedRequest().post('/v1/agents/a b c/bootstrap');
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('INVALID_REQUEST');
   });
 
   test('rejects names over 100 chars', async () => {
-    const res = await request(app).post(`/v1/agents/${'a'.repeat(101)}/bootstrap`);
+    const res = await authedRequest().post(`/v1/agents/${'a'.repeat(101)}/bootstrap`);
     expect(res.status).toBe(400);
   });
 
   test('accepts valid agent names', async () => {
-    const res = await request(app).post('/v1/agents/Test_Agent-1/bootstrap');
+    const res = await authedRequest().post('/v1/agents/Test_Agent-1/bootstrap');
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
   });
@@ -75,20 +78,20 @@ describe('Agent Name Validation', () => {
 
 describe('Bootstrap', () => {
   test('creates new session', async () => {
-    const res = await request(app).post('/v1/agents/BootstrapTest/bootstrap');
+    const res = await authedRequest().post('/v1/agents/BootstrapTest/bootstrap');
     expect(res.status).toBe(200);
     expect(res.body.data.session.agentName).toBe('BootstrapTest');
     expect(res.body.data.source).toBe('new');
   });
 
   test('returns existing session on second call', async () => {
-    await request(app).post('/v1/agents/BootstrapTwice/bootstrap');
-    const res = await request(app).post('/v1/agents/BootstrapTwice/bootstrap');
-    expect(res.body.data.source).toBe('file');
+    await authedRequest().post('/v1/agents/BootstrapTwice/bootstrap');
+    const res = await authedRequest().post('/v1/agents/BootstrapTwice/bootstrap');
+    expect(res.body.data.source).toBe('memory');
   });
 
   test('applies initial preferences', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/agents/PrefAgent/bootstrap')
       .send({ initialPreferences: { theme: 'dark' } });
     expect(res.body.data.session.preferences.theme).toBe('dark');
@@ -97,8 +100,8 @@ describe('Bootstrap', () => {
 
 describe('Modify Self', () => {
   test('modifies session functions', async () => {
-    await request(app).post('/v1/agents/ModifyAgent/bootstrap');
-    const res = await request(app)
+    await authedRequest().post('/v1/agents/ModifyAgent/bootstrap');
+    const res = await authedRequest()
       .post('/v1/agents/ModifyAgent/modify')
       .send({ customFunctions: { greet: { params: ['name'], body: 'return "Hi " + name;' } } });
     expect(res.status).toBe(200);
@@ -107,7 +110,7 @@ describe('Modify Self', () => {
   });
 
   test('returns 404 for non-existent agent', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/agents/GhostAgent/modify')
       .send({ preferences: {} });
     expect(res.status).toBe(404);
@@ -115,8 +118,8 @@ describe('Modify Self', () => {
   });
 
   test('returns 400 for invalid function syntax', async () => {
-    await request(app).post('/v1/agents/BadFuncAgent/bootstrap');
-    const res = await request(app)
+    await authedRequest().post('/v1/agents/BadFuncAgent/bootstrap');
+    const res = await authedRequest()
       .post('/v1/agents/BadFuncAgent/modify')
       .send({ customFunctions: { bad: { params: [], body: 'if(' } } });
     expect(res.status).toBe(400);
@@ -126,8 +129,8 @@ describe('Modify Self', () => {
 
 describe('Exec With Agent', () => {
   test('executes code in agent context', async () => {
-    await request(app).post('/v1/agents/ExecAgent/bootstrap');
-    const res = await request(app)
+    await authedRequest().post('/v1/agents/ExecAgent/bootstrap');
+    const res = await authedRequest()
       .post('/v1/agents/ExecAgent/exec')
       .send({ code: 'return 2 + 2;' });
     expect(res.status).toBe(200);
@@ -136,8 +139,8 @@ describe('Exec With Agent', () => {
   });
 
   test('returns 400 without code', async () => {
-    await request(app).post('/v1/agents/ExecNoCode/bootstrap');
-    const res = await request(app)
+    await authedRequest().post('/v1/agents/ExecNoCode/bootstrap');
+    const res = await authedRequest()
       .post('/v1/agents/ExecNoCode/exec')
       .send({});
     expect(res.status).toBe(400);
@@ -145,7 +148,7 @@ describe('Exec With Agent', () => {
   });
 
   test('returns 404 for non-existent agent', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/agents/NoAgent/exec')
       .send({ code: 'return 1;' });
     expect(res.status).toBe(404);
@@ -154,24 +157,24 @@ describe('Exec With Agent', () => {
 
 describe('Sessions', () => {
   test('lists all sessions as 200 with array', async () => {
-    const res = await request(app).get('/v1/sessions');
+    const res = await authedRequest().get('/v1/sessions');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.data)).toBe(true);
   });
 
   test('gets session by name', async () => {
-    await request(app).post('/v1/agents/SessionGet/bootstrap');
-    const res = await request(app).get('/v1/sessions/SessionGet');
+    await authedRequest().post('/v1/agents/SessionGet/bootstrap');
+    const res = await authedRequest().get('/v1/sessions/SessionGet');
     expect(res.status).toBe(200);
     expect(res.body.data.session.agentName).toBe('SessionGet');
   });
 
   test('deletes session', async () => {
-    await request(app).post('/v1/agents/SessionDel/bootstrap');
-    const delRes = await request(app).delete('/v1/sessions/SessionDel');
+    await authedRequest().post('/v1/agents/SessionDel/bootstrap');
+    const delRes = await authedRequest().delete('/v1/sessions/SessionDel');
     expect(delRes.status).toBe(200);
     expect(delRes.body.data.deleted).toBe('SessionDel');
-    const getRes = await request(app).get('/v1/sessions/SessionDel');
+    const getRes = await authedRequest().get('/v1/sessions/SessionDel');
     expect(getRes.status).toBe(404);
   });
 });

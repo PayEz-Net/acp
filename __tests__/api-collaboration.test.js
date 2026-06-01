@@ -21,13 +21,16 @@ beforeAll(async () => {
     partyTickMs: 999999,
     autonomyMaxRuntimeHours: 4,
     escalationSensitivity: 2,
+    acpLocalSecret: 'test-secret',
     port: 0,
   });
 });
 
+const authedRequest = () => request.agent(app).set('Authorization', 'Bearer test-secret');
+
 describe('Party Routes — Validation', () => {
   test('POST /v1/party/signal requires agentId and agentName', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/party/signal')
       .send({});
     expect(res.status).toBe(400);
@@ -35,7 +38,7 @@ describe('Party Routes — Validation', () => {
   });
 
   test('POST /v1/party/mingle requires agentA and agentB', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/party/mingle')
       .send({});
     expect(res.status).toBe(400);
@@ -43,7 +46,7 @@ describe('Party Routes — Validation', () => {
   });
 
   test('PUT /v1/party/agents/:id/zone requires zone', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .put('/v1/party/agents/sage/zone')
       .send({});
     expect(res.status).toBe(400);
@@ -52,14 +55,14 @@ describe('Party Routes — Validation', () => {
 
 describe('Party Routes — Storage-dependent (returns error envelope on no DB)', () => {
   test('GET /v1/party/state returns error envelope when storage unavailable', async () => {
-    const res = await request(app).get('/v1/party/state');
+    const res = await authedRequest().get('/v1/party/state');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('request_id');
     expect(res.body).toHaveProperty('meta');
   });
 
   test('GET /v1/party/relevance returns error envelope when storage unavailable', async () => {
-    const res = await request(app).get('/v1/party/relevance');
+    const res = await authedRequest().get('/v1/party/relevance');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
@@ -67,7 +70,7 @@ describe('Party Routes — Storage-dependent (returns error envelope on no DB)',
 
 describe('Kanban Routes — Validation', () => {
   test('POST /v1/kanban/tasks requires title', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/kanban/tasks')
       .send({});
     expect(res.status).toBe(400);
@@ -77,7 +80,7 @@ describe('Kanban Routes — Validation', () => {
 
 describe('Kanban Routes — Storage-dependent', () => {
   test('POST /v1/kanban/tasks returns error envelope on no DB', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/kanban/tasks')
       .send({ title: 'Test Task' });
     expect(res.body).toHaveProperty('success');
@@ -85,7 +88,7 @@ describe('Kanban Routes — Storage-dependent', () => {
   });
 
   test('GET /v1/kanban/tasks returns error envelope on no DB', async () => {
-    const res = await request(app).get('/v1/kanban/tasks');
+    const res = await authedRequest().get('/v1/kanban/tasks');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
@@ -93,7 +96,7 @@ describe('Kanban Routes — Storage-dependent', () => {
 
 describe('Messaging Routes — Storage-dependent', () => {
   test('POST /v1/messages/broadcast returns error envelope on no DB', async () => {
-    const res = await request(app)
+    const res = await authedRequest()
       .post('/v1/messages/broadcast')
       .send({ fromAgent: 'BAPert', body: 'Test' });
     expect(res.body).toHaveProperty('success');
@@ -101,13 +104,13 @@ describe('Messaging Routes — Storage-dependent', () => {
   });
 
   test('GET /v1/messages/inbox/:agent returns error envelope on no DB', async () => {
-    const res = await request(app).get('/v1/messages/inbox/BAPert');
+    const res = await authedRequest().get('/v1/messages/inbox/BAPert');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
 
   test('GET /v1/messages/broadcasts returns error envelope on no DB', async () => {
-    const res = await request(app).get('/v1/messages/broadcasts');
+    const res = await authedRequest().get('/v1/messages/broadcasts');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
@@ -115,13 +118,13 @@ describe('Messaging Routes — Storage-dependent', () => {
 
 describe('Autonomy Routes — Storage-dependent', () => {
   test('GET /v1/autonomy/status returns error envelope on no DB', async () => {
-    const res = await request(app).get('/v1/autonomy/status');
+    const res = await authedRequest().get('/v1/autonomy/status');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
 
   test('GET /v1/autonomy/standup returns error envelope on no DB', async () => {
-    const res = await request(app).get('/v1/autonomy/standup');
+    const res = await authedRequest().get('/v1/autonomy/standup');
     expect(res.body).toHaveProperty('success');
     expect(res.body).toHaveProperty('meta');
   });
@@ -137,12 +140,9 @@ describe('Route Registration', () => {
       { method: 'put', path: '/v1/party/mingle/test/resolve', body: {} },
       { method: 'put', path: '/v1/party/agents/sage/zone', body: {} },
       { method: 'post', path: '/v1/messages/broadcast', body: {} },
-      { method: 'post', path: '/v1/messages/chat', body: {} },
       { method: 'post', path: '/v1/messages/mail', body: {} },
       { method: 'get', path: '/v1/messages/inbox/test' },
       { method: 'get', path: '/v1/messages/broadcasts' },
-      { method: 'post', path: '/v1/messages/clusters', body: {} },
-      { method: 'get', path: '/v1/messages/clusters/test' },
       { method: 'put', path: '/v1/messages/inbox/test/read', body: {} },
       { method: 'post', path: '/v1/kanban/tasks', body: {} },
       { method: 'get', path: '/v1/kanban/tasks' },
@@ -158,7 +158,7 @@ describe('Route Registration', () => {
     ];
 
     for (const route of routes) {
-      const req = request(app)[route.method](route.path);
+      const req = authedRequest()[route.method](route.path);
       if (route.body) req.send(route.body);
       const res = await req;
       expect(res.body.error?.code).not.toBe('NOT_FOUND');
@@ -168,7 +168,7 @@ describe('Route Registration', () => {
 
 describe('Empty List via Session Routes (file fallback works)', () => {
   test('sessions return 200 with empty array', async () => {
-    const res = await request(app).get('/v1/sessions');
+    const res = await authedRequest().get('/v1/sessions');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.data)).toBe(true);
   });

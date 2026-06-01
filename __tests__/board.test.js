@@ -6,7 +6,7 @@ function createMockStorage() {
     createTask: jest.fn(async () => 1),
     getTask: jest.fn(async () => null),
     listTasks: jest.fn(async () => []),
-    updateTask: jest.fn(async () => {}),
+    updateTask: jest.fn(async (_id, updates) => ({ id: 1, ...updates })),
     appendKanbanActivity: jest.fn(async () => 1),
     addKanbanComment: jest.fn(async (c) => ({ comment_id: 1, ...c })),
     listKanbanComments: jest.fn(async () => []),
