@@ -110,13 +110,19 @@ export class SessionManager {
         }
       }
 
-      // Per-team agent instances — team_unique_name is the mail routing key
+      // Per-team agent instances — #207: the instance has no name column. Its addressable
+      // identity is the CANONICAL bench name (agent_profiles.name), resolved via the agent_id
+      // join. (team_unique_name was dropped; reading it would throw "column does not exist".)
       const teamResult = await this._queryVibeSql(
-        `SELECT team_unique_name FROM vibe_projects.team_agent_instances WHERE is_active = TRUE`
+        `SELECT p.data->>'name' AS name ` +
+        `FROM vibe_projects.team_agent_instances tai ` +
+        `JOIN vibe.documents p ON p.collection = 'vibe_agents' AND p.table_name = 'agent_profiles' ` +
+        `  AND p.deleted_at IS NULL AND (p.data->>'id')::int = tai.agent_id ` +
+        `WHERE tai.is_active = TRUE`
       );
       if (teamResult.success && Array.isArray(teamResult.data)) {
         for (const row of teamResult.data) {
-          if (row.team_unique_name) this._agents.add(row.team_unique_name);
+          if (row.name) this._agents.add(row.name);
         }
       }
     } catch (err) {
