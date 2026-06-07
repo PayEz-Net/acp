@@ -36,45 +36,8 @@ export class SessionManager {
     this._documents = new Map();
     this._nextDocumentId = 1;
 
-    // Seed Stripe documentation for agent queries
-    const stripeDocs = [
-      {
-        title: 'Stripe Integration — Agent Reference',
-        content_md: `# Stripe Integration — Agent Reference\n\n**Scope:** IdealResume / IdealVibe checkout, billing, and subscription flow.\n**Backend:** PayEz-Core Stripe services + AKS.\n**Frontend:** idealvibe.online Next.js checkout components.\n\n## Quick Links\n\n| Doc | Purpose |\n|---|---|\n| configuration.md | Keys, price IDs, AKS configmaps/secrets |\n| testing-checklist.md | Pre-release validation steps |\n| live-mode-checklist.md | Switching from test to production |\n\n## Architecture\n\nidealvibe.online (Next.js checkout) -> PayEz.Stripe.Api (AKS, .NET) -> Stripe.com (live/test)\n\n## Environments\n\n| Env | Stripe Mode | Account |\n|---|---|---|\n| Production | Live | acct_1SUtxaLZTjUNa0XI (activate for live) |\n| Beta | Test | Same sandbox |\n\n## Key Files\n\n- PayEz-Core/AKS/configmaps/idealresume-config.yaml — publishable key + price IDs\n- PayEz-Core/AKS/secrets/idealresume-secrets.yaml — secret key + webhook secret\n- idealvibe.online/azure-pipelines.yml — build pipeline\n- idealvibe.online/Dockerfile — container build\n- idealvibe.online/app/checkout/components/CreditCardForm.tsx — Stripe Elements loader\n\n## Current Status\n\n- Test mode: Active. All price IDs are test IDs.\n- Live mode: Not yet activated. Placeholder values in secrets YAML.\n- Build-time issue: NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY is not passed as Docker build-arg. Next.js inlines it at build time — runtime ConfigMap changes do not affect it without a rebuild.\n`,
-        type: 'stripe',
-        version: '1.0',
-      },
-      {
-        title: 'Stripe Configuration Reference',
-        content_md: `# Stripe Configuration Reference\n\n## AKS ConfigMap — idealresume-config\n\n| Key | Current Value | Type |\n|---|---|---|\n| NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY | pk_test_51SUtxaLZTjUNa0XI... | Build-time |\n| STRIPE_PRICE_PREMIUM | price_1ScMiKANFKV4tLacE1XStJSA | Runtime |\n| STRIPE_PRICE_PREMIUM_ANNUAL | price_1ScMiKANFKV4tLacCuBbUuyH | Runtime |\n| STRIPE_PRICE_ULTIMATE | price_1ScMnqANFKV4tLacxwa8MeLd | Runtime |\n| STRIPE_PRICE_ULTIMATE_ANNUAL | price_1ScMnqANFKV4tLac3E7sCRH1 | Runtime |\n\nBuild-time warning: NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY is inlined by Next.js at docker build time. Changing it in the ConfigMap without a rebuild has no effect.\n\n## AKS Secrets — idealresume-secrets\n\n| Key | Current Value | Notes |\n|---|---|---|\n| STRIPE_SECRET_KEY | sk_live_your_stripe_secret_key_here | PLACEHOLDER |\n| STRIPE_WEBHOOK_SECRET | whsec_your_webhook_secret_here | PLACEHOLDER |\n\n## Tier-to-Price Mapping\n\n| Tier | Credits/Month | ConfigMap Key |\n|---|---|---|\n| Premium Monthly | 30 | STRIPE_PRICE_PREMIUM |\n| Premium Annual | 30 | STRIPE_PRICE_PREMIUM_ANNUAL |\n| Ultimate Monthly | 100 | STRIPE_PRICE_ULTIMATE |\n| Ultimate Annual | 100 | STRIPE_PRICE_ULTIMATE_ANNUAL |\n| Enterprise Monthly | 500 | PLACEHOLDER |\n\n## Known Placeholders\n\n1. STRIPE_PRICE_ENTERPRISE — no real price ID exists yet.\n2. STRIPE_SECRET_KEY in secrets YAML — placeholder.\n3. STRIPE_WEBHOOK_SECRET in secrets YAML — placeholder.\n`,
-        type: 'stripe',
-        version: '1.0',
-      },
-      {
-        title: 'Stripe Testing Checklist',
-        content_md: `# Stripe Testing Checklist\n\nRun this before any production release.\n\n## Pre-Test Setup\n\n- [ ] Stripe test API key configured (sk_test_...)\n- [ ] Stripe webhook secret configured (whsec_...)\n- [ ] Stripe CLI installed for local webhook forwarding\n- [ ] Test products/prices created in Stripe dashboard\n- [ ] Database migrations applied (tier_configurations, stripe_webhook_events)\n\n## Checkout Flow\n\n- [ ] Unauthenticated user redirected to login before checkout\n- [ ] Premium monthly checkout creates session and redirects to Stripe\n- [ ] Premium annual checkout works\n- [ ] Ultimate monthly checkout works\n- [ ] Ultimate annual checkout works\n- [ ] Success redirect lands on /payment/success\n- [ ] Cancel redirect returns to /pricing\n- [ ] Stripe test card 4242424242424242 processes successfully\n\n## Webhook Processing\n\n- [ ] checkout.session.completed -> credits allocated\n- [ ] customer.subscription.created -> tier updated\n- [ ] customer.subscription.updated -> tier changes reflected\n- [ ] customer.subscription.deleted -> free tier downgrade\n- [ ] payment_intent.payment_failed -> logged in /admin/billing-issues\n- [ ] Duplicate webhooks idempotent (same event_id ignored)\n- [ ] Invalid webhook signature returns 400\n\n## Credit Allocation\n\n- [ ] Premium: 30 credits\n- [ ] Ultimate: 100 credits\n- [ ] Enterprise: 500 credits\n- [ ] No double-allocation on duplicate webhooks\n\n## Edge Cases\n\n- [ ] Expired card handling\n- [ ] User with no Stripe customer ID attempts checkout\n- [ ] Webhook received before checkout session completed\n- [ ] Multiple rapid webhook deliveries (idempotency)\n- [ ] Stripe API timeout during checkout session creation\n`,
-        type: 'stripe',
-        version: '1.0',
-      },
-      {
-        title: 'Stripe Live Mode Checklist',
-        content_md: `# Stripe Live Mode Checklist\n\nSwitching IdealResume from Stripe test/sandbox to production.\n\n> Account: Current sandbox is acct_1SUtxaLZTjUNa0XI. You need a live Stripe account.\n\n## Step 1 — Stripe Dashboard Setup\n\n- [ ] Activate live mode on Stripe account\n- [ ] Create live Products for each plan (Premium Monthly/Annual, Ultimate Monthly/Annual, Enterprise Monthly)\n- [ ] Copy live Price IDs from Stripe Dashboard\n\n## Step 2 — Update AKS Secrets\n\nFile: PayEz-Core/AKS/secrets/idealresume-secrets.yaml\n\nSTRIPE_SECRET_KEY: sk_live_...\nSTRIPE_WEBHOOK_SECRET: whsec_...\n\nApply: kubectl apply -f PayEz-Core/AKS/secrets/idealresume-secrets.yaml\n\n## Step 3 — Update AKS ConfigMap\n\nFile: PayEz-Core/AKS/configmaps/idealresume-config.yaml\n\nNEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: pk_live_...\nSTRIPE_PRICE_PREMIUM: price_live_...\nSTRIPE_PRICE_PREMIUM_ANNUAL: price_live_...\nSTRIPE_PRICE_ULTIMATE: price_live_...\nSTRIPE_PRICE_ULTIMATE_ANNUAL: price_live_...\n\nApply: kubectl apply -f PayEz-Core/AKS/configmaps/idealresume-config.yaml\n\n## Step 4 — Build-Time Fix (Critical)\n\nNEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY is inlined by Next.js at build time. Current Dockerfile and azure-pipelines.yml do NOT pass it as a build arg.\n\n### Option A — Add build arg to pipeline (recommended)\n\nUpdate idealvibe.online/azure-pipelines.yml:\n  docker build --build-arg NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=$(STRIPE_PUBLISHABLE_KEY) ...\n\nUpdate idealvibe.online/Dockerfile:\n  ARG NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY\n  ENV NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=$NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY\n\nAdd pipeline variable STRIPE_PUBLISHABLE_KEY in Azure DevOps.\n\n### Option B — Update .env.production\n\nChange idealvibe.online/.env.production: NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_live_...\nCommit, push, rebuild. Less secure — live key in git.\n\n## Step 5 — Live Webhook Endpoint\n\nIn Stripe Dashboard:\n- [ ] Create webhook endpoint: https://idealresume.online/api/stripe/webhook\n- [ ] Subscribe to events: checkout.session.completed, customer.subscription.*, charge.refunded, payment_intent.*, invoice.payment_succeeded\n- [ ] Copy signing secret to STRIPE_WEBHOOK_SECRET\n\n## Step 6 — Deploy\n\nkubectl rollout restart deployment/idealresume -n external-services\n\n## Step 7 — Post-Deploy Validation\n\n- [ ] Run testing-checklist with a real card\n- [ ] Verify webhook events process correctly\n- [ ] Check /admin/billing-issues for failures\n- [ ] Confirm credits allocate correctly\n\n## Rollback Plan\n\n1. Revert secrets to test keys\n2. Revert configmap to test price IDs\n3. Rebuild with test publishable key (if build-time was changed)\n4. kubectl rollout restart deployment/idealresume\n`,
-        type: 'stripe',
-        version: '1.0',
-      },
-    ];
-    for (const doc of stripeDocs) {
-      const id = this._nextDocumentId++;
-      this._documents.set(id, {
-        id,
-        title: doc.title,
-        content_md: doc.content_md,
-        type: doc.type,
-        version: doc.version,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    }
+    // Documents loaded per-project from VibeSQL (vibe.documents).
+    // No hardcoded seeds — every project sees only its own docs.
 
     // Kanban tasks now VibeSQL-backed (vibe.kanban_tasks)
     // Phase 1 in-memory _tasks Map removed 2026-05-06
