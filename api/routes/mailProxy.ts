@@ -175,6 +175,28 @@ export default function mailProxyRoutes(
         console.warn(`[mailProxy] GET /inbox/${req.params.agent}: no current_project_id in cache — forwarding without project filter`);
       }
       const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', query);
+
+      // TEMP-SHIM(agent-identity-overhaul): the cloud agent registry is mid-rebuild.
+      // Inbox identity resolves over (vibe_agents/agent_profiles ∪
+      // vibe_projects.team_agent_instances) BY NAME, so known-broken seed data makes
+      // some roster agents 404 (name no longer resolves) or 403 (owned by another
+      // user / not shared). That's a DATA problem being fixed in the idealvibe
+      // teams/agents/projects overhaul, not a transport error — so for the read-only
+      // inbox POLL we downgrade those two statuses to an empty inbox instead of
+      // spamming the cockpit. NOT a silent soften: the real upstream status is logged
+      // every poll. 401 (auth) and real failures (5xx/502) still pass through.
+      // Remove this whole block when the overhaul lands. grep: TEMP-SHIM(agent-identity-overhaul)
+      if (result.status === 403 || result.status === 404) {
+        const upstreamErr = (result.data as any)?.error;
+        console.warn(
+          `[mailProxy] TEMP-SHIM inbox/${req.params.agent}: upstream ${result.status} ` +
+          `(${upstreamErr?.code ?? '?'}: ${upstreamErr?.message ?? 'n/a'}) — returning empty inbox ` +
+          `until agent-identity overhaul lands`,
+        );
+        res.status(200).json({ success: true, data: { messages: [], unread_count: 0 } });
+        return;
+      }
+
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_inbox');
@@ -190,6 +212,23 @@ export default function mailProxyRoutes(
         query.project_id = projectId;
       }
       const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', query);
+
+      // Strip experimental ActionPanel fields that never shipped (BAPert 1369).
+      // The actions array was an adopted spec that didn't get functional UI
+      // support; agents see them in JSON but can't execute them. Remove so
+      // clients don't display broken action hints.
+      const data = result.data as any;
+      if (data && typeof data === 'object') {
+        if (data.data && typeof data.data === 'object') {
+          delete data.data.actions;
+          delete data.data.suggested;
+          delete data.data.context;
+        }
+        delete data.actions;
+        delete data.suggested;
+        delete data.context;
+      }
+
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_read');

@@ -242,8 +242,28 @@ export class SessionManager {
   // 500-ing on load. Returns an empty list until real VibeSQL wiring lands.
   // -----------------------------------------------------------------------
 
-  async listDocuments() {
-    return Array.from(this._documents.values());
+  async createDocument(fields) {
+    const id = this._nextDocumentId++;
+    const doc = {
+      id,
+      project_id: fields.project_id ?? null,
+      title: fields.title ?? '',
+      content_md: fields.content_md ?? '',
+      type: fields.type ?? 'reference',
+      version: fields.version ?? '1.0',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this._documents.set(id, doc);
+    return doc;
+  }
+
+  async listDocuments(filter = {}) {
+    let docs = Array.from(this._documents.values());
+    if (filter.project_id !== undefined) {
+      docs = docs.filter(d => d.project_id === filter.project_id);
+    }
+    return docs;
   }
 
   async getDocument(id) {
@@ -257,6 +277,7 @@ export class SessionManager {
     if (!existing) return null;
     const next = {
       ...existing,
+      ...(updates.project_id !== undefined ? { project_id: updates.project_id } : {}),
       ...(updates.title !== undefined ? { title: updates.title } : {}),
       ...(updates.content_md !== undefined ? { content_md: updates.content_md } : {}),
       ...(updates.document_type !== undefined ? { type: updates.document_type } : {}),
@@ -546,7 +567,8 @@ export class SessionManager {
       setActiveProjectId: (id) => self.setActiveProjectId(id),
       createProject: (data) => self.createProject(data),
       // Agent documents — forwards to the in-memory Phase 1 stub above.
-      listDocuments: () => self.listDocuments(),
+      createDocument: (fields) => self.createDocument(fields),
+      listDocuments: (filter) => self.listDocuments(filter),
       getDocument: (id) => self.getDocument(id),
       updateDocument: (id, updates) => self.updateDocument(id, updates),
       deleteDocument: (id) => self.deleteDocument(id),
