@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import { config } from '../../config.js';
-import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, requireTokenClientId } from '../auth/tokenManager.js';
 
 import { fileURLToPath } from 'url';
 import * as path from 'path';
@@ -30,10 +30,12 @@ let nameToIdCachePopulatedAt = 0;
 const NAME_TO_ID_TTL_MS = 5 * 60 * 1000; // 5 min — refresh occasionally so new agents resolve
 
 // Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
+// X-Client-Id mirrors the bearer's own client_id (the user's tenant), not the
+// retired hardcoded idealvibe client — see requireTokenClientId.
 function buildCloudAuthHeaders(token: string): Record<string, string> {
   return {
     'Authorization': `Bearer ${token}`,
-    'X-Client-Id': String(config.vibeIdealVibeClientNum),
+    'X-Client-Id': requireTokenClientId(token),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };

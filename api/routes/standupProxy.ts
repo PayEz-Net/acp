@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { error } from '../response.js';
 import type { Config } from '../../config.js';
-import { ensureValidToken, forceRefresh } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, requireTokenClientId } from '../auth/tokenManager.js';
 
 /**
  * Standup (Team Check-in) proxy — #66 W1, contract step 4.
@@ -31,10 +31,12 @@ class NotAuthenticatedError extends Error {
   }
 }
 
-function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
+// X-Client-Id mirrors the bearer's own client_id (the user's tenant), not the
+// retired hardcoded idealvibe client — see requireTokenClientId.
+function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
   return {
     'Authorization': `Bearer ${token}`,
-    'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
+    'X-Client-Id': requireTokenClientId(token),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };

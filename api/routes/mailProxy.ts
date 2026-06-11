@@ -3,7 +3,7 @@ import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
-import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
@@ -18,10 +18,13 @@ export class NotAuthenticatedError extends Error {
 
 // Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build). The
 // cloud accepts a validated IDP Bearer with a client_id claim in lieu of HMAC.
-function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
+// X-Client-Id mirrors the BEARER'S OWN client_id (the user's tenant), not a
+// build-time constant — see requireTokenClientId. The old hardcoded idealvibe
+// client (9) 401'd every beta tenant (e.g. 46) at the Vibe admin gate.
+function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
   return {
     'Authorization': `Bearer ${token}`,
-    'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
+    'X-Client-Id': requireTokenClientId(token),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };

@@ -63,12 +63,13 @@ export const config = {
   vibeClientId: (process.env.ENABLE_CONTRACTORS === 'true' || process.env.VIBE_AUTH_MODE === 'hmac')
     ? required('VIBE_CLIENT_ID')
     : (process.env.VIBE_CLIENT_ID || ''),
-  // Non-secret NUMERIC IdealVibe tenant id (cloud's authoritative
-  // enumeration: 2 PayEz API, 8 Ideal Resume Online, 9 Ideal Vibe - Online).
-  // ACP IS the IdealVibe product => 9. Single explicit baked source for the
-  // bearer X-Client-Id header (NOT the vibe_ HMAC string above; NO env/||
-  // fallback — C1).
-  vibeIdealVibeClientNum: 9,
+  // RETIRED 2026-06-11: the bearer X-Client-Id is no longer a baked constant.
+  // The old "ACP IS IdealVibe => everyone is tenant 9" assumption broke once
+  // beta vibe coders began getting full enterprise setups (own identity + own
+  // VibeSQL = their own tenant, e.g. 46). X-Client-Id now mirrors the BEARER'S
+  // OWN client_id claim at each call site (auth/tokenManager.requireTokenClientId),
+  // so the Vibe admin gate's own-tenant resolution matches. Field deleted to kill
+  // the hydra — do NOT reintroduce a constant tenant id here.
   // Required when the machine path is active (contractors sign HMAC unconditionally;
   // hmac mode signs everywhere). User-session bearer build needs none.
   vibeHmacKey: (process.env.VIBE_AUTH_MODE === 'hmac' || process.env.ENABLE_CONTRACTORS === 'true')

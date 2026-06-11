@@ -141,6 +141,42 @@ function decodeJwtExp(token: string): Date | null {
   }
 }
 
+/**
+ * Resolve the tenant `X-Client-Id` to send upstream FROM THE BEARER ITSELF.
+ *
+ * Decision-C is "the validated IDP Bearer's client_id claim governs the tenant"
+ * — so the X-Client-Id header MUST mirror the token's own `client_id`, not a
+ * build-time constant. The old hardcoded `vibeIdealVibeClientNum: 9` forced
+ * EVERY request onto the idealvibe tenant (IDP client 9); a user whose token is
+ * signed for a different client (e.g. the vibe-agents beta client 46) then fails
+ * the Vibe admin gate's own-tenant resolution — VibeJwtMiddleware's §4
+ * claim-first bypass requires `X-Client-Id == signed client_id`, so a mismatch
+ * drops them to the site-admin gate of a tenant they aren't admin of → 401
+ * NO_ADMIN_ACCESS. Mirroring the claim makes the bypass fire off the token's
+ * own tenant-admin roles, no per-user is_site_admin grant required.
+ *
+ * NO FALLBACK: a token with no `client_id` claim is malformed — we throw rather
+ * than silently substituting a wrong tenant (a default-to-9 here is exactly the
+ * bug this replaces). Callers surface it as an upstream/proxy error.
+ */
+export function requireTokenClientId(token: string): string {
+  const parts = token.split('.');
+  if (parts.length === 3) {
+    try {
+      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+      const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+      const cid = payload?.client_id;
+      if (cid !== undefined && cid !== null && String(cid).trim() !== '') {
+        return String(cid);
+      }
+    } catch {
+      /* fall through to the explicit throw below */
+    }
+  }
+  throw new Error('Bearer token missing client_id claim — cannot resolve tenant for X-Client-Id');
+}
+
 // The IDP mints refresh tokens bound to the login-time context, carried in a
 // `binding_data` claim shaped: v1|<ip>|<device>|<user-agent>|<client>. On
 // refresh the IDP recomputes the binding from the REQUEST's UA / device /

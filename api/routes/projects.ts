@@ -40,7 +40,7 @@ import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
-import { ensureValidToken, forceRefresh, getSession } from '../auth/tokenManager.js';
+import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 
 import {
   extractAndMapList,
@@ -66,10 +66,12 @@ class NotAuthenticatedError extends Error {
 }
 
 // Decision-C: Bearer-only (no Vibe HMAC secret in the user-session build).
-function buildAuthHeaders(cfg: Config, token: string): Record<string, string> {
+// X-Client-Id mirrors the bearer's own client_id (the user's tenant), not the
+// retired hardcoded idealvibe client — see requireTokenClientId.
+function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
   return {
     'Authorization': `Bearer ${token}`,
-    'X-Client-Id': String(cfg.vibeIdealVibeClientNum),
+    'X-Client-Id': requireTokenClientId(token),
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };

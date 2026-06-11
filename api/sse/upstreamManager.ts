@@ -1,5 +1,5 @@
 import type { Config } from '../../config.js';
-import { ensureValidToken } from '../auth/tokenManager.js';
+import { ensureValidToken, requireTokenClientId } from '../auth/tokenManager.js';
 
 
 export type AgentSseState = 'connected' | 'reconnecting' | 'failed' | 'stopped';
@@ -113,7 +113,9 @@ export class UpstreamSseManager {
     }
     return {
       'Authorization': `Bearer ${token}`,
-      'X-Client-Id': String(this.cfg.vibeIdealVibeClientNum),
+      // X-Client-Id mirrors the bearer's own client_id (the user's tenant), not
+      // the retired hardcoded idealvibe client — see requireTokenClientId.
+      'X-Client-Id': requireTokenClientId(token),
       'X-Vibe-Via': 'idp-proxy',
     };
   }
