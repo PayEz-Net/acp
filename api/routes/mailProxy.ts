@@ -206,6 +206,101 @@ export default function mailProxyRoutes(
     }
   });
 
+  // GET /v1/mail/inboxes?agents=a,b,c -> ONE response carrying every agent's inbox.
+  // P0 (Jon 2026-06-13): the renderer's fetchAllInboxes did Promise.all(agents.map(GET /inbox/:agent)),
+  // an N-request CLIENT fan-out fired by 5 stacking triggers (poll/focus/mount/every-SSE-event/post-read)
+  // that burst past the acp-api rate limiter -> 429 -> EVERY inbox failed at once -> team comms lockup.
+  // This collapses the client to a SINGLE request; the sidecar fans out to the cloud with BOUNDED
+  // concurrency (gentle upstream). Per-agent failures are ISOLATED — one agent's 4xx/5xx/timeout is
+  // recorded against that agent and never drops the others or fails the batch (QA 6751 axis-2:
+  // "returns EVERY inbox the x5 fan-out did, no agent lost"). Same project_id stamping + the same
+  // TEMP-SHIM(agent-identity-overhaul) 403/404->empty downgrade as GET /inbox/:agent, applied per agent.
+  // Response: { success, data: { inboxes: { [agent]: { messages, unread_count, error? } } } }.
+  router.get('/inboxes', async (req: Request, res: Response) => {
+    try {
+      const raw = (req.query.agents as string | undefined) ?? '';
+      const requested = raw.split(',').map((a) => a.trim()).filter((a) => a.length > 0);
+      if (requested.length === 0) {
+        res.status(400).json(
+          error('VALIDATION_ERROR', 'agents query param is required (comma-separated agent names)', 'mail_inboxes', (req as any).requestId)
+        );
+        return;
+      }
+      // De-dupe so a roster with repeats can't multiply the upstream calls.
+      const agents = [...new Set(requested)];
+
+      const projectId = resolveCurrentProjectId();
+      const baseQuery: Record<string, any> = { ...(req.query as Record<string, any>) };
+      delete baseQuery.agents;                       // the agent list is ours, not an upstream inbox param
+      if (projectId != null) {
+        baseQuery.project_id = projectId;
+      } else {
+        console.warn('[mailProxy] GET /inboxes: no current_project_id in cache — forwarding without project filter');
+      }
+
+      type InboxEntry = { messages: unknown[]; unread_count: number; error?: { code: string; message: string } };
+      const inboxes: Record<string, InboxEntry> = {};
+
+      // Bounded-concurrency worker pool (NOT Promise.all of N) — predictable, gentle upstream.
+      const CONCURRENCY = 4;
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        while (cursor < agents.length) {
+          const agent = agents[cursor++];
+          try {
+            const result = await proxyToCloud(cfg, `/inbox/${encodeURIComponent(agent)}`, 'GET', baseQuery);
+
+            // TEMP-SHIM(agent-identity-overhaul): identical to GET /inbox/:agent — a 403/404 from the
+            // mid-rebuild cloud agent registry is a DATA problem, not transport; downgrade to empty inbox
+            // (real status logged). Remove with the single-route shim. grep: TEMP-SHIM(agent-identity-overhaul)
+            if (result.status === 403 || result.status === 404) {
+              const upstreamErr = (result.data as any)?.error;
+              console.warn(
+                `[mailProxy] TEMP-SHIM inboxes/${agent}: upstream ${result.status} ` +
+                `(${upstreamErr?.code ?? '?'}: ${upstreamErr?.message ?? 'n/a'}) — returning empty inbox`,
+              );
+              inboxes[agent] = { messages: [], unread_count: 0 };
+              continue;
+            }
+
+            if (result.status >= 200 && result.status < 300) {
+              const data = (result.data as any)?.data ?? {};
+              inboxes[agent] = {
+                messages: Array.isArray(data.messages) ? data.messages : [],
+                unread_count: typeof data.unread_count === 'number' ? data.unread_count : 0,
+              };
+            } else {
+              // Per-agent failure — record it, keep the batch (no agent lost).
+              const upstreamErr = (result.data as any)?.error;
+              inboxes[agent] = {
+                messages: [],
+                unread_count: 0,
+                error: {
+                  code: upstreamErr?.code ?? `UPSTREAM_${result.status}`,
+                  message: upstreamErr?.message ?? `Upstream HTTP ${result.status}`,
+                },
+              };
+            }
+          } catch (e: any) {
+            // A dead session is whole-request fatal (consistent with the single inbox route); let it bubble.
+            if (e instanceof NotAuthenticatedError) throw e;
+            inboxes[agent] = {
+              messages: [],
+              unread_count: 0,
+              error: { code: 'PROXY_ERROR', message: e?.name === 'AbortError' ? 'Upstream timeout (10s)' : (e?.message ?? 'proxy error') },
+            };
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, agents.length) }, () => worker()));
+
+      res.status(200).json({ success: true, data: { inboxes } });
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'mail_inboxes');
+    }
+  });
+
   // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
   router.get('/messages/:message_id', async (req: Request, res: Response) => {
     try {
