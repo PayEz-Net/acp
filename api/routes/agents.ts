@@ -7,8 +7,14 @@ import { fileURLToPath } from 'url';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const VIBESQL_URL = process.env.VIBESQL_URL || 'http://10.0.0.93:52411';
-const VIBESQL_SECRET = process.env.VIBESQL_SECRET || 'ContainersSuperDevSecret';
+// Decision-C / no-unjustified-fallback: NO dev-box default in a public build (the off-LAN
+// Praveen-class hazard + the SOURCE==ARTIFACT residue gate scans for these literals). null
+// when unset -> queryVibeSql hard-fails with a surfaced error. The day-one read path (profile
+// lookup) already CLOUD-resolves via cloudFetch; the remaining raw queryVibeSql callers here
+// are catalog-admin ops (client_id=0 global library: startup-config/activation/hire/delete/
+// startup-order/capabilities/safety-rules/skills) — NOT on Praveen's per-tenant day-one path.
+const VIBESQL_URL = process.env.VIBESQL_URL || null;
+const VIBESQL_SECRET = process.env.VIBESQL_SECRET || null;
 const PROFILE_PROXY_TIMEOUT_MS = 10_000;
 
 // ─── Cloud profile proxy ───────────────────────────────────────────────────
@@ -198,6 +204,11 @@ function rowToCamel(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 async function queryVibeSql(sql: string): Promise<{ success: boolean; data?: any[]; rowCount?: number; error?: any }> {
+  if (!VIBESQL_URL || !VIBESQL_SECRET) {
+    // Surface + halt — never silently fall back to the dev box (Decision-C). Raw /v1/query is
+    // dev-only; a public install must not reach it. Day-one reads go through cloudFetch instead.
+    throw new Error('VIBESQL_URL / VIBESQL_SECRET not configured — raw VibeSQL is dev-only and is not available in this build. Use the cloud typed API.');
+  }
   const res = await fetch(`${VIBESQL_URL}/v1/query`, {
     method: 'POST',
     headers: {
