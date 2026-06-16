@@ -88,6 +88,29 @@ async function cloudFetch(
   return attempt;
 }
 
+// Proxy an agent management route to its existing cloud endpoint over the Bearer lane
+// (DnP 7300 map — the cloud paths mirror these routes 1:1). Replaces the raw dev-box
+// queryVibeSql so the route works OFF-LAN. NO_SESSION -> 401; cloud-unreachable -> 503
+// (honest surface, never a silent dev-box dial). The cloud {success,data} envelope passes
+// straight through (same shape the existing acp-api success() envelope produced).
+async function proxyAgentCloud(
+  req: Request,
+  res: Response,
+  op: string,
+  method: string,
+  cloudPath: string,
+  body?: unknown,
+): Promise<void> {
+  const result = await cloudFetch(cloudPath, { method, body });
+  if ('error' in result) {
+    const status = result.error === 'NO_SESSION' ? 401 : 503;
+    const code = result.error === 'NO_SESSION' ? 'NO_SESSION' : 'UPSTREAM_UNAVAILABLE';
+    res.status(status).json(error(code, `Cloud agent endpoint unreachable (${result.error})`, op, (req as any).requestId));
+    return;
+  }
+  res.status(result.status).json(result.body);
+}
+
 async function resolveAgentNameToId(name: string): Promise<number | null> {
   const cached = nameToIdCache.get(name);
   if (cached !== undefined && Date.now() - nameToIdCachePopulatedAt < NAME_TO_ID_TTL_MS) {
@@ -271,34 +294,8 @@ export default function agentRoutes(_storage: any): Router {
   //
   router.get('/startup-config', async (req: Request, res: Response) => {
     try {
-      const sql = `SELECT
-        (data->>'id')::int AS id,
-        data->>'slug' AS name,
-        data->>'name' AS display_name,
-        data->>'description' AS description,
-        data->>'role_preset' AS role,
-        data->>'model_hint' AS model,
-        data->>'expertise_tags' AS expertise_json,
-        data->>'identity_prompt' AS base_prompt,
-        COALESCE((data->>'is_active')::boolean, true) AS is_active,
-        COALESCE((data->>'is_canonical')::boolean, false) AS is_canonical,
-        COALESCE((data->>'is_coordinator')::boolean, false) AS is_coordinator,
-        COALESCE((data->>'is_shared')::boolean, false) AS is_shared,
-        COALESCE((data->>'startup_order')::int, 0) AS startup_order
-      FROM vibe.documents
-      WHERE client_id = 0
-        AND collection = 'vibe_agents'
-        AND table_name = 'agent_profiles'
-        AND COALESCE((data->>'is_active')::boolean, true) = true
-        AND data->>'deleted_at' IS NULL
-      ORDER BY COALESCE((data->>'startup_order')::int, 0) ASC, data->>'name' ASC`;
-      const vsql = await queryVibeSql(sql);
-      if (!vsql.success) {
-        res.status(500).json(error('INTERNAL_ERROR', vsql.error?.message || 'VibeSQL query failed', 'agent_startup_config', (req as any).requestId));
-        return;
-      }
-      const agents = (vsql.data || []).map(rowToCamel);
-      res.json(success({ agents, active_count: agents.length }, 'agent_startup_config', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): GET /v1/agents/startup-config — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_startup_config', 'GET', '/v1/agents/startup-config');
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_startup_config', (req as any).requestId));
     }
@@ -319,34 +316,17 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const patchObj: Record<string, any> = {};
-      patchObj.is_active = is_active;
+      const body: Record<string, unknown> = { is_active };
       if (startup_order !== undefined) {
         const order = parseInt(startup_order, 10);
         if (isNaN(order) || order < 0) {
           res.status(400).json(error('VALIDATION_ERROR', 'startup_order must be a non-negative integer', 'agent_activation', (req as any).requestId));
           return;
         }
-        patchObj.startup_order = order;
+        body.startup_order = order;
       }
-      const patchJson = escapeJsonb(patchObj);
-
-      const sql = `UPDATE vibe.documents SET data = data || ${patchJson}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
-      const vsql = await queryVibeSql(sql);
-      if (!vsql.success || !vsql.data?.length) {
-        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_activation', (req as any).requestId));
-        return;
-      }
-      const rowData = vsql.data[0];
-      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-      res.json(success({
-        id: data.id ?? rowData.document_id,
-        name: data.name,
-        displayName: data.display_name,
-        isActive: data.is_active,
-        startupOrder: data.startup_order,
-        updatedAt: new Date().toISOString(),
-      }, 'agent_activation', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): PATCH /v1/agents/{id}/activation — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_activation', 'PATCH', `/v1/agents/${id}/activation`, body);
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_activation', (req as any).requestId));
     }
@@ -361,16 +341,8 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const check = await queryVibeSql(`SELECT document_id, data FROM vibe.documents WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL`);
-      if (!check.success || !check.data?.length) {
-        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_delete', (req as any).requestId));
-        return;
-      }
-      const rowData = check.data[0];
-      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-
-      await queryVibeSql(`UPDATE vibe.documents SET deleted_at = NOW(), updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))}`);
-      res.json(success({ id, name: data.name, deleted: true }, 'agent_delete', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): DELETE /v1/agents/{id} — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_delete', 'DELETE', `/v1/agents/${id}`);
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_delete', (req as any).requestId));
     }
@@ -379,112 +351,23 @@ export default function agentRoutes(_storage: any): Router {
   // POST /v1/agents/hire
   router.post('/hire', async (req: Request, res: Response) => {
     try {
-      const { name, display_name, template_name, is_active, role, description } = req.body || {};
+      const { name, display_name, is_active, role, description } = req.body || {};
 
       if (!name || typeof name !== 'string' || name.trim().length === 0) {
         res.status(400).json(error('VALIDATION_ERROR', 'name is required', 'agent_hire', (req as any).requestId));
         return;
       }
-      const trimmedName = name.trim();
-
-      // Check if name already exists in the canonical docstore
-      const existing = await queryVibeSql(
-        `SELECT document_id FROM vibe.documents
-         WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles'
-           AND data->>'name' = ${escapeSql(trimmedName)} AND deleted_at IS NULL`
-      );
-      if (existing.success && existing.data?.length) {
-        res.status(409).json(error('CONFLICT', 'Agent with that name already exists', 'agent_hire', (req as any).requestId));
-        return;
-      }
-
-      // Template lookup is optional; if provided and not found, we just use body fields
-      let templateData: any = {};
-      if (template_name) {
-        const pool = await queryVibeSql(
-          // #127 WIDEN (zero-window migration step 1/3): accept BOTH client_id 0 AND 8
-          // while DNP moves the 18 contractor_pool docs 8->0. Never an empty shelf.
-          // NARROW to client_id=0 only after the data move + QA verify (step 3).
-          `SELECT data FROM vibe.documents WHERE client_id IN (0, 8) AND collection = 'vibe_agents' AND table_name = 'contractor_pool' ORDER BY data->>'name'`
-        );
-        if (pool.success && pool.data) {
-          const match = pool.data.find((r: any) => {
-            const d = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
-            return d?.name === template_name;
-          });
-          if (match) {
-            const d = typeof match.data === 'string' ? JSON.parse(match.data) : match.data;
-            templateData = {
-              displayName: d.display_name || d.name,
-              role: d.description || null,
-              model: d.model || null,
-              expertiseJson: d.tools_json || {},
-            };
-          }
-        }
-      }
-
-      // #129: allocate the next agent id from a race-free GLOBAL sequence.
-      // The id space is GLOBAL across tenants (NOT per-client): client_id=0 holds 100-260,
-      // client_id=9 continues 261+ as ONE sequence, so allocation must be globally unique. The
-      // former `SELECT COALESCE(MAX((data->>'id')::int),0)+1` was a non-reserving read — two
-      // concurrent creates both see the same MAX and mint the same id. nextval() reserves
-      // atomically, so
-      // concurrent callers always get distinct values. vibe.agent_profiles_doc_id_seq was seeded
-      // to the current global MAX, so it continues the space (264+) and never restarts into the
-      // existing range. (Global, unscoped allocation is correct here — #124 verified domain.)
-      const nextIdResult = await queryVibeSql(
-        `SELECT nextval('vibe.agent_profiles_doc_id_seq')::int AS next_id`
-      );
-      if (!nextIdResult.success || !nextIdResult.data?.length) {
-        // #129: never fabricate an id — the old `?? 1` fallback would collide with existing
-        // agents. If allocation fails, fail loud and let the caller retry.
-        res.status(500).json(error('INTERNAL_ERROR', nextIdResult.error?.message || 'Agent id allocation failed', 'agent_hire', (req as any).requestId));
-        return;
-      }
-      const nextId = nextIdResult.data[0].next_id;
-
-      const agentJson = escapeJsonb({
-        id: nextId,
-        name: trimmedName,
-        display_name: display_name || templateData.displayName || trimmedName,
-        role: role || description || templateData.role || null,
-        model: templateData.model || null,
-        agent_type: is_active ? 'team' : 'contractor',
+      // Cloud-proxied (DnP 7303): POST /v1/agents IS the renamed /hire (live prod) — it owns
+      // dup-name check + race-free id allocation + the doc insert server-side. The legacy
+      // template_name / contractor_pool lookup was DROPPED per spec (won't resurrect), so we
+      // forward a clean create body; the dev-box raw INSERT is gone.
+      const body = {
+        name: name.trim(),
+        display_name: display_name || name.trim(),
+        role: role || description || null,
         is_active: is_active !== undefined ? is_active : false,
-        is_shared: false,
-        program: 'claude-code',
-        expertise_tags: templateData.expertiseJson || [],
-        capabilities: {},
-        safety_rules: [],
-        identity_prompt: `I am ${trimmedName}, a specialist agent.`,
-        created_at: new Date().toISOString(),
-      });
-
-      const insert = await queryVibeSql(
-        `INSERT INTO vibe.documents (client_id, user_id, collection, table_name, data, created_at, created_by)
-         VALUES (0, NULL, 'vibe_agents', 'agent_profiles', ${agentJson}, CURRENT_TIMESTAMP, 0)
-         RETURNING document_id, data`
-      );
-      if (!insert.success || !insert.data?.length) {
-        res.status(500).json(error('INTERNAL_ERROR', insert.error?.message || 'Insert failed', 'agent_hire', (req as any).requestId));
-        return;
-      }
-      const rowData = insert.data[0];
-      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-      res.status(201).json(success({
-        id: data.id ?? rowData.document_id,
-        name: data.name,
-        displayName: data.display_name,
-        role: data.role,
-        model: data.model,
-        agentType: data.agent_type,
-        isActive: data.is_active,
-        isShared: data.is_shared,
-        program: data.program,
-        expertiseTags: data.expertise_tags,
-        createdAt: data.created_at,
-      }, 'agent_hire', (req as any).requestId));
+      };
+      await proxyAgentCloud(req, res, 'agent_hire', 'POST', '/v1/agents', body);
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_hire', (req as any).requestId));
     }
@@ -511,17 +394,8 @@ export default function agentRoutes(_storage: any): Router {
         }
       }
 
-      const updates = order.map((entry: any) => {
-        const patch = escapeJsonb({ startup_order: parseInt(entry.startup_order, 10) });
-        return `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(parseInt(entry.agent_id, 10)))} AND deleted_at IS NULL;`;
-      }).join('\n');
-
-      const vsql = await queryVibeSql(`DO $$ BEGIN ${updates} END $$`);
-      if (!vsql.success) {
-        res.status(500).json(error('INTERNAL_ERROR', vsql.error?.message || 'Startup order update failed', 'agent_startup_order', (req as any).requestId));
-        return;
-      }
-      res.json(success({ updated: order.length }, 'agent_startup_order', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): PUT /v1/agents/startup-order — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_startup_order', 'PUT', '/v1/agents/startup-order', { order });
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_startup_order', (req as any).requestId));
     }
@@ -541,22 +415,8 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const patch = escapeJsonb({ capabilities });
-      const sql = `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
-      const vsql = await queryVibeSql(sql);
-      if (!vsql.success || !vsql.data?.length) {
-        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_capabilities', (req as any).requestId));
-        return;
-      }
-      const rowData = vsql.data[0];
-      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-      res.json(success({
-        id: data.id ?? rowData.document_id,
-        name: data.name,
-        displayName: data.display_name,
-        capabilities: data.capabilities,
-        updatedAt: new Date().toISOString(),
-      }, 'agent_capabilities', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): PUT /v1/agents/{id}/capabilities — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_capabilities', 'PUT', `/v1/agents/${id}/capabilities`, { capabilities });
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_capabilities', (req as any).requestId));
     }
@@ -576,22 +436,8 @@ export default function agentRoutes(_storage: any): Router {
         return;
       }
 
-      const patch = escapeJsonb({ safety_rules });
-      const sql = `UPDATE vibe.documents SET data = data || ${patch}, updated_at = NOW() WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles' AND data->>'id' = ${escapeSql(String(id))} AND deleted_at IS NULL RETURNING document_id, data`;
-      const vsql = await queryVibeSql(sql);
-      if (!vsql.success || !vsql.data?.length) {
-        res.status(404).json(error('AGENT_NOT_FOUND', 'Agent not found', 'agent_safety_rules', (req as any).requestId));
-        return;
-      }
-      const rowData = vsql.data[0];
-      const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-      res.json(success({
-        id: data.id ?? rowData.document_id,
-        name: data.name,
-        displayName: data.display_name,
-        safetyRules: data.safety_rules,
-        updatedAt: new Date().toISOString(),
-      }, 'agent_safety_rules', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): PUT /v1/agents/{id}/safety-rules — was raw vsql to the dev box.
+      await proxyAgentCloud(req, res, 'agent_safety_rules', 'PUT', `/v1/agents/${id}/safety-rules`, { safety_rules });
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_safety_rules', (req as any).requestId));
     }
@@ -623,85 +469,16 @@ export default function agentRoutes(_storage: any): Router {
         derivedName = `${localPart}-project`;
       }
 
-      // Check for existing project in vibe_projects.projects (unified with frontend)
-      const existingProject = await queryVibeSql(
-        `SELECT id, name FROM vibe_projects.projects WHERE name = ${escapeSql(derivedName)} AND deleted_at IS NULL LIMIT 1`
-      );
-
-      let projectId: number;
-      let isNewlyCreated = false;
-
-      if (existingProject.success && existingProject.data?.length) {
-        projectId = existingProject.data[0].id;
-      } else {
-        const createProject = await queryVibeSql(
-          `INSERT INTO vibe_projects.projects (name, description, is_active, runtime_choice, client_id, created_by, updated_by)
-           VALUES (${escapeSql(derivedName)}, ${escapeSql('Auto-provisioned project')}, true, ${escapeSql(runtime_choice || 'kimi')}, ${escapeSql(clientId)}, ${escapeSql(userId)}, ${escapeSql(userId)})
-           RETURNING id`
-        );
-        if (!createProject.success || !createProject.data?.length) {
-          res.status(500).json(error('INTERNAL_ERROR', createProject.error?.message || 'Project creation failed', 'agent_init_project', (req as any).requestId));
-          return;
-        }
-        projectId = createProject.data[0].id;
-        isNewlyCreated = true;
-      }
-
-      // Ensure 2 default agents exist in vibe.documents (canonical docstore).
-      // Core team IDs are fixed (BAPert=2, QAPert=5) to match .NET AgentSchemaProvisioningService seed.
-      const defaultAgents = [
-        { name: 'BAPert', display_name: 'Business Analyst and Product Strategist', role: 'team-lead', id: 2 },
-        { name: 'QAPert', display_name: 'QA Analyst Specialist', role: 'qa-analyst', id: 5 },
-      ];
-
-      const agentsCreated: Array<{ id: number; name: string; display_name: string }> = [];
-      for (const agent of defaultAgents) {
-        const check = await queryVibeSql(
-          `SELECT document_id, data FROM vibe.documents
-           WHERE client_id = 0 AND collection = 'vibe_agents' AND table_name = 'agent_profiles'
-             AND data->>'name' = ${escapeSql(agent.name)} AND deleted_at IS NULL`
-        );
-        if (check.success && check.data?.length) {
-          const rowData = check.data[0];
-          const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-          agentsCreated.push({ id: data.id ?? rowData.document_id, name: data.name, display_name: data.display_name });
-        } else {
-          const agentJson = escapeJsonb({
-            id: agent.id,
-            name: agent.name,
-            display_name: agent.display_name,
-            role: agent.role,
-            agent_type: 'team',
-            is_active: true,
-            is_shared: true,
-            program: 'claude-code',
-            model: 'claude-sonnet-4-6',
-            expertise_tags: [],
-            identity_prompt: `I am ${agent.name}, ${agent.display_name}.`,
-            created_at: new Date().toISOString(),
-          });
-          const insert = await queryVibeSql(
-            `INSERT INTO vibe.documents (client_id, user_id, collection, table_name, data, created_at, created_by)
-             VALUES (0, NULL, 'vibe_agents', 'agent_profiles', ${agentJson}, CURRENT_TIMESTAMP, 0)
-             RETURNING document_id, data`
-          );
-          if (insert.success && insert.data?.length) {
-            const rowData = insert.data[0];
-            const data = typeof rowData.data === 'string' ? JSON.parse(rowData.data) : rowData.data;
-            agentsCreated.push({ id: data.id ?? rowData.document_id, name: data.name, display_name: data.display_name });
-          }
-        }
-      }
-
-      const payload = {
-        project_id: projectId,
-        project_name: derivedName,
-        agents_created: agentsCreated.length,
-        agents: agentsCreated.map(a => ({ id: a.id, name: a.name, display_name: a.display_name })),
-        isNewlyCreated,
-      };
-
-      res.status(isNewlyCreated ? 201 : 200).json(success(payload, 'agent_init_project', (req as any).requestId));
+      // Cloud-proxied (DnP 7300): POST /v1/projects (CreateProject) — was raw vsql across
+      // vibe_projects.projects + vibe.documents to the dev box. The cloud derives owner/client
+      // off the bearer and seeds the core team server-side (SeedTypeAwareForProjectAsync), so
+      // the local raw INSERT + the hand-rolled BAPert/QAPert seed are GONE (no dev-box, off-LAN).
+      void clientId; void userId; // identity validated above; cloud re-derives off the bearer
+      await proxyAgentCloud(req, res, 'agent_init_project', 'POST', '/v1/projects', {
+        name: derivedName,
+        description: 'Auto-provisioned project',
+        runtime_choice: runtime_choice || 'kimi',
+      });
     } catch (err: any) {
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_init_project', (req as any).requestId));
     }
