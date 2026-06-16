@@ -477,148 +477,178 @@ export class SessionManager {
     };
   }
 
+  // ── Off-LAN kanban migration (BAPert 7274 / DnP 7279 typed contracts) ────────────────
+  // General cloud typed-API call on the SAME Decision-C lane as the roster (Bearer +
+  // X-Client-Id from the bearer, no Vibe HMAC). Reaches config.vibeApiUrl
+  // (api.idealvibe.online) — NOT the dev box — so off-LAN (Praveen) works. THROWS on
+  // no-session / non-2xx / transport so the caller SURFACES it (never a silent empty or
+  // dev-box fallback — the exact lie we're removing).
+  async _cloudKanban(method, path, body) {
+    const token = await ensureValidToken(config.idpUrl, 'kanban');
+    if (!token) throw new Error(`kanban ${method} ${path}: NO_SESSION (log in first)`);
+    const url = `${config.vibeApiUrl}${path}`;
+    const doFetch = async (bearer) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ROSTER_FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: {
+            'Authorization': `Bearer ${bearer}`,
+            'X-Client-Id': requireTokenClientId(bearer),
+            'X-Vibe-Via': 'idp-proxy',
+            'Content-Type': 'application/json',
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        });
+        const text = await res.text();
+        let parsed = null;
+        try { parsed = text ? JSON.parse(text) : null; } catch { /* leave null */ }
+        return { status: res.status, body: parsed };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(config.idpUrl, 'kanban-401');
+      if (!refreshed) throw new Error(`kanban ${method} ${path}: NO_SESSION after refresh`);
+      attempt = await doFetch(refreshed);
+    }
+    if (attempt.status < 200 || attempt.status >= 300) {
+      const msg = attempt.body?.error?.message || attempt.body?.error || `HTTP ${attempt.status}`;
+      throw new Error(`kanban ${method} ${path}: ${msg}`);
+    }
+    return attempt.body;
+  }
+
+  // Cloud kanban endpoints are project-scoped (/v1/projects/{id}/kanban/*, DnP 7279).
+  // A missing project id is a hard error, never a silent global query.
+  _requireProjectId(projectId, op) {
+    if (projectId == null) {
+      throw new Error(`kanban ${op}: projectId is required (cloud kanban endpoints are project-scoped)`);
+    }
+    return Number(projectId);
+  }
+
   async createTask(task, projectId) {
-    const now = new Date().toISOString();
-    const cols = ['title', 'description', 'status', 'priority', 'assigned_to', 'created_by', 'spec_path', 'milestone', 'files_changed', 'blockers', 'created_at', 'updated_at', 'completed_at'];
-    const vals = [
-      this._escapeSql(task.title),
-      this._escapeSql(task.description),
-      this._escapeSql(task.status || 'backlog'),
-      this._escapeSql(task.priority || 'medium'),
-      this._escapeSql(task.assignedTo),
-      this._escapeSql(task.createdBy),
-      this._escapeSql(task.specPath),
-      this._escapeSql(task.milestone),
-      `${this._escapeSql(JSON.stringify(task.filesChanged || []))}::jsonb`,
-      this._escapeSql(task.blockers),
-      this._escapeSql(now),
-      this._escapeSql(now),
-      'NULL',
-    ];
-    if (projectId != null) {
-      cols.push('project_id');
-      vals.push(this._escapeSql(projectId));
-    }
-    const sql = `INSERT INTO vibe.kanban_tasks (${cols.join(', ')}) VALUES (${vals.join(', ')}) RETURNING id`;
-    const result = await this._queryVibeSql(sql);
-    if (!result.success || !result.data || result.data.length === 0) {
-      throw new Error(result.error?.message || 'Failed to create kanban task');
-    }
-    return result.data[0].id;
+    const pid = this._requireProjectId(projectId, 'createTask');
+    const body = {
+      title: task.title,
+      description: task.description,
+      status: task.status || 'backlog',
+      priority: task.priority || 'medium',
+      assigned_to: task.assignedTo,
+      created_by: task.createdBy,
+      spec_path: task.specPath,
+      milestone: task.milestone,
+      files_changed: task.filesChanged || [],
+      blockers: task.blockers,
+    };
+    const res = await this._cloudKanban('POST', `/v1/projects/${pid}/kanban/tasks`, body);
+    const id = res?.data?.id;
+    if (id == null) throw new Error('createTask: cloud response missing data.id');
+    return id;
   }
 
   async getTask(id, projectId) {
-    let sql = `SELECT * FROM vibe.kanban_tasks WHERE id = ${Number(id)}`;
-    if (projectId != null) {
-      sql += ` AND project_id = ${this._escapeSql(projectId)}`;
-    }
-    const result = await this._queryVibeSql(sql);
-    // Surface query failures — do NOT mask them as "not found" (a null here previously hid real SQL errors).
-    if (!result.success) throw new Error(result.error?.message || 'Failed to query kanban task');
-    if (!result.data || result.data.length === 0) return null;
-    return this._rowToTask(result.data[0]);
+    const pid = this._requireProjectId(projectId, 'getTask');
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks/${Number(id)}`);
+    const t = res?.data;
+    if (!t) return null;
+    return this._rowToTask(t);
   }
 
+  // Maps to the EXISTING cloud board reads (GET /v1/projects/{id}/kanban/active|done|waiting,
+  // DnP 7279). Those return board columns, so to reproduce the old arbitrary-filter SELECT we
+  // fetch ALL three boards, merge (dedupe by id), then apply the remaining predicates IN-MEMORY
+  // — exactly what the SQL did — instead of guessing a status->board mapping. A failed fetch
+  // THROWS (surfaced), never a silent []. FLAGGED to DnP: confirms board read wrapper shape
+  // (assumed { data: { tasks: [...] } } | { data: [...] }).
   async listTasks(filter = {}) {
-    let sql = 'SELECT * FROM vibe.kanban_tasks WHERE 1=1';
-    // #152 + #64 G5 UNION: archived (soft-deleted) tasks are EXCLUDED from the default
-    // board. NULL-safe THREE-VALUED logic (#152, QA-verified edge): legacy rows where
-    // archived IS NULL must still count as NOT archived — `archived = false` would DROP
-    // them. Pass archived=true for the archived-only view, or includeArchived=true for both.
-    if (filter.archived === true) {
-      sql += ' AND archived IS TRUE';
-    } else if (!filter.includeArchived) {
-      sql += ' AND archived IS NOT TRUE';
+    const pid = this._requireProjectId(filter.projectId, 'listTasks');
+    const seen = new Map();
+    for (const board of ['active', 'done', 'waiting']) {
+      const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/${board}`);
+      const tasks = res?.data?.tasks ?? res?.data ?? [];
+      for (const t of (Array.isArray(tasks) ? tasks : [])) {
+        const mapped = this._rowToTask(t);
+        if (mapped.id != null) seen.set(mapped.id, mapped);
+      }
     }
-    // #64: project-scoped board.
-    if (filter.projectId != null) {
-      sql += ` AND project_id = ${this._escapeSql(filter.projectId)}`;
-    }
+    let rows = Array.from(seen.values());
+    // In-memory predicates mirroring the prior SQL. archived three-valued: legacy null = NOT archived.
+    if (filter.archived === true) rows = rows.filter(r => r.archived === true);
+    else if (!filter.includeArchived) rows = rows.filter(r => r.archived !== true);
     if (filter.status) {
       const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-      const statusList = statuses.map(s => this._escapeSql(s)).join(',');
-      sql += ` AND status IN (${statusList})`;
+      rows = rows.filter(r => statuses.includes(r.status));
     }
-    if (filter.assignedTo) sql += ` AND assigned_to = ${this._escapeSql(filter.assignedTo)}`;
-    if (filter.milestone) sql += ` AND milestone = ${this._escapeSql(filter.milestone)}`;
-    if (filter.priority) sql += ` AND priority = ${this._escapeSql(filter.priority)}`;
-    sql += ' ORDER BY id ASC';
-    const result = await this._queryVibeSql(sql);
-    // Surface query failures instead of returning [] — an empty array on a FAILED query is the masking
-    // hole that hid the kanban write break (GET looked healthy while the query errored). Throw; the route
-    // turns it into a real error response. Genuine empty results still return [].
-    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban tasks');
-    if (!result.data) return [];
-    return result.data.map(r => this._rowToTask(r));
+    if (filter.assignedTo) rows = rows.filter(r => r.assignedTo === filter.assignedTo);
+    if (filter.milestone) rows = rows.filter(r => r.milestone === filter.milestone);
+    if (filter.priority) rows = rows.filter(r => r.priority === filter.priority);
+    rows.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+    return rows;
   }
 
   async updateTask(id, updates, projectId) {
-    const sets = [];
-    if (updates.status !== undefined) sets.push(`status = ${this._escapeSql(updates.status)}`);
-    if (updates.priority !== undefined) sets.push(`priority = ${this._escapeSql(updates.priority)}`);
-    if (updates.assignedTo !== undefined) sets.push(`assigned_to = ${this._escapeSql(updates.assignedTo)}`);
-    if (updates.milestone !== undefined) sets.push(`milestone = ${this._escapeSql(updates.milestone)}`);
-    if (updates.specPath !== undefined) sets.push(`spec_path = ${this._escapeSql(updates.specPath)}`);
-    if (updates.blockers !== undefined) sets.push(`blockers = ${this._escapeSql(updates.blockers)}`);
-    if (updates.description !== undefined) sets.push(`description = ${this._escapeSql(updates.description)}`);
-    if (updates.title !== undefined) sets.push(`title = ${this._escapeSql(updates.title)}`);
-    if (updates.filesChanged !== undefined) sets.push(`files_changed = ${this._escapeSql(JSON.stringify(updates.filesChanged))}::jsonb`);
-    if (updates.updatedAt !== undefined) sets.push(`updated_at = ${this._escapeSql(updates.updatedAt)}`);
-    if (updates.completedAt !== undefined) sets.push(`completed_at = ${updates.completedAt ? this._escapeSql(updates.completedAt) : 'NULL'}`);
-    if (updates.archived !== undefined) sets.push(`archived = ${updates.archived ? 'TRUE' : 'FALSE'}`);
-    if (sets.length === 0) return this.getTask(id, projectId);
-    let sql = `UPDATE vibe.kanban_tasks SET ${sets.join(', ')} WHERE id = ${Number(id)}`;
-    if (projectId != null) {
-      sql += ` AND project_id = ${this._escapeSql(projectId)}`;
-    }
-    sql += ' RETURNING *';
-    const result = await this._queryVibeSql(sql);
-    // Surface query failures — do NOT mask them as "no row updated".
-    if (!result.success) throw new Error(result.error?.message || 'Failed to update kanban task');
-    if (!result.data || result.data.length === 0) return null;
-    return this._rowToTask(result.data[0]);
+    const pid = this._requireProjectId(projectId, 'updateTask');
+    const body = {};
+    if (updates.status !== undefined) body.status = updates.status;
+    if (updates.priority !== undefined) body.priority = updates.priority;
+    if (updates.assignedTo !== undefined) body.assigned_to = updates.assignedTo;
+    if (updates.milestone !== undefined) body.milestone = updates.milestone;
+    if (updates.specPath !== undefined) body.spec_path = updates.specPath;
+    if (updates.blockers !== undefined) body.blockers = updates.blockers;
+    if (updates.description !== undefined) body.description = updates.description;
+    if (updates.title !== undefined) body.title = updates.title;
+    if (updates.filesChanged !== undefined) body.files_changed = updates.filesChanged;
+    if (updates.archived !== undefined) body.archived = updates.archived;
+    // status transitions auto-stamp started_at/completed_at server-side (DnP 7279) — don't send timestamps.
+    if (Object.keys(body).length === 0) return this.getTask(id, projectId);
+    const res = await this._cloudKanban('PATCH', `/v1/projects/${pid}/kanban/tasks/${Number(id)}`, body);
+    const t = res?.data;
+    if (!t) return null;
+    return this._rowToTask(t);
   }
 
   // ── #64 G4: kanban activity / audit trail (vibe.kanban_activity) ──────────
   async appendKanbanActivity({ taskId, actor, action, fromStatus, toStatus, detail, projectId }) {
-    const sql = `INSERT INTO vibe.kanban_activity (task_id, actor, action, from_status, to_status, detail, project_id)
-      VALUES (${Number(taskId)}, ${this._escapeSql(actor)}, ${this._escapeSql(action)}, ${this._escapeSql(fromStatus)}, ${this._escapeSql(toStatus)}, ${this._escapeSql(detail)}, ${projectId != null ? Number(projectId) : 'NULL'})
-      RETURNING activity_id`;
-    const result = await this._queryVibeSql(sql);
-    if (!result.success) throw new Error(result.error?.message || 'Failed to append kanban activity');
-    return result.data?.[0]?.activity_id ?? null;
+    const pid = this._requireProjectId(projectId, 'appendKanbanActivity');
+    const res = await this._cloudKanban('POST', `/v1/projects/${pid}/kanban/tasks/${Number(taskId)}/activity`, {
+      actor, action, from_status: fromStatus, to_status: toStatus, detail,
+    });
+    return res?.data?.id ?? null;
   }
 
   async listKanbanActivity(taskId, projectId) {
-    let sql = `SELECT activity_id, task_id, actor, action, from_status, to_status, detail, at FROM vibe.kanban_activity WHERE task_id = ${Number(taskId)}`;
-    if (projectId != null) sql += ` AND (project_id = ${Number(projectId)} OR project_id IS NULL)`;
-    sql += ' ORDER BY at ASC, activity_id ASC';
-    const result = await this._queryVibeSql(sql);
-    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban activity');
-    return (result.data || []).map(r => ({
-      activity_id: r.activity_id, task_id: r.task_id, actor: r.actor, action: r.action,
-      from: r.from_status, to: r.to_status, detail: r.detail, at: r.at,
+    const pid = this._requireProjectId(projectId, 'listKanbanActivity');
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks/${Number(taskId)}/activity`);
+    const activity = res?.data?.activity ?? [];
+    return (Array.isArray(activity) ? activity : []).map(r => ({
+      activity_id: r.id, task_id: Number(taskId), actor: r.actor, action: r.action,
+      from: r.from_status, to: r.to_status, detail: r.detail, at: r.created_at,
     }));
   }
 
   // ── #64 G3: kanban comments thread (vibe.kanban_comments) ────────────────
   async addKanbanComment({ taskId, author, bodyMd, projectId }) {
-    const sql = `INSERT INTO vibe.kanban_comments (task_id, author, body_md, project_id)
-      VALUES (${Number(taskId)}, ${this._escapeSql(author)}, ${this._escapeSql(bodyMd)}, ${projectId != null ? Number(projectId) : 'NULL'})
-      RETURNING comment_id, task_id, author, body_md, created_at`;
-    const result = await this._queryVibeSql(sql);
-    if (!result.success) throw new Error(result.error?.message || 'Failed to add kanban comment');
-    const r = result.data?.[0];
-    return r ? { comment_id: r.comment_id, task_id: r.task_id, author: r.author, body_md: r.body_md, created_at: r.created_at } : null;
+    const pid = this._requireProjectId(projectId, 'addKanbanComment');
+    const res = await this._cloudKanban('POST', `/v1/projects/${pid}/kanban/tasks/${Number(taskId)}/comments`, {
+      author, body_md: bodyMd,
+    });
+    const id = res?.data?.id ?? null;
+    return { comment_id: id, task_id: Number(taskId), author, body_md: bodyMd, created_at: new Date().toISOString() };
   }
 
   async listKanbanComments(taskId, projectId) {
-    let sql = `SELECT comment_id, task_id, author, body_md, created_at FROM vibe.kanban_comments WHERE task_id = ${Number(taskId)}`;
-    if (projectId != null) sql += ` AND (project_id = ${Number(projectId)} OR project_id IS NULL)`;
-    sql += ' ORDER BY created_at ASC, comment_id ASC';
-    const result = await this._queryVibeSql(sql);
-    if (!result.success) throw new Error(result.error?.message || 'Failed to list kanban comments');
-    return (result.data || []).map(r => ({ comment_id: r.comment_id, task_id: r.task_id, author: r.author, body_md: r.body_md, created_at: r.created_at }));
+    const pid = this._requireProjectId(projectId, 'listKanbanComments');
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks/${Number(taskId)}/comments`);
+    const comments = res?.data?.comments ?? [];
+    return (Array.isArray(comments) ? comments : []).map(r => ({
+      comment_id: r.id, task_id: Number(taskId), author: r.author, body_md: r.body_md, created_at: r.created_at,
+    }));
   }
 
   get storage() {
