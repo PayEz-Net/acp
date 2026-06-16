@@ -41,18 +41,27 @@ function buildCloudAuthHeaders(token: string): Record<string, string> {
   };
 }
 
-async function cloudFetch(signedPath: string): Promise<{ status: number; body: any } | { error: string }> {
+// Cloud fetch over the Decision-C Bearer lane. GET by default; pass method+body for the
+// profile-CRUD WRITES (DnP 7286: PUT profile, POST/DELETE skills, POST repos). Same
+// ensureValidToken -> Bearer + X-Client-Id path + the one 401->forceRefresh retry.
+async function cloudFetch(
+  signedPath: string,
+  opts: { method?: string; body?: unknown } = {},
+): Promise<{ status: number; body: any } | { error: string }> {
   let token = await ensureValidToken(config.idpUrl);
   if (!token) return { error: 'NO_SESSION' };
 
+  const method = opts.method ?? 'GET';
+  const hasBody = opts.body !== undefined && method !== 'GET' && method !== 'HEAD';
   const url = `${config.vibeApiUrl}${signedPath}`;
   const doFetch = async (bearer: string) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROFILE_PROXY_TIMEOUT_MS);
     try {
       const res = await fetch(url, {
-        method: 'GET',
+        method,
         headers: buildCloudAuthHeaders(bearer),
+        body: hasBody ? JSON.stringify(opts.body) : undefined,
         signal: controller.signal,
       });
       const text = await res.text();
