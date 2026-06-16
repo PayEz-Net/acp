@@ -169,6 +169,66 @@ export async function resolveMemberEffort(
   }
 }
 
+/**
+ * WO #84135 §3.1 — the SINGLE source-of-truth resolver for a project's TEAM
+ * runtime (claude | kimi | codex). Runtime is a TEAM-level setting (one value
+ * per project, applied to every agent — §1, Jon 2026-06-16), unlike the
+ * per-member effort_override above.
+ *
+ * Reads `runtime_choice` FRESH from the project record (`GET /v1/projects/:id`
+ * detail → data.project.runtime_choice) every call — no teamCache (60s TTL
+ * could serve a stale value if the user changed the team runtime mid-window).
+ * Same fallback-hydra fix as effort: ONE resolver, always authoritative.
+ *
+ * Every spawn-class path (fresh spawn forwards it from the renderer; the
+ * RESTART route re-resolves through this; orchestrator) resolves runtime here
+ * so a restart can never silently flip a kimi team's agent to the global
+ * default (§2.3 — the asymmetry-with-effort bug).
+ *
+ * Returns the narrowed runtime, or undefined when: no active session, fetch
+ * failure, or `runtime_choice` is unset/null on the project. undefined -> the
+ * caller OMITS runtime (symmetry with effort). NOTE: killing the global-fallback
+ * MASKING of an unset team runtime (§3.3) is a SEPARATE slice (spec §9 step 5);
+ * this resolver intentionally does not substitute a default for null.
+ */
+export async function resolveTeamRuntime(
+  cfg: Config,
+  projectId: number,
+): Promise<'claude' | 'kimi' | 'codex' | undefined> {
+  const signedPath = `${PROJECT_TEAM_PATH}/${projectId}`;
+  const url = `${cfg.vibeApiUrl}${signedPath}`;
+  let token = await ensureValidToken(cfg.idpUrl);
+  if (!token) return undefined; // no session -> can't look up -> defer to caller
+
+  const doFetch = async (bearer: string): Promise<{ status: number; body: any }> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', headers: buildAuthHeaders(cfg, bearer), signal: controller.signal });
+      const raw = await res.text();
+      let body: any = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* leave null */ }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(cfg.idpUrl);
+      if (!refreshed) return undefined;
+      attempt = await doFetch(refreshed);
+    }
+    if (attempt.status < 200 || attempt.status >= 300) return undefined;
+    const r = attempt.body?.data?.project?.runtime_choice;
+    return (r === 'claude' || r === 'kimi' || r === 'codex') ? r : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 interface SyncPayload {
   agents: NormalizedAgent[];
   source: 'cloud' | 'cache' | 'defaults';

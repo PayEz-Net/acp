@@ -3,7 +3,7 @@ import { success, error } from '../response.js';
 import type { BackoffManager } from '../lifecycle/backoff.js';
 import type { HealthMonitor } from '../lifecycle/healthMonitor.js';
 import type { Config } from '../../config.js';
-import { resolveMemberEffort } from './team.js';
+import { resolveMemberEffort, resolveTeamRuntime } from './team.js';
 
 interface LifecycleDeps {
   cfg: Config;
@@ -211,11 +211,23 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
       const freshEffort = state.projectId != null
         ? await resolveMemberEffort(cfg, state.projectId, name)
         : undefined;
+      // WO #84135 §3.1/§2.3: re-resolve the TEAM runtime FRESH from the project
+      // record too — exact symmetry with freshEffort. Before this, restart
+      // OMITTED runtime, so Electron's spawnAgent fell to settings.agentProvider
+      // (global) and a kimi team's restarted agent came back claude (the
+      // asymmetry-with-effort bug). Now restart carries the team runtime, so a
+      // restarted agent always conforms to its team. Omit when unresolved
+      // (no project ctx / no session / runtime_choice unset) — the global-mask
+      // kill for the unset case is a separate slice (spec §9 step 5).
+      const freshRuntime = state.projectId != null
+        ? await resolveTeamRuntime(cfg, state.projectId)
+        : undefined;
       const result = await callElectron(cfg, callbackPort, '/internal/pty/spawn', {
         agentName: name,
         workDir: state.workDir || undefined,
         autoReport: state.autoReport,
         ...(freshEffort ? { effort: freshEffort } : {}),
+        ...(freshRuntime ? { runtime: freshRuntime } : {}),
       });
 
       if (result.status !== 200) {

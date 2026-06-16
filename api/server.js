@@ -23,7 +23,7 @@ import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
-import { resolveMemberEffort } from './routes/team.js';
+import { resolveMemberEffort, resolveTeamRuntime } from './routes/team.js';
 import { bootstrap } from '../core/bootstrap.js';
 import { LocalEventBus } from './sse/localEventBus.js';
 import { LifecycleHooks } from './lifecycle/hooks.js';
@@ -188,13 +188,21 @@ export async function createApp(cfg) {
         const freshEffort = state.projectId != null
           ? await resolveMemberEffort(appConfig, state.projectId, agentName)
           : undefined;
+        // WO #84135 §3.1/§2.3 (sibling of the /restart route fix): re-resolve
+        // the TEAM runtime FRESH too — symmetry with freshEffort. Without it
+        // this crash auto-restart OMITTED runtime, so Electron fell to the
+        // global agentProvider and a kimi team's crash-looped agent came back
+        // claude. Omit when unresolved (no project ctx / no session / unset).
+        const freshRuntime = state.projectId != null
+          ? await resolveTeamRuntime(appConfig, state.projectId)
+          : undefined;
         const result = await fetch(`http://127.0.0.1:${callbackPort}/internal/pty/spawn`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${appConfig.acpLocalSecret}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}) }),
+          body: JSON.stringify({ agentName, workDir: state.workDir, autoReport: state.autoReport, ...(freshEffort ? { effort: freshEffort } : {}), ...(freshRuntime ? { runtime: freshRuntime } : {}) }),
         });
         if (result.ok) {
           const data = await result.json();
