@@ -109,6 +109,19 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
 
       if (result.status !== 200) {
         state.status = 'error';
+        // SPEC §3.3: relay a typed WORKDIR_INVALID from the Electron callback
+        // VERBATIM (code + message + detail), never flatten to the bare status.
+        // 422 = the project's working folder can't instantiate; the renderer
+        // surfaces an actionable banner (§3.4) instead of an opaque 500.
+        if (result.data?.code === 'WORKDIR_INVALID') {
+          res.status(422).json(
+            error('WORKDIR_INVALID', result.data.message, 'agent_spawn', (req as any).requestId, {
+              agent_name: name,
+              work_dir: result.data.work_dir,
+            })
+          );
+          return;
+        }
         res.status(result.status).json(
           error('SPAWN_FAILED', `Electron callback returned ${result.status}`, 'agent_spawn', (req as any).requestId)
         );

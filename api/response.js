@@ -55,6 +55,9 @@ const ERROR_STATUS = {
   VALIDATION_ERROR: 400,
   EXECUTION_TIMEOUT: 408,
   AUTONOMY_ALREADY_RUNNING: 409,
+  // 422 = request well-formed, but the project config can't be instantiated
+  // (e.g. repo_path doesn't exist on this machine). A config error, NOT a true 500.
+  WORKDIR_INVALID: 422,
   EXECUTION_ERROR: 500,
   STORAGE_ERROR: 500,
   INTERNAL_ERROR: 500,
