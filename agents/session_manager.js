@@ -3,9 +3,11 @@
 
 import { config } from '../config.js';
 import { ensureValidToken, forceRefresh, requireTokenClientId } from '../api/auth/tokenManager.js';
+import { extractAndMapCurrent, extractAndMapList } from '../api/projects/mapper.js';
 
 const ROSTER_FETCH_TIMEOUT_MS = 10_000;
 const ROSTER_TTL_MS = 5 * 60 * 1000; // refresh occasionally so newly-hired agents resolve
+const PROJECT_TTL_MS = 60 * 1000;    // current-project / list soft cache (mirrors api/projects/cache.ts TTL)
 
 export class SessionManager {
   constructor(_cfg) {
@@ -17,24 +19,18 @@ export class SessionManager {
     this._rosterHydratedAt = 0;   // 0 = never hydrated; lazy hydration on first authed read
     this._rosterHydrating = null; // in-flight hydration promise (coalesce concurrent reads)
 
-    // Phase 1 stub: project registry is in-memory only, mirroring the one
-    // authoritative row. Real store: vibe.documents where
-    // client_id=9, collection='vibe_agents', table_name='vibe_projects'
-    // (schema_id=63). See doc_id=8028 for vsql-server-dev / owner 22.
-    // TODO replace with a real ProjectStore that queries VibeSQL Server
-    // via POST /v1/query so list/create/select persist and match the DB,
-    // scoped to the caller's client_id. Blocked on ACP not having a real
-    // per-request client context plumbed through to SessionManager yet.
-    this._projects = new Map([
-      [1, {
-        id: 1,
-        name: 'vsql-server-dev',
-        description: 'ACP dev project on 93 — VibeSQL consolidation spec',
-        status: 'active',
-      }],
-    ]);
-    this._activeProjectId = 1;
-    this._nextProjectId = 2;
+    // Projects resolve from the CLOUD off the logged-in developer's bearer (BAPert 7291
+    // one-resolver fix). The old in-memory stub (_activeProjectId=1 'vsql-server-dev') made
+    // EVERY consumer scope to the wrong board off-LAN — Praveen's real project (Umibrowser 19)
+    // was never loaded (Aurum 7287: stub-green is forbidden). getActiveProjectId/listProjects/
+    // getProject now hit the existing cloud lane (GET /v1/users/me/current-project + /v1/projects),
+    // soft-cached here (PROJECT_TTL_MS) mirroring api/projects/cache.ts. NO stub seed, NO _=1.
+    this._currentProjectId = undefined; // undefined = not yet resolved; number|null after a resolve
+    this._currentProjectAt = 0;
+    this._projectListCache = null;
+    this._projectListAt = 0;
+    this._projects = new Map();          // retained only for createProject's in-memory path (TODO: cloud)
+    this._nextProjectId = 1;
 
     // Phase 1 stub: agent documents registry is in-memory only. Real store
     // lives in vibe.documents alongside projects (client_id=9,
@@ -73,27 +69,31 @@ export class SessionManager {
     return true;
   }
 
-  // Cloud roster resolve — the SAME reachable, Bearer-authed pattern as
-  // api/routes/agents.ts cloudFetch (Decision-C: Bearer + X-Client-Id, no Vibe HMAC).
-  // Praveen (off-LAN) can reach config.vibeApiUrl (api.idealvibe.online); he CANNOT reach
-  // the dev box 10.0.0.93 the old raw-SQL roster targeted. Returns {status, body} or {error}.
-  async _cloudFetchAgents() {
-    const token = await ensureValidToken(config.idpUrl, 'roster-hydrate');
+  // Cloud fetch over the Decision-C Bearer lane — the SAME reachable pattern as
+  // api/routes/agents.ts cloudFetch (Bearer + X-Client-Id, no Vibe HMAC). Praveen (off-LAN)
+  // reaches config.vibeApiUrl (api.idealvibe.online); he CANNOT reach the dev box 10.0.0.93
+  // the old raw-SQL paths targeted. GET by default; pass method+body for the current-project
+  // writeback. Returns {status, body} or {error:'NO_SESSION'} pre-login.
+  async _cloudGet(signedPath, opts = {}) {
+    const token = await ensureValidToken(config.idpUrl, opts.trigger || 'cloud-get');
     if (!token) return { error: 'NO_SESSION' };
 
-    const url = `${config.vibeApiUrl}/v1/agentmail/agents`;
+    const method = opts.method || 'GET';
+    const hasBody = opts.body !== undefined && method !== 'GET' && method !== 'HEAD';
+    const url = `${config.vibeApiUrl}${signedPath}`;
     const doFetch = async (bearer) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), ROSTER_FETCH_TIMEOUT_MS);
       try {
         const res = await fetch(url, {
-          method: 'GET',
+          method,
           headers: {
             'Authorization': `Bearer ${bearer}`,
             'X-Client-Id': requireTokenClientId(bearer),
             'X-Vibe-Via': 'idp-proxy',
             'Content-Type': 'application/json',
           },
+          body: hasBody ? JSON.stringify(opts.body) : undefined,
           signal: controller.signal,
         });
         const text = await res.text();
@@ -107,7 +107,7 @@ export class SessionManager {
 
     let attempt = await doFetch(token);
     if (attempt.status === 401) {
-      const refreshed = await forceRefresh(config.idpUrl, 'roster-hydrate-401');
+      const refreshed = await forceRefresh(config.idpUrl, (opts.trigger || 'cloud-get') + '-401');
       if (!refreshed) return { error: 'NO_SESSION' };
       attempt = await doFetch(refreshed);
     }
@@ -121,7 +121,7 @@ export class SessionManager {
   // so the caller SURFACES it — never the old silent fail-open to an empty _agents, which
   // read back as a silent "not registered" for every agent (no-unjustified-fallback).
   async _refreshAgentsRoster() {
-    const result = await this._cloudFetchAgents();
+    const result = await this._cloudGet('/v1/agentmail/agents', { trigger: 'roster-hydrate' });
     if ('error' in result) {
       if (result.error === 'NO_SESSION') return false; // pre-login: not-yet, not an error
       throw new Error(`agent roster cloud-resolve failed: ${result.error}`);
@@ -272,23 +272,66 @@ export class SessionManager {
   // so the local API doesn't need to hit VibeSQL on every list call.
   // -----------------------------------------------------------------------
 
+  // Cloud project list for the logged-in developer (GET /v1/projects?activeOnly=true),
+  // soft-cached. Maps to the {id, name, description, status} shape consumers read.
   async listProjects() {
-    return Array.from(this._projects.values());
+    if (this._projectListCache && Date.now() - this._projectListAt < PROJECT_TTL_MS) {
+      return this._projectListCache;
+    }
+    const result = await this._cloudGet('/v1/projects?activeOnly=true', { trigger: 'project-list' });
+    if ('error' in result) return this._projectListCache ?? []; // NO_SESSION pre-login: last-known or empty
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`project list cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/projects`);
+    }
+    const mapped = extractAndMapList(result.body) || [];
+    this._projectListCache = mapped.map((p) => ({
+      id: p.id,
+      name: p.name,
+      description: p.description ?? '',
+      status: p.is_active === false ? 'inactive' : 'active',
+    }));
+    this._projectListAt = Date.now();
+    return this._projectListCache;
   }
 
   async getProject(id) {
     const key = Number(id);
-    return this._projects.get(key) || null;
+    const list = await this.listProjects();
+    return list.find((p) => Number(p.id) === key) || null;
   }
 
+  // The logged-in developer's CURRENT (startup) project, resolved off their bearer via the
+  // existing cloud focus-pointer (GET /v1/users/me/current-project) — NOT the killed _=1 stub.
+  // null = unset/empty (no project selected); consumers treat null as "no active project"
+  // (picker / create-CTA), never a silent default (no-unjustified-fallback / Aurum 7287).
   async getActiveProjectId() {
-    return this._activeProjectId;
+    if (this._currentProjectId !== undefined && Date.now() - this._currentProjectAt < PROJECT_TTL_MS) {
+      return this._currentProjectId;
+    }
+    const result = await this._cloudGet('/v1/users/me/current-project', { trigger: 'current-project' });
+    if ('error' in result) return this._currentProjectId ?? null; // NO_SESSION pre-login
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`current-project cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/users/me/current-project`);
+    }
+    const mapped = extractAndMapCurrent(result.body);
+    this._currentProjectId = mapped.current_project_id ?? null;
+    this._currentProjectAt = Date.now();
+    return this._currentProjectId;
   }
 
+  // Focus writeback to the cloud (PUT /v1/users/me/current-project { project_id }) so the
+  // developer's startup project persists tenant-wide; updates the local soft cache.
   async setActiveProjectId(id) {
-    const key = Number(id);
-    if (!this._projects.has(key)) return false;
-    this._activeProjectId = key;
+    const key = id === null ? null : Number(id);
+    const result = await this._cloudGet('/v1/users/me/current-project', {
+      method: 'PUT',
+      body: { project_id: key },
+      trigger: 'current-project-set',
+    });
+    if ('error' in result) return false; // NO_SESSION
+    if (result.status < 200 || result.status >= 300) return false;
+    this._currentProjectId = key;
+    this._currentProjectAt = Date.now();
     return true;
   }
 
