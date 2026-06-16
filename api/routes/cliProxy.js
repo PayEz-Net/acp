@@ -9,7 +9,10 @@ import { success, error } from '../response.js';
  */
 export default function cliProxyRoutes(cfg) {
   const router = Router();
-  const idpUrl = cfg.idpUrl || process.env.IDP_URL || 'http://10.0.0.93:93';
+  // cfg.idpUrl is required('IDP_URL') in config — no dev-box fallback in a public build
+  // (Decision-C / no-unjustified-fallback; off-LAN Praveen RCA). The old env-or-dev-box
+  // default 404'd every off-LAN CLI flow; killed so it can't ship in a public install.
+  const idpUrl = cfg.idpUrl;
 
   // POST /v1/cli/signup - Forward to IDP
   router.post('/v1/cli/signup', async (req, res) => {

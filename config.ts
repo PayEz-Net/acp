@@ -52,8 +52,10 @@ export const config = {
   // at 127.0.0.1:3001). Reading ACP_API_URL here cross-wired the two: an
   // ACP_API_URL=<prod AKS> meant for nothing leaked in and sent dev-93-
   // minted tokens to prod → 401. Use the dedicated VIBE_API_URL (see
-  // .env.example / CLAUDE.md). Default stays dev-93. Do NOT re-merge.
-  vibeApiUrl: process.env.VIBE_API_URL || 'http://10.0.0.93:32786',
+  // .env.example / CLAUDE.md). REQUIRED — no dev-box default in a public build
+  // (Decision-C / no-unjustified-fallback; the off-LAN Praveen RCA). The installer
+  // injects it (api-server.ts); dev sets it in .env. Do NOT re-merge or re-add a default.
+  vibeApiUrl: required('VIBE_API_URL'),
   // Decision-C / durable #104: the vibe_ HMAC client SLUG is MACHINE-AUTH ONLY now.
   // User-session proxies (mail/standup/projects/agents/team) are bearer-only and
   // never touch it. So it is required ONLY when the machine path is active —
