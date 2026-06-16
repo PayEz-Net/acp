@@ -84,10 +84,18 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
           next();
           return;
         }
-      } catch (err) {
-        // Storage error — fall through to 401
+      } catch (err: any) {
+        // Aurum 7269 NON-NEGOTIABLE: a roster-RESOLVE failure (cloud unreachable / no session)
+        // must surface an HONEST error — NEVER fall through to "not registered" (the exact
+        // silent-empty lie that made off-LAN Praveen look like an unregistered-agent bug when
+        // the real cause was an unreachable roster). Distinct status + verbatim reason.
+        res.status(503).json(
+          error('AGENT_ROSTER_UNAVAILABLE', `Could not resolve the agent roster to verify '${agentHeader}': ${err?.message || err}`, 'auth', (req as any).requestId)
+        );
+        return;
       }
-      // Agent name not registered (AC-2)
+      // Agent name not registered (AC-2) — reached ONLY when the roster resolved successfully
+      // and this name is genuinely absent from it.
       res.status(401).json(
         error('UNAUTHORIZED', `Agent '${agentHeader}' is not registered`, 'auth', (req as any).requestId)
       );

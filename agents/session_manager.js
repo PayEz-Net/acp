@@ -1,6 +1,12 @@
 // Phase 1: Stub session manager - no persistence
 // All agent data goes through Vibe API
 
+import { config } from '../config.js';
+import { ensureValidToken, forceRefresh, requireTokenClientId } from '../api/auth/tokenManager.js';
+
+const ROSTER_FETCH_TIMEOUT_MS = 10_000;
+const ROSTER_TTL_MS = 5 * 60 * 1000; // refresh occasionally so newly-hired agents resolve
+
 export class SessionManager {
   constructor(_cfg) {
     this._sessions = new Map();
@@ -8,6 +14,8 @@ export class SessionManager {
     // Zero hardcoded names — canonical agent_profiles + team_agent_instances
     // are the one and only source of truth.
     this._agents = new Set();
+    this._rosterHydratedAt = 0;   // 0 = never hydrated; lazy hydration on first authed read
+    this._rosterHydrating = null; // in-flight hydration promise (coalesce concurrent reads)
 
     // Phase 1 stub: project registry is in-memory only, mirroring the one
     // authoritative row. Real store: vibe.documents where
@@ -53,45 +61,97 @@ export class SessionManager {
   }
 
   async init() {
-    // Hydrate the agent roster from VibeSQL so team-scoped agents
-    // (e.g. nextpert-scout) resolve without a code change.
-    await this._refreshAgentsRoster();
+    // Hydrate the roster opportunistically. Pre-login this is NO_SESSION (returns false,
+    // no throw) — lazy hydration on the first authed request (see _ensureRosterHydrated)
+    // handles the real population. A genuine cloud error here is non-fatal at boot; the
+    // lazy path will surface it on the request that needs the roster.
+    try {
+      await this._refreshAgentsRoster();
+    } catch (err) {
+      console.warn('[SessionManager] init roster hydrate deferred to first authed request:', err?.message || err);
+    }
     return true;
   }
 
-  async _refreshAgentsRoster() {
-    try {
-      // Canonical agent profiles — active only
-      const canonicalResult = await this._queryVibeSql(
-        `SELECT data->>'name' as name FROM vibe.documents ` +
-        `WHERE collection = 'vibe_agents' AND table_name = 'agent_profiles' AND deleted_at IS NULL ` +
-        `AND COALESCE((data->>'is_active')::boolean, true) = true`
-      );
-      if (canonicalResult.success && Array.isArray(canonicalResult.data)) {
-        for (const row of canonicalResult.data) {
-          if (row.name) this._agents.add(row.name);
-        }
-      }
+  // Cloud roster resolve — the SAME reachable, Bearer-authed pattern as
+  // api/routes/agents.ts cloudFetch (Decision-C: Bearer + X-Client-Id, no Vibe HMAC).
+  // Praveen (off-LAN) can reach config.vibeApiUrl (api.idealvibe.online); he CANNOT reach
+  // the dev box 10.0.0.93 the old raw-SQL roster targeted. Returns {status, body} or {error}.
+  async _cloudFetchAgents() {
+    const token = await ensureValidToken(config.idpUrl, 'roster-hydrate');
+    if (!token) return { error: 'NO_SESSION' };
 
-      // Per-team agent instances — #207: the instance has no name column. Its addressable
-      // identity is the CANONICAL bench name (agent_profiles.name), resolved via the agent_id
-      // join. (team_unique_name was dropped; reading it would throw "column does not exist".)
-      const teamResult = await this._queryVibeSql(
-        `SELECT p.data->>'name' AS name ` +
-        `FROM vibe_projects.team_agent_instances tai ` +
-        `JOIN vibe.documents p ON p.collection = 'vibe_agents' AND p.table_name = 'agent_profiles' ` +
-        `  AND p.deleted_at IS NULL AND (p.data->>'id')::int = tai.agent_id ` +
-        `WHERE tai.is_active = TRUE`
-      );
-      if (teamResult.success && Array.isArray(teamResult.data)) {
-        for (const row of teamResult.data) {
-          if (row.name) this._agents.add(row.name);
-        }
+    const url = `${config.vibeApiUrl}/v1/agentmail/agents`;
+    const doFetch = async (bearer) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ROSTER_FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${bearer}`,
+            'X-Client-Id': requireTokenClientId(bearer),
+            'X-Vibe-Via': 'idp-proxy',
+            'Content-Type': 'application/json',
+          },
+          signal: controller.signal,
+        });
+        const text = await res.text();
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch { /* leave null */ }
+        return { status: res.status, body };
+      } finally {
+        clearTimeout(timer);
       }
-    } catch (err) {
-      // Fail-open: static fallback list stays intact if VibeSQL is unreachable
-      console.warn('[SessionManager] _refreshAgentsRoster failed, using static fallback:', err?.message || err);
+    };
+
+    let attempt = await doFetch(token);
+    if (attempt.status === 401) {
+      const refreshed = await forceRefresh(config.idpUrl, 'roster-hydrate-401');
+      if (!refreshed) return { error: 'NO_SESSION' };
+      attempt = await doFetch(refreshed);
     }
+    return attempt;
+  }
+
+  // Resolve the addressable agent roster from the CLOUD typed API (NOT raw SQL to the dev
+  // box — that was the off-LAN "Agent X is not registered" blocker, BAPert/QA Praveen RCA).
+  // Returns true on success (roster populated + hydrated-at stamped), false on NO_SESSION
+  // (pre-login — not-yet, retry on next authed request). THROWS on a genuine cloud failure
+  // so the caller SURFACES it — never the old silent fail-open to an empty _agents, which
+  // read back as a silent "not registered" for every agent (no-unjustified-fallback).
+  async _refreshAgentsRoster() {
+    const result = await this._cloudFetchAgents();
+    if ('error' in result) {
+      if (result.error === 'NO_SESSION') return false; // pre-login: not-yet, not an error
+      throw new Error(`agent roster cloud-resolve failed: ${result.error}`);
+    }
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`agent roster cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/agentmail/agents`);
+    }
+    const agents = result.body?.data?.agents;
+    if (!Array.isArray(agents)) {
+      throw new Error('agent roster cloud-resolve: unexpected response shape (data.agents is not an array)');
+    }
+    const next = new Set();
+    for (const a of agents) {
+      if (a && typeof a.name === 'string') next.add(a.name);
+    }
+    this._agents = next;
+    this._rosterHydratedAt = Date.now();
+    return true;
+  }
+
+  // Lazy hydration — call before any roster read. ensureValidToken is NO_SESSION before the
+  // user logs in, so we DON'T rely on init() alone. Coalesces concurrent hydrations; a genuine
+  // cloud error PROPAGATES (surface + halt), NO_SESSION leaves the roster empty for a clean
+  // retry on the next authed request.
+  async _ensureRosterHydrated() {
+    if (this._rosterHydratedAt && Date.now() - this._rosterHydratedAt < ROSTER_TTL_MS) return;
+    if (!this._rosterHydrating) {
+      this._rosterHydrating = this._refreshAgentsRoster().finally(() => { this._rosterHydrating = null; });
+    }
+    await this._rosterHydrating;
   }
 
   async load(agentName) {
@@ -117,6 +177,16 @@ export class SessionManager {
   // For localAuth middleware compatibility (case-insensitive lookup)
   async getAgentRegistration(agentId) {
     const name = agentId.replace('agent:', '');
+    // Lazy-hydrate the roster from the cloud (first authed request populates it; init() is
+    // NO_SESSION pre-login). _ensureRosterHydrated THROWS on a genuine cloud failure.
+    await this._ensureRosterHydrated();
+    // Aurum 7269 NON-NEGOTIABLE: if the roster NEVER resolved (NO_SESSION / unreachable), do
+    // NOT read back an empty roster as a silent "not registered" — that's the exact lie that
+    // bit Praveen. Throw an HONEST error; the caller (localAuth/registry) surfaces it. A
+    // not-found against a SUCCESSFULLY hydrated roster is the only legitimate not-registered.
+    if (this._rosterHydratedAt === 0) {
+      throw new Error('agent roster could not be resolved — no active session or the cloud roster is unreachable (not a registration state)');
+    }
     // Case-insensitive match against known agents
     const match = Array.from(this._agents).find(a => a.toLowerCase() === name.toLowerCase());
     if (match) {
@@ -127,6 +197,7 @@ export class SessionManager {
 
   // Stub methods for agent storage (routes expect these)
   async getAgentProfileFromGlobal(name) {
+    await this._ensureRosterHydrated();
     // Case-insensitive match
     const match = Array.from(this._agents).find(a => a.toLowerCase() === name.toLowerCase());
     if (match) {
@@ -151,6 +222,7 @@ export class SessionManager {
   }
 
   async listActiveAgents() {
+    await this._ensureRosterHydrated();
     // Return all known agents as active
     return Array.from(this._agents).map(name => ({
       name,
@@ -348,8 +420,12 @@ export class SessionManager {
   // Schema: vibe.kanban_tasks
   // -----------------------------------------------------------------------
 
-  _vibeSqlUrl = process.env.VIBESQL_URL || 'http://10.0.0.93:52411';
-  _vibeSqlSecret = process.env.VIBESQL_SECRET || 'ContainersSuperDevSecret';
+  // Decision-C / no-unjustified-fallback: NO dev-box default. The roster no longer uses raw
+  // VibeSQL at all (it cloud-resolves). The remaining raw consumers (kanban) read these from
+  // env only; absent -> _queryVibeSql hard-fails with a surfaced error rather than silently
+  // targeting the dev box 10.0.0.93 in a public install (the off-LAN Praveen-class hazard).
+  _vibeSqlUrl = process.env.VIBESQL_URL || null;
+  _vibeSqlSecret = process.env.VIBESQL_SECRET || null;
 
   _escapeSql(value) {
     if (value === null || value === undefined) return 'NULL';
@@ -362,6 +438,12 @@ export class SessionManager {
   }
 
   async _queryVibeSql(sql) {
+    if (!this._vibeSqlUrl || !this._vibeSqlSecret) {
+      // Surface + halt — never silently fall back to the dev box (Decision-C). Raw /v1/query
+      // is dev-only; a public install must not reach it. The registration/roster path does
+      // NOT use this (it cloud-resolves); this guards the remaining raw consumers (kanban).
+      throw new Error('VIBESQL_URL / VIBESQL_SECRET not configured — raw VibeSQL is dev-only and is not available in this build. Use the cloud typed API.');
+    }
     const res = await fetch(`${this._vibeSqlUrl}/v1/query`, {
       method: 'POST',
       headers: {
