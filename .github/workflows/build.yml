@@ -1,0 +1,61 @@
+name: Build ACP Installer
+
+# Free CI on a public repo: standard GitHub-hosted runners cost $0 here.
+# Builds the Windows installer on every push to main (skipping docs-only changes)
+# and on manual dispatch. Produces the installer as a build artifact for download
+# + verification. It does NOT publish to a release — `--publish never` guarantees a
+# CI build can never disturb the v1.0.x releases or the version-less `latest` alias
+# (release publishing stays the deliberate `npm run release:github` flow).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout acp-desktop
+        uses: actions/checkout@v4
+        with:
+          path: acp-desktop
+
+      # The installer bundles the sibling acp-api (scripts/prepare-acp-api.cjs
+      # copies + builds ../../acp-api). Check it out as a sibling so the path resolves.
+      - name: Checkout acp-api (bundled into the installer)
+        uses: actions/checkout@v4
+        with:
+          repository: PayEz-Net/acp-api
+          path: acp-api
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install acp-api dependencies
+        working-directory: acp-api
+        run: npm ci
+
+      - name: Install acp-desktop dependencies
+        working-directory: acp-desktop
+        run: npm ci
+
+      # Full prod build chain: prepare-acp-api -> gen-env:prod (bakes public prod
+      # URLs from environments.cjs; no secrets) -> assert-env prod -> build:electron
+      # -> electron-builder (NSIS + portable). --publish never = build only.
+      - name: Build installer (prod, no publish)
+        working-directory: acp-desktop
+        run: npm run dist -- --publish never
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acp-installer-windows
+          path: acp-desktop/release/*.exe
+          if-no-files-found: error
+          retention-days: 14
