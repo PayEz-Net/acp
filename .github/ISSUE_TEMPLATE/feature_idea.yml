@@ -1,0 +1,25 @@
+name: Feature idea
+description: Suggest something ACP should do
+title: "[Idea]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas-first — tell us what you'd build. We can't ship every idea, but every one is read.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What's the idea?
+      description: What should ACP do that it doesn't yet?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would it let you get done?
+      description: The problem or workflow behind the idea.
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you handle it today? (optional)
