@@ -1,6 +1,6 @@
-# ACP — Agent Collaboration Platform
+# ACP — Open Source Pro
 
-> *Ship faster with a team of AI agents that actually coordinate.*
+> *The Agent Collaboration Platform — ship faster with a team of code agents that actually coordinate.*
 
 **ACP** is an open-source desktop application that turns your development environment into a mission control for AI agents. Spawn specialists, review their work, and let them coordinate via agent mail — all from a single surface.
 
