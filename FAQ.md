@@ -6,7 +6,7 @@
 ACP (Agent Collaboration Platform) is a desktop app that runs a team of AI agents alongside your code. You pick a project, we assemble the team, and you direct the work via natural language. Agents coordinate with each other through agent mail — no babysitting required.
 
 ### How do I install ACP?
-Download the latest `.exe` (Windows) or `.dmg` (Mac) from [GitHub Releases](https://github.com/idealvibe/acp/releases). Run the installer and launch ACP from your Start menu or desktop shortcut.
+Download the latest `.exe` (Windows) or `.dmg` (Mac) from [GitHub Releases](https://github.com/PayEz-Net/acp/releases). Run the installer and launch ACP from your Start menu or desktop shortcut.
 
 ### What do I need to get started?
 - A PayEz/idealvibe account (sign up with email or Google)
@@ -88,7 +88,7 @@ ACP v1 is an **internal developer preview**. It runs agent processes with your f
 ## Contributing & Support
 
 ### I found a bug. Where do I report it?
-[GitHub Issues](https://github.com/idealvibe/acp/issues) — include your ACP version, OS, and steps to reproduce.
+[GitHub Issues](https://github.com/PayEz-Net/acp/issues) — include your ACP version, OS, and steps to reproduce.
 
 ### How do I request a feature?
 Open a GitHub Discussion or mail your coordinator agent (BAPert) with the tag `[FEATURE REQUEST]`.

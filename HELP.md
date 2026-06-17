@@ -105,5 +105,5 @@ See [FAQ.md](FAQ.md) for detailed troubleshooting.
 ## Support
 
 - **Email:** support@idealvibe.online
-- **GitHub Issues:** [github.com/idealvibe/acp/issues](https://github.com/idealvibe/acp/issues)
+- **GitHub Issues:** [github.com/PayEz-Net/acp/issues](https://github.com/PayEz-Net/acp/issues)
 - **In-app:** Avatar menu → Send feedback

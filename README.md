@@ -76,7 +76,7 @@ ACP v1 ships as an **internal developer preview**. It runs Claude CLI with eleva
 - **FAQ & Troubleshooting:** See [FAQ.md](FAQ.md)
 - **In-app Help:** Click the avatar menu → Help
 - **Support:** support@idealvibe.online
-- **Issues:** [GitHub Issues](https://github.com/idealvibe/acp/issues)
+- **Issues:** [GitHub Issues](https://github.com/PayEz-Net/acp/issues)
 
 ---
 
