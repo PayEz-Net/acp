@@ -37,9 +37,11 @@ jobs:
         with:
           node-version: "20"
 
+      # acp-api has no committed lockfile yet, so `npm ci` can't run there.
+      # `npm install` is correct until acp-api commits a package-lock.json.
       - name: Install acp-api dependencies
         working-directory: acp-api
-        run: npm ci
+        run: npm install
 
       - name: Install acp-desktop dependencies
         working-directory: acp-desktop
