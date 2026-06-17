@@ -55,7 +55,7 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
     // and POSTs it here. Forwarded as-is to the Electron callback server;
     // pty.ts validates + falls back to settings.agentProvider on unknown
     // values. Per feedback_runtime_choice_vs_platform_llm.
-    const validRuntime = (runtime === 'claude' || runtime === 'kimi' || runtime === 'codex')
+    const validRuntime = (runtime === 'claude' || runtime === 'kimi')
       ? runtime
       : undefined;
 

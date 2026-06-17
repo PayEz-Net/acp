@@ -28,7 +28,7 @@
  */
 
 export type CurrentProjectState = 'stored' | 'unset' | 'empty';
-export type RuntimeId = 'claude' | 'kimi' | 'codex';
+export type RuntimeId = 'claude' | 'kimi';
 
 export interface CloudProjectDto {
   id: number;

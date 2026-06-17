@@ -171,7 +171,7 @@ export async function resolveMemberEffort(
 
 /**
  * WO #84135 §3.1 — the SINGLE source-of-truth resolver for a project's TEAM
- * runtime (claude | kimi | codex). Runtime is a TEAM-level setting (one value
+ * runtime (claude | kimi). Runtime is a TEAM-level setting (one value
  * per project, applied to every agent — §1, Jon 2026-06-16), unlike the
  * per-member effort_override above.
  *
@@ -194,7 +194,7 @@ export async function resolveMemberEffort(
 export async function resolveTeamRuntime(
   cfg: Config,
   projectId: number,
-): Promise<'claude' | 'kimi' | 'codex' | undefined> {
+): Promise<'claude' | 'kimi' | undefined> {
   const signedPath = `${PROJECT_TEAM_PATH}/${projectId}`;
   const url = `${cfg.vibeApiUrl}${signedPath}`;
   let token = await ensureValidToken(cfg.idpUrl);
@@ -223,7 +223,7 @@ export async function resolveTeamRuntime(
     }
     if (attempt.status < 200 || attempt.status >= 300) return undefined;
     const r = attempt.body?.data?.project?.runtime_choice;
-    return (r === 'claude' || r === 'kimi' || r === 'codex') ? r : undefined;
+    return (r === 'claude' || r === 'kimi') ? r : undefined;
   } catch {
     return undefined;
   }
