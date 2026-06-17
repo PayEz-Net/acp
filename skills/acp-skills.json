@@ -1,0 +1,86 @@
+{
+  "name": "ACP Agent Skills",
+  "version": "1.0.0",
+  "description": "Official skill pack for Agent Collaboration Platform",
+  "minimumAcpVersion": "1.0.0",
+  "skills": [
+    {
+      "name": "agent-onboarding",
+      "version": "1.0.0",
+      "description": "Dynamically loads agent persona from vibe.global_vibe_agents table based on 'report as {AgentName}' trigger.",
+      "triggers": ["report as"],
+      "path": "agent-onboarding/SKILL.md"
+    },
+    {
+      "name": "gitnexus-code",
+      "version": "1.0.0",
+      "description": "Navigate and understand codebases using GitNexus knowledge graph.",
+      "triggers": ["how does", "what calls", "show me", "find all usages"],
+      "path": "gitnexus-code/SKILL.md"
+    },
+    {
+      "name": "vibe-sql",
+      "version": "1.0.0",
+      "description": "Query VibeSQL PostgreSQL databases for agent profiles, mail, and data.",
+      "triggers": ["check my inbox", "show agents", "query", "list tables"],
+      "path": "vibe-sql/SKILL.md"
+    },
+    {
+      "name": "acp-kanban",
+      "version": "1.0.0",
+      "description": "Manage kanban tasks via ACP API. Create, update, assign, and track tasks.",
+      "triggers": ["kanban", "task", "create", "update", "assign", "status", "backlog", "in_progress", "review", "done", "blocked"],
+      "path": "acp-kanban/SKILL.md"
+    },
+    {
+      "name": "agent-mail",
+      "version": "1.0.0",
+      "description": "Send and read agent mail via ACP API. Check inbox, send messages, reply to threads.",
+      "triggers": ["mail", "inbox", "send", "reply", "check", "message"],
+      "path": "agent-mail/SKILL.md"
+    },
+    {
+      "name": "acp-project",
+      "version": "1.0.0",
+      "description": "Switch projects, manage project settings, and view project team via ACP API.",
+      "triggers": ["project", "switch", "team", "list", "projects", "settings"],
+      "path": "acp-project/SKILL.md"
+    },
+    {
+      "name": "acp-autonomy",
+      "version": "1.0.0",
+      "description": "Start and stop unattended mode, check autonomy status, and manage legacy standup entries via ACP API.",
+      "triggers": ["autonomy", "unattended", "start", "stop", "status"],
+      "path": "acp-autonomy/SKILL.md"
+    },
+    {
+      "name": "acp-standup",
+      "version": "1.0.0",
+      "description": "File standup reports, open/close rounds, and triage blockers via ACP API. Team check-in for agents.",
+      "triggers": ["standup", "checkin", "check-in", "did", "next", "blockers", "file", "report", "close", "round", "triage"],
+      "path": "acp-standup/SKILL.md"
+    },
+    {
+      "name": "acp-terminal",
+      "version": "1.0.0",
+      "description": "Spawn, kill, and resize agent terminals via ACP API.",
+      "triggers": ["terminal", "spawn", "kill", "resize", "agent", "pty"],
+      "path": "acp-terminal/SKILL.md"
+    },
+    {
+      "name": "acp-documents",
+      "version": "1.0.0",
+      "description": "Manage project documents via ACP API. List, read, create, update, and delete documents scoped to the active project.",
+      "triggers": ["document", "doc", "docs", "list documents", "show docs", "read doc", "create doc", "update doc", "delete doc"],
+      "path": "acp-documents/SKILL.md"
+    }
+  ],
+  "installation": {
+    "targetDirectory": "~/.kimi/skills",
+    "backupExisting": true
+  },
+  "documentation": {
+    "readme": "README.md",
+    "changelog": "CHANGELOG.md"
+  }
+}

@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+out/
+
+# Vite
+*.local
+
+# Editor
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+
+# npm publish wrapper: track hand-authored source (install.js, package.json,
+# bin/, README.md); ignore only the postinstall-downloaded binary + deps.
+npm-dist/installer.exe
+npm-dist/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Electron
+*.asar
+
+# TypeScript
+*.tsbuildinfo
+.gitnexus
+
+acp-api-release/
+# WO #292 — codegen build artifact (regenerated every build from ACP_ENV)
+src/main/env.generated.ts
+
+# build outputs (stale-secret hygiene — never track; like release/)
+release-win/
+release-smoke/

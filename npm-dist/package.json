@@ -1,0 +1,44 @@
+{
+  "name": "acp-desktop",
+  "version": "1.0.1",
+  "description": "ACP Desktop — Agent Collaboration Platform for Windows",
+  "main": "bin/acp-desktop.js",
+  "bin": {
+    "acp-desktop": "bin/acp-desktop.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "PayEz <dev@payez.net>",
+  "license": "MIT",
+  "keywords": [
+    "acp",
+    "agent",
+    "collaboration",
+    "desktop",
+    "electron",
+    "claude"
+  ],
+  "homepage": "https://idealvibe.online/acp/docs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PayEz-Net/acp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PayEz-Net/acp/issues"
+  }
+}

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* https://*.payez.net https://*.idealvibe.online https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://login.microsoftonline.com https://graph.microsoft.com https://github.com https://api.github.com https://graph.facebook.com https://appleid.apple.com;" />
+    <title>ACP</title>
+    <!--
+      Wave C/2 Commit D/A — boot overlay per Aurum R1 lock (BAPert msg 1156).
+      Hidden by default; the inline script below reads electronAPI.getNextBootOverlay()
+      synchronously and shows the overlay when a project switch was committed
+      before app.quit() (set by main process project-switch handler). React
+      fades + clears the flag on mount-complete (App.tsx). Zero-flash: user
+      sees one continuous "Switching to X…" surface from click → restart →
+      cockpit landing.
+    -->
+    <style>
+      #boot-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #0f172a;
+        color: #fff;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        opacity: 1;
+        transition: opacity 200ms ease-out;
+      }
+      #boot-overlay.visible { display: flex; }
+      #boot-overlay.fade-out { opacity: 0; pointer-events: none; }
+      #boot-overlay .avatar {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        font-weight: 600;
+        font-size: 26px;
+        margin-bottom: 24px;
+        background: #5b8def;
+      }
+      #boot-overlay .title {
+        font-size: 18px;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.95);
+      }
+      #boot-overlay .spinner {
+        width: 24px;
+        height: 24px;
+        border: 2px solid rgba(255, 255, 255, 0.2);
+        border-top-color: #5b8def;
+        border-radius: 50%;
+        animation: boot-spin 0.8s linear infinite;
+        margin-top: 24px;
+      }
+      #boot-overlay .timeout-hint {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.55);
+        margin-top: 24px;
+        display: none;
+      }
+      #boot-overlay.show-timeout .timeout-hint { display: block; }
+      @keyframes boot-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot-overlay" aria-live="polite" aria-busy="true">
+      <div class="avatar" id="boot-overlay-avatar">P</div>
+      <div class="title" id="boot-overlay-title">Switching…</div>
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="timeout-hint">Taking longer than expected — give it a moment</div>
+    </div>
+    <script>
+      // Wave C/2 Commit D/A — pre-mount overlay paint.
+      // Runs before React loads. Sync read of the next-boot flag via
+      // contextBridge-exposed sync IPC. The 8-color palette matches the
+      // AgentAvatar deterministic hash so the project avatar color stays
+      // consistent with what the user sees in the cockpit on landing.
+      (function () {
+        try {
+          var api = window.electronAPI;
+          if (!api || typeof api.getNextBootOverlay !== 'function') return;
+          var overlay = api.getNextBootOverlay();
+          if (!overlay || typeof overlay.project_name !== 'string') return;
+
+          var palette = [
+            'oklch(63% 0.17 28)',   // orange-rose
+            'oklch(63% 0.17 80)',   // amber
+            'oklch(63% 0.17 140)',  // emerald
+            'oklch(63% 0.17 195)',  // cyan
+            'oklch(63% 0.17 240)',  // blue
+            'oklch(63% 0.17 290)',  // violet
+            'oklch(63% 0.17 330)',  // pink
+            'oklch(63% 0.17 10)',   // red
+          ];
+          function hashColor(name) {
+            var h = 0;
+            for (var i = 0; i < name.length; i++) {
+              h = (h * 31 + name.charCodeAt(i)) | 0;
+            }
+            return palette[Math.abs(h) % palette.length];
+          }
+
+          var el = document.getElementById('boot-overlay');
+          var avatar = document.getElementById('boot-overlay-avatar');
+          var title = document.getElementById('boot-overlay-title');
+          if (!el || !avatar || !title) return;
+
+          avatar.style.backgroundColor = hashColor(overlay.project_name);
+          avatar.textContent = overlay.project_name.charAt(0).toUpperCase();
+          title.textContent = 'Switching to ' + overlay.project_name + '…';
+          el.classList.add('visible');
+
+          // 10s timeout subtitle — only shown if React still hasn't
+          // mounted by then (cold boot worst case). Cleared when React
+          // fades the overlay out.
+          var timeoutTimer = setTimeout(function () {
+            el.classList.add('show-timeout');
+          }, 10000);
+          el.dataset.timeoutTimerId = String(timeoutTimer);
+        } catch (err) {
+          // Boot overlay is a polish layer — never let it block startup.
+          console.warn('[BootOverlay] failed to paint pre-mount overlay:', err);
+        }
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>
