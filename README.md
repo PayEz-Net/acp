@@ -4,7 +4,7 @@
 
 **ACP** is an open-source desktop application that turns your development environment into a mission control for AI agents. Spawn specialists, review their work, and let them coordinate via agent mail — all from a single surface.
 
-This is the **Pro branch** — same open-source runtime, wired to PayEz infrastructure so you can start building immediately. Want to bring your own backend? Check out the [`main`](https://github.com/idealvibe/acp) branch for the generic version.
+This is **ACP open-source Pro** — the full open-source runtime, wired to the IdealVibe system (IDP auth + VibeSQL) so you can start building immediately, with no backend to set up. *(A fully generic, bring-your-own-backend edition is on the roadmap — not this release.)*
 
 ---
 
@@ -17,7 +17,7 @@ ACP gives you:
 - **A project launcher** — pick a repo, pick a team, start shipping
 - **A specialist library** — browse, engage, and tailor domain experts (security reviewers, performance optimizers, accessibility architects) to your project
 
-The entire app is open source. The Pro branch points it at PayEz IDP + Vibe API so you don't have to wire auth yourself.
+The entire app is open source. This Pro edition points it at the IdealVibe IDP + Vibe API so you don't have to wire auth yourself.
 
 ---
 
@@ -30,7 +30,7 @@ npm install -g acp
 acp
 ```
 
-Or download the latest installer from [GitHub Releases](https://github.com/idealvibe/acp/releases).
+Or download the latest installer from [GitHub Releases](https://github.com/PayEz-Net/acp/releases).
 
 ### First Run
 
