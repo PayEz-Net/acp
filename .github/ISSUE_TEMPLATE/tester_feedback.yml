@@ -1,0 +1,33 @@
+name: Tester feedback
+description: Share your experience, ideas, or friction — not necessarily a bug
+title: "[Feedback]: "
+labels: ["feedback", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We're building in the open, and your first impressions matter most.
+        Tell us what landed and what didn't — there are no wrong answers here.
+  - type: textarea
+    id: trying-to-do
+    attributes:
+      label: What were you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: what-felt-good
+    attributes:
+      label: What felt good or clicked?
+  - type: textarea
+    id: what-confused
+    attributes:
+      label: What was confusing or got in your way?
+  - type: textarea
+    id: one-change
+    attributes:
+      label: One thing you'd change
+  - type: input
+    id: context
+    attributes:
+      label: Where were you? (optional)
+      placeholder: e.g. first run / Hello World project / building my own project

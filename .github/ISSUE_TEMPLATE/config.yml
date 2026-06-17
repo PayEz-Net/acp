@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/PayEz-Net/acp/discussions
+    about: Ask questions, share ideas, or chat with the community. Not sure if it's a bug? Start here.
+  - name: Security vulnerability (private)
+    url: mailto:security@payez.com
+    about: Never open a public issue for a security bug — email us privately.
+  - name: Account or billing support
+    url: mailto:support@idealvibe.online
+    about: Help with your IdealVibe account or billing.

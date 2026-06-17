@@ -23,9 +23,7 @@ Thanks for considering a contribution. ACP is an open-source agent collaboration
 - Windows 10/11 (primary target) or macOS/Linux (community-supported)
 
 ### Environment
-Copy `.env.example` to `.env` and fill in your values. You will need:
-- PayEz/idealvibe API credentials (for Pro branch)
-- Or self-hosted backend endpoints (for `main` branch)
+Copy `.env.example` to `.env` and fill in your values. This is the open-source **Pro** edition — it's wired to the IdealVibe system (IDP auth + VibeSQL), so you point it at your IdealVibe credentials and start building. (A fully generic, bring-your-own-backend edition is on the roadmap — not this release.)
 
 ### Build
 ```bash
@@ -44,7 +42,7 @@ Look for issues labeled `good first issue` or `help wanted`. These are vetted by
 The Specialist Library (build-a-agent) is actively under development. If you have domain expertise in a specific area (security, accessibility, ML, etc.), consider contributing a specialist template to `everything-claude-code/skills/`.
 
 ### Bug Fixes
-Check the [issue tracker](https://github.com/idealvibe/acp/issues) for confirmed bugs. Reproducible bugs with clear steps get priority.
+Check the [issue tracker](https://github.com/PayEz-Net/acp/issues) for confirmed bugs. Reproducible bugs with clear steps get priority.
 
 ### Documentation
 Docs improvements are always welcome. The `docs/` folder and README files are fair game.
@@ -126,6 +124,6 @@ Violations may result in temporary or permanent ban from the project.
 ## Questions?
 
 - **Dev questions:** Open a GitHub Discussion
-- **Bug reports:** [GitHub Issues](https://github.com/idealvibe/acp/issues)
+- **Bug reports:** [GitHub Issues](https://github.com/PayEz-Net/acp/issues)
 - **Security:** security@payez.com
 - **General:** support@idealvibe.online
