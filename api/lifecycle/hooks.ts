@@ -25,13 +25,17 @@ export class LifecycleHooks {
    * Called when an agent is spawned. Signals party engine and logs standup.
    */
   async onAgentSpawned(agentName: string): Promise<void> {
-    // Party engine: auto-signal with zone entrance, status available
+    // Party engine: auto-signal with zone entrance, status IDLE. The PERSISTED signal store
+    // must agree with the agent-status SSE below (both idle) — the renderer rehydrates this
+    // store via GET /v1/party, so persisting a non-idle/out-of-enum value (was 'available')
+    // would make a never-reporting agent rehydrate as non-idle on initial-load/reconnect,
+    // breaking the §4 spawn-default-idle rule on every surface but the live SSE (QA 8077).
     try {
       await this.storage.upsertSignal({
         agentId: `agent:${agentName}`,
         agentName,
         zone: 'entrance',
-        status: 'available',
+        status: 'idle',
         needs: [],
         offers: [],
         keywords: [],
@@ -53,7 +57,10 @@ export class LifecycleHooks {
       zone: 'entrance',
       status: 'available',
     });
-    this.eventBus.emitAgentStatus({ agent: agentName, status: 'ready' });
+    // Spawn defaults the board status to IDLE, not 'ready'/inferred-busy
+    // (comprehensive-installer-v1 §4): the AGENT decides its working/idle status via
+    // POST /v1/status. A freshly-spawned agent that hasn't self-reported shows idle.
+    this.eventBus.emitAgentStatus({ agent: agentName, status: 'idle' });
   }
 
   /**
@@ -118,30 +125,18 @@ export class LifecycleHooks {
   }
 
   /**
-   * Called when agent status changes (busy/idle based on PTY activity).
+   * PTY-activity inference RETIRED as the working/idle authority (comprehensive-installer-v1 §4,
+   * Jon's authority rule: the AGENT decides its status via POST /v1/status). These hooks no longer
+   * WRITE status — an inferred busy/idle the user can't trust is worse than an honest self-report.
+   * Kept as no-ops (not deleted) so any residual PTY-activity caller can't crash; they assert
+   * nothing. No silent fallback to inference: absence of a self-report defaults idle (renderer).
    */
-  async onAgentBusy(agentName: string): Promise<void> {
-    try {
-      await this.updateSignalStatus(agentName, 'busy');
-    } catch { /* non-fatal */ }
-
-    this.eventBus.emitPartyUpdate({
-      type: 'status_change',
-      agent: agentName,
-      status: 'busy',
-    });
+  async onAgentBusy(_agentName: string): Promise<void> {
+    // intentionally no-op — status authority is agent self-report (POST /v1/status)
   }
 
-  async onAgentIdle(agentName: string): Promise<void> {
-    try {
-      await this.updateSignalStatus(agentName, 'idle');
-    } catch { /* non-fatal */ }
-
-    this.eventBus.emitPartyUpdate({
-      type: 'status_change',
-      agent: agentName,
-      status: 'idle',
-    });
+  async onAgentIdle(_agentName: string): Promise<void> {
+    // intentionally no-op — status authority is agent self-report (POST /v1/status)
   }
 
   /**
@@ -175,19 +170,7 @@ export class LifecycleHooks {
       // Storage failure is non-fatal for hooks
     }
   }
-
-  private async updateSignalStatus(agentName: string, status: string): Promise<void> {
-    const signals = await this.storage.listSignals();
-    const agentSignal = signals.find((s: any) =>
-      (s.agentId || s.agent_id) === `agent:${agentName}`
-    );
-    if (agentSignal) {
-      await this.storage.upsertSignal({
-        ...agentSignal,
-        agentId: agentSignal.agentId || agentSignal.agent_id,
-        agentName: agentSignal.agentName || agentSignal.agent_name,
-        status,
-      });
-    }
-  }
+  // updateSignalStatus() removed — it backed the PTY-activity inference (onAgentBusy/onAgentIdle),
+  // retired as the status authority (comprehensive-installer-v1 §4). Status is now agent self-report
+  // via POST /v1/status; no inferred-status writer remains.
 }

@@ -17,6 +17,7 @@ import chatRoutes from './routes/chat.js';
 import autonomyRoutes from './routes/autonomy.js';
 import registryRoutes from './routes/registry.js';
 import notificationRoutes from './routes/notifications.js';
+import statusRoutes from './routes/status.js';
 import { PartyEngine } from '../collaboration/party_engine.js';
 import { UpstreamSseManager } from './sse/upstreamManager.js';
 import sseStreamRoutes from './routes/sseStream.js';
@@ -280,7 +281,10 @@ export async function createApp(cfg) {
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
-  
+  // Agent self-report status (comprehensive-installer-v1 §4) — the AGENT decides its status;
+  // single writer to the agent-status SSE the board reads. Retires PTY-activity inference.
+  app.use('/v1/status', statusRoutes(storage, localEventBus));
+
   // CLI proxy routes - forward to IDP
   app.use(cliProxyRoutes(appConfig));
 
