@@ -47,7 +47,16 @@ export class LocalEventBus {
   }
 
   emitAgentStatus(data: Record<string, unknown>): void {
-    this.emit({ event: 'agent-status', data });
+    // Wire contract (BAPert 7758): the renderer keys this event on `agent_name`
+    // (useAcpSse.ts guard). All callers pass `agent`, so normalize HERE — the one
+    // wire-authority for this event — so no current or future caller can drift.
+    // Stamp updated_at to complete the documented { agent_name, status,
+    // last_action_summary, updated_at } shape.
+    const { agent, ...rest } = data as { agent?: unknown; agent_name?: unknown };
+    this.emit({
+      event: 'agent-status',
+      data: { agent_name: agent ?? rest.agent_name, updated_at: new Date().toISOString(), ...rest },
+    });
   }
 
   // WO-1 Deliverable C: sidecar is the SOLE authority for terminal-dead.
