@@ -149,6 +149,18 @@ interface CloudProfileShape {
   version?: number;
 }
 
+// Single onboard directive appended to EVERY composed profile so every agent
+// learns to self-report status on onboard (comprehensive-installer-v1 §4: the
+// /v1/status backend is live but agents need the directive to call it). One
+// authority here — NOT duplicated into per-agent profile docs. Inline-directive
+// pattern, matching the 'Run /agent-mail' onboarding style.
+const STATUS_SELF_REPORT_DIRECTIVE = [
+  '## Status self-report',
+  'You are the single authority on your own status. Whenever your state changes, POST /v1/status {"status":"<one-of>","note":"<one-line>"} with header X-ACP-Agent: <your name>.',
+  'status is one of: working, spawning, awaiting_review, waiting_for_human, blocked, idle, unresponsive, stopped, error, failed.',
+  'note = a one-line summary of what you are doing (shows as the board subline). If you never report, you show idle by default. Activity inference is retired — your reported status is the only authority.',
+].join('\n');
+
 function mapCloudProfile(
   cloudProfile: CloudProfileShape,
   meta: { name: string; displayName?: string; role?: string },
@@ -173,7 +185,12 @@ function mapCloudProfile(
     cloudProfile.communication_md,
     cloudProfile.response_pattern_md,
   ].filter((s): s is string => typeof s === 'string' && s.length > 0);
-  const profile = sections.join('\n\n');
+  // Append the single status self-report directive to the composed profile so
+  // every onboarding agent (numeric-id and name paths both land here) learns it.
+  const composed = sections.join('\n\n');
+  const profile = composed
+    ? `${composed}\n\n${STATUS_SELF_REPORT_DIRECTIVE}`
+    : STATUS_SELF_REPORT_DIRECTIVE;
   return {
     name: meta.name,
     displayName: meta.displayName || meta.name,
