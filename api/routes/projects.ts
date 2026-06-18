@@ -844,7 +844,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
   });
 
   // POST /v1/projects/:id/lifecycle — proxy to cloud state machine
-  // (start / pause / restart). Body `{action}`. Wave C state machine
+  // (start / pause / restart / idle). Body `{action}`. Wave C state machine
   // gates on 8-cond predicate; surfaces INVALID_TRANSITION /
   // INCOMPLETE_PROJECT errors verbatim. Used by main process when
   // user triggers Start fleet via renderer IPC.
@@ -858,8 +858,8 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
         return;
       }
       const action = (req.body || {}).action;
-      if (action !== 'start' && action !== 'pause' && action !== 'restart') {
-        res.status(400).json(error('VALIDATION_ERROR', "action must be 'start' | 'pause' | 'restart'", 'project_lifecycle_post', (req as any).requestId));
+      if (action !== 'start' && action !== 'pause' && action !== 'restart' && action !== 'idle') {
+        res.status(400).json(error('VALIDATION_ERROR', "action must be 'start' | 'pause' | 'restart' | 'idle'", 'project_lifecycle_post', (req as any).requestId));
         return;
       }
       const { status, payload } = await callCloud(cfg, 'POST', `${CLOUD_PROJECTS_PATH}/${id}/lifecycle`, undefined, { action });

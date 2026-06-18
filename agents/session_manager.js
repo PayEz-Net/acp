@@ -630,24 +630,17 @@ export class SessionManager {
     return this._rowToTask(t);
   }
 
-  // Maps to the EXISTING cloud board reads (GET /v1/projects/{id}/kanban/active|done|waiting,
-  // DnP 7279). Those return board columns, so to reproduce the old arbitrary-filter SELECT we
-  // fetch ALL three boards, merge (dedupe by id), then apply the remaining predicates IN-MEMORY
-  // — exactly what the SQL did — instead of guessing a status->board mapping. A failed fetch
-  // THROWS (surfaced), never a silent []. FLAGGED to DnP: confirms board read wrapper shape
-  // (assumed { data: { tasks: [...] } } | { data: [...] }).
+  // Single list-all read across ALL statuses (DnP 8138). Replaces the 3-board union
+  // (active/done/waiting) which had NO bucket for review/blocked AND read the cloud
+  // `items` envelope as `tasks` (object, not array) => dropped every row. The new
+  // endpoint returns { data: { tasks: [...] } }; desktop buckets to columns.
   async listTasks(filter = {}) {
     const pid = this._requireProjectId(filter.projectId, 'listTasks');
-    const seen = new Map();
-    for (const board of ['active', 'done', 'waiting']) {
-      const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/${board}`);
-      const tasks = res?.data?.tasks ?? res?.data ?? [];
-      for (const t of (Array.isArray(tasks) ? tasks : [])) {
-        const mapped = this._rowToTask(t);
-        if (mapped.id != null) seen.set(mapped.id, mapped);
-      }
-    }
-    let rows = Array.from(seen.values());
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks`);
+    const tasks = res?.data?.tasks ?? [];
+    let rows = (Array.isArray(tasks) ? tasks : [])
+      .map(t => this._rowToTask(t))
+      .filter(r => r.id != null);
     // In-memory predicates mirroring the prior SQL. archived three-valued: legacy null = NOT archived.
     if (filter.archived === true) rows = rows.filter(r => r.archived === true);
     else if (!filter.includeArchived) rows = rows.filter(r => r.archived !== true);
