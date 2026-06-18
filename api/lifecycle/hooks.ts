@@ -50,12 +50,15 @@ export class LifecycleHooks {
     // Standup entry: lifecycle
     await this.addStandupEntry(agentName, 'lifecycle', `${agentName} spawned`);
 
-    // SSE: party + agent status
+    // SSE: party + agent status. The party 'agent_joined' delta carries the honest at-rest
+    // default (idle), NOT a fabricated 'available' — by-signature trust-render purge (Aurum 8081,
+    // QA 8084): no non-self-report source may emit a work-status-shaped value (working/available/
+    // busy). 'zone: entrance' carries the join/presence concept; status stays honest-idle.
     this.eventBus.emitPartyUpdate({
       type: 'agent_joined',
       agent: agentName,
       zone: 'entrance',
-      status: 'available',
+      status: 'idle',
     });
     // Spawn defaults the board status to IDLE, not 'ready'/inferred-busy
     // (comprehensive-installer-v1 §4): the AGENT decides its working/idle status via
