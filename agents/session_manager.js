@@ -275,7 +275,15 @@ export class SessionManager {
   // Cloud project list for the logged-in developer (GET /v1/projects?activeOnly=true),
   // soft-cached. Maps to the {id, name, description, status} shape consumers read.
   async listProjects() {
-    if (this._projectListCache && Date.now() - this._projectListAt < PROJECT_TTL_MS) {
+    // Serve the soft cache ONLY when it holds a NON-EMPTY list. An empty []
+    // is truthy, so the old `this._projectListCache &&` guard happily pinned a
+    // raced-empty result for the whole TTL — the client-side amplifier of the
+    // /v1/projects 0<->6 flicker (BAPert 8032 defense lane, same TTL-poison
+    // class as getActiveProjectId). Re-resolve until a real list lands; a
+    // last-known non-empty list still rides out a one-call flicker until its
+    // own TTL expires (anti-flicker), then re-resolves truthfully.
+    if (this._projectListCache && this._projectListCache.length > 0
+        && Date.now() - this._projectListAt < PROJECT_TTL_MS) {
       return this._projectListCache;
     }
     const result = await this._cloudGet('/v1/projects?activeOnly=true', { trigger: 'project-list' });
@@ -283,15 +291,20 @@ export class SessionManager {
     if (result.status < 200 || result.status >= 300) {
       throw new Error(`project list cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/projects`);
     }
-    const mapped = extractAndMapList(result.body) || [];
-    this._projectListCache = mapped.map((p) => ({
+    const mapped = (extractAndMapList(result.body) || []).map((p) => ({
       id: p.id,
       name: p.name,
       description: p.description ?? '',
       status: p.is_active === false ? 'inactive' : 'active',
     }));
-    this._projectListAt = Date.now();
-    return this._projectListCache;
+    // Memoize + arm the TTL ONLY for a real (non-empty) list. An empty result
+    // is returned truthfully but NOT cached, so the next call re-resolves
+    // instead of serving a poisoned empty.
+    if (mapped.length > 0) {
+      this._projectListCache = mapped;
+      this._projectListAt = Date.now();
+    }
+    return mapped;
   }
 
   async getProject(id) {
@@ -305,7 +318,14 @@ export class SessionManager {
   // null = unset/empty (no project selected); consumers treat null as "no active project"
   // (picker / create-CTA), never a silent default (no-unjustified-fallback / Aurum 7287).
   async getActiveProjectId() {
-    if (this._currentProjectId !== undefined && Date.now() - this._currentProjectAt < PROJECT_TTL_MS) {
+    // Serve the soft cache ONLY when it holds a VALID pid. A transient null
+    // from a raced developer->active-project->tenant resolve must NEVER be
+    // memoized: caching null here (with a fresh timestamp) pinned "no active
+    // project" for the whole TTL and stranded the desktop/kanban at 0 long
+    // after the cloud recovered (BAPert 8032 defense lane — the TTL-poison).
+    // The truthy guard also means a stale positive can no longer be clobbered
+    // by a transient null and then served — re-resolve until a real pid lands.
+    if (this._currentProjectId && Date.now() - this._currentProjectAt < PROJECT_TTL_MS) {
       return this._currentProjectId;
     }
     const result = await this._cloudGet('/v1/users/me/current-project', { trigger: 'current-project' });
@@ -314,9 +334,16 @@ export class SessionManager {
       throw new Error(`current-project cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/users/me/current-project`);
     }
     const mapped = extractAndMapCurrent(result.body);
-    this._currentProjectId = mapped.current_project_id ?? null;
-    this._currentProjectAt = Date.now();
-    return this._currentProjectId;
+    const resolved = mapped.current_project_id ?? null;
+    // Memoize + arm the TTL ONLY for a real pid. A null is returned truthfully
+    // to the caller but NOT cached, so the next call re-resolves instead of
+    // serving a poisoned null. (setActiveProjectId still owns the explicit
+    // positive-set cache; an explicit clear-to-null simply re-resolves.)
+    if (resolved) {
+      this._currentProjectId = resolved;
+      this._currentProjectAt = Date.now();
+    }
+    return resolved;
   }
 
   // Focus writeback to the cloud (PUT /v1/users/me/current-project { project_id }) so the

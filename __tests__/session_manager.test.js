@@ -133,4 +133,50 @@ describe('SessionManager', () => {
       expect(result).toBe(false);
     });
   });
+
+  // BAPert 8032 DEFENSE lane — the developer->active-project->tenant flicker
+  // must NOT be able to strand the desktop/kanban at 0. A transient null/empty
+  // from a raced resolve must never be memoized (no TTL poison): the next call
+  // re-resolves instead of serving the poisoned value for the whole TTL.
+  describe('project-scope flicker hardening (no TTL poison)', () => {
+    const stored = (pid) => ({ status: 200, body: { data: { current_project_state: 'stored', current_project_id: pid } } });
+    const unset = () => ({ status: 200, body: { data: { current_project_state: 'unset' } } });
+    const listOf = (n) => ({ status: 200, body: { data: { projects: Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `p${i + 1}` })) } } });
+
+    test('getActiveProjectId: a raced null is NOT memoized — next call re-resolves to the real pid', async () => {
+      const responses = [unset(), stored(42)];
+      manager._cloudGet = jest.fn(async () => responses.shift());
+
+      // First resolve races to null/unset — returned truthfully, NOT cached.
+      expect(await manager.getActiveProjectId()).toBeNull();
+      // Without the fix, the null would be served from cache here (poison).
+      // With the fix, the cloud is hit again and the real pid lands.
+      expect(await manager.getActiveProjectId()).toBe(42);
+      expect(manager._cloudGet).toHaveBeenCalledTimes(2);
+    });
+
+    test('getActiveProjectId: a real pid IS memoized (single cloud call within TTL)', async () => {
+      manager._cloudGet = jest.fn(async () => stored(7));
+      expect(await manager.getActiveProjectId()).toBe(7);
+      expect(await manager.getActiveProjectId()).toBe(7);
+      expect(manager._cloudGet).toHaveBeenCalledTimes(1); // second served from cache
+    });
+
+    test('listProjects: a raced empty [] is NOT memoized — next call re-resolves to the real list', async () => {
+      const responses = [listOf(0), listOf(6)];
+      manager._cloudGet = jest.fn(async () => responses.shift());
+
+      expect(await manager.listProjects()).toHaveLength(0);
+      // The empty [] must NOT have armed the TTL — re-resolve gets the real 6.
+      expect(await manager.listProjects()).toHaveLength(6);
+      expect(manager._cloudGet).toHaveBeenCalledTimes(2);
+    });
+
+    test('listProjects: a non-empty list IS memoized (single cloud call within TTL)', async () => {
+      manager._cloudGet = jest.fn(async () => listOf(6));
+      expect(await manager.listProjects()).toHaveLength(6);
+      expect(await manager.listProjects()).toHaveLength(6);
+      expect(manager._cloudGet).toHaveBeenCalledTimes(1);
+    });
+  });
 });
