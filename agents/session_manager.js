@@ -32,16 +32,11 @@ export class SessionManager {
     this._projects = new Map();          // retained only for createProject's in-memory path (TODO: cloud)
     this._nextProjectId = 1;
 
-    // Phase 1 stub: agent documents registry is in-memory only. Real store
-    // lives in vibe.documents alongside projects (client_id=9,
-    // collection='vibe_agents'). Same TODO as projects: replace with a real
-    // DocumentStore that queries VibeSQL Server once per-request client
-    // context is plumbed through to SessionManager.
-    this._documents = new Map();
-    this._nextDocumentId = 1;
-
-    // Documents loaded per-project from VibeSQL (vibe.documents).
-    // No hardcoded seeds — every project sees only its own docs.
+    // Project documents are CLOUD-backed (project-scoped typed lane
+    // /v1/projects/:id/documents, Decision-C Bearer). No in-memory Map — the
+    // document methods proxy the cloud via _cloudDocuments and HONEST-FAIL when
+    // the store is unreachable (never a silent empty / fake-success). The old
+    // _documents/_nextDocumentId stub was ripped out (WO 8196 lane B).
 
     // Kanban tasks now VibeSQL-backed (vibe.kanban_tasks)
     // Phase 1 in-memory _tasks Map removed 2026-05-06
@@ -379,60 +374,82 @@ export class SessionManager {
   }
 
   // -----------------------------------------------------------------------
-  // Agent documents — Phase 1 in-memory stub.
-  // Backs api/routes/documents.ts so the Electron DocumentSidebar stops
-  // 500-ing on load. Returns an empty list until real VibeSQL wiring lands.
+  // Project documents — CLOUD-backed (WO 8196 lane B). Proxies the typed,
+  // project-scoped cloud endpoint /v1/projects/:id/documents on the SAME
+  // Decision-C Bearer lane as kanban (via _cloudDocuments). NO in-memory store,
+  // NO fake-success: every method throws on no-session / non-2xx / transport so
+  // the route surfaces it and FAILS (honest-fail). Until DnP deploys the cloud
+  // endpoint, these throw the cloud's verbatim 404 → documents.ts maps it to
+  // 503 DOCS_PERSISTENCE_NOT_WIRED. Contract: project-documents-contract-v1.md.
   // -----------------------------------------------------------------------
 
-  async createDocument(fields) {
-    const id = this._nextDocumentId++;
-    const doc = {
-      id,
-      project_id: fields.project_id ?? null,
-      title: fields.title ?? '',
-      content_md: fields.content_md ?? '',
-      type: fields.type ?? 'reference',
-      version: fields.version ?? '1.0',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  // Cloud document row (snake_case) -> renderer AgentDocument shape. `document_type`
+  // on the wire becomes `type` (the renderer DocumentType union).
+  _rowToDoc(row) {
+    if (!row) return null;
+    return {
+      id: row.id ?? row.document_id,
+      project_id: row.project_id ?? null,
+      title: row.title ?? '',
+      content_md: row.content_md ?? '',
+      type: row.document_type ?? row.type ?? 'other',
+      version: row.version ?? 1,
+      author_agent: row.author_agent ?? undefined,
+      parent_document_id: row.parent_document_id ?? undefined,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     };
-    this._documents.set(id, doc);
+  }
+
+  async createDocument(fields) {
+    const pid = this._requireProjectId(fields.project_id, 'createDocument');
+    const body = {
+      title: fields.title,
+      content_md: fields.content_md,
+      document_type: fields.type ?? undefined,
+      version: fields.version ?? undefined,
+      author_agent: fields.author_agent ?? undefined,
+      parent_document_id: fields.parent_document_id ?? undefined,
+    };
+    const res = await this._cloudDocuments('POST', `/v1/projects/${pid}/documents`, body);
+    const doc = this._rowToDoc(res?.data?.document);
+    if (!doc) throw new Error('createDocument: cloud response missing data.document');
     return doc;
   }
 
   async listDocuments(filter = {}) {
-    let docs = Array.from(this._documents.values());
-    if (filter.project_id !== undefined) {
-      docs = docs.filter(d => d.project_id === filter.project_id);
-    }
-    return docs;
+    const pid = this._requireProjectId(filter.project_id, 'listDocuments');
+    const res = await this._cloudDocuments('GET', `/v1/projects/${pid}/documents`);
+    const documents = res?.data?.documents ?? [];
+    return (Array.isArray(documents) ? documents : [])
+      .map(d => this._rowToDoc(d))
+      .filter(d => d && d.id != null);
   }
 
-  async getDocument(id) {
-    const key = Number(id);
-    return this._documents.get(key) || null;
+  async getDocument(id, projectId) {
+    const pid = this._requireProjectId(projectId, 'getDocument');
+    const res = await this._cloudDocuments('GET', `/v1/projects/${pid}/documents/${Number(id)}`);
+    return this._rowToDoc(res?.data?.document);
   }
 
-  async updateDocument(id, updates) {
-    const key = Number(id);
-    const existing = this._documents.get(key);
-    if (!existing) return null;
-    const next = {
-      ...existing,
-      ...(updates.project_id !== undefined ? { project_id: updates.project_id } : {}),
-      ...(updates.title !== undefined ? { title: updates.title } : {}),
-      ...(updates.content_md !== undefined ? { content_md: updates.content_md } : {}),
-      ...(updates.document_type !== undefined ? { type: updates.document_type } : {}),
-      ...(updates.version !== undefined ? { version: updates.version } : {}),
-      updated_at: new Date().toISOString(),
-    };
-    this._documents.set(key, next);
-    return next;
+  async updateDocument(id, updates, projectId) {
+    const pid = this._requireProjectId(projectId, 'updateDocument');
+    const body = {};
+    if (updates.title !== undefined) body.title = updates.title;
+    if (updates.content_md !== undefined) body.content_md = updates.content_md;
+    if (updates.document_type !== undefined) body.document_type = updates.document_type;
+    if (updates.version !== undefined) body.version = updates.version;
+    if (updates.author_agent !== undefined) body.author_agent = updates.author_agent;
+    if (updates.parent_document_id !== undefined) body.parent_document_id = updates.parent_document_id;
+    if (Object.keys(body).length === 0) return this.getDocument(id, pid);
+    const res = await this._cloudDocuments('PATCH', `/v1/projects/${pid}/documents/${Number(id)}`, body);
+    return this._rowToDoc(res?.data?.document);
   }
 
-  async deleteDocument(id) {
-    const key = Number(id);
-    return this._documents.delete(key);
+  async deleteDocument(id, projectId) {
+    const pid = this._requireProjectId(projectId, 'deleteDocument');
+    const res = await this._cloudDocuments('DELETE', `/v1/projects/${pid}/documents/${Number(id)}`);
+    return res?.data?.deleted === true;
   }
 
   // -----------------------------------------------------------------------
@@ -553,9 +570,13 @@ export class SessionManager {
   // (api.idealvibe.online) — NOT the dev box — so off-LAN (Praveen) works. THROWS on
   // no-session / non-2xx / transport so the caller SURFACES it (never a silent empty or
   // dev-box fallback — the exact lie we're removing).
-  async _cloudKanban(method, path, body) {
-    const token = await ensureValidToken(config.idpUrl, 'kanban');
-    if (!token) throw new Error(`kanban ${method} ${path}: NO_SESSION (log in first)`);
+  // General cloud typed-API call on the Decision-C lane (Bearer + X-Client-Id
+  // from the bearer, no Vibe HMAC). Reaches config.vibeApiUrl (api.idealvibe.online).
+  // THROWS on no-session / non-2xx / transport so the caller SURFACES it (never a
+  // silent empty or dev-box fallback). `label` only tags the error/log context.
+  async _cloudTyped(method, path, body, label) {
+    const token = await ensureValidToken(config.idpUrl, label);
+    if (!token) throw new Error(`${label} ${method} ${path}: NO_SESSION (log in first)`);
     const url = `${config.vibeApiUrl}${path}`;
     const doFetch = async (bearer) => {
       const controller = new AbortController();
@@ -582,15 +603,25 @@ export class SessionManager {
     };
     let attempt = await doFetch(token);
     if (attempt.status === 401) {
-      const refreshed = await forceRefresh(config.idpUrl, 'kanban-401');
-      if (!refreshed) throw new Error(`kanban ${method} ${path}: NO_SESSION after refresh`);
+      const refreshed = await forceRefresh(config.idpUrl, `${label}-401`);
+      if (!refreshed) throw new Error(`${label} ${method} ${path}: NO_SESSION after refresh`);
       attempt = await doFetch(refreshed);
     }
     if (attempt.status < 200 || attempt.status >= 300) {
       const msg = attempt.body?.error?.message || attempt.body?.error || `HTTP ${attempt.status}`;
-      throw new Error(`kanban ${method} ${path}: ${msg}`);
+      throw new Error(`${label} ${method} ${path}: ${msg}`);
     }
     return attempt.body;
+  }
+
+  // Off-LAN kanban migration (BAPert 7274 / DnP 7279 typed contracts).
+  async _cloudKanban(method, path, body) {
+    return this._cloudTyped(method, path, body, 'kanban');
+  }
+
+  // Project documents typed lane (WO 8196 lane B). Same Decision-C lane as kanban.
+  async _cloudDocuments(method, path, body) {
+    return this._cloudTyped(method, path, body, 'documents');
   }
 
   // Cloud kanban endpoints are project-scoped (/v1/projects/{id}/kanban/*, DnP 7279).
@@ -741,12 +772,12 @@ export class SessionManager {
       getActiveProjectId: () => self.getActiveProjectId(),
       setActiveProjectId: (id) => self.setActiveProjectId(id),
       createProject: (data) => self.createProject(data),
-      // Agent documents — forwards to the in-memory Phase 1 stub above.
+      // Project documents — CLOUD-backed (WO 8196 lane B), project-scoped.
       createDocument: (fields) => self.createDocument(fields),
       listDocuments: (filter) => self.listDocuments(filter),
-      getDocument: (id) => self.getDocument(id),
-      updateDocument: (id, updates) => self.updateDocument(id, updates),
-      deleteDocument: (id) => self.deleteDocument(id),
+      getDocument: (id, projectId) => self.getDocument(id, projectId),
+      updateDocument: (id, updates, projectId) => self.updateDocument(id, updates, projectId),
+      deleteDocument: (id, projectId) => self.deleteDocument(id, projectId),
       // Kanban tasks — forwards to the in-memory Phase 1 stub above.
       createTask: (data, projectId) => self.createTask(data, projectId),
       getTask: (id, projectId) => self.getTask(id, projectId),
