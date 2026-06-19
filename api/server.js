@@ -14,7 +14,6 @@ import messagingRoutes from './routes/messaging.js';
 import kanbanRoutes from './routes/kanban.js';
 import autonomyRoutes from './routes/autonomy.js';
 import registryRoutes from './routes/registry.js';
-import notificationRoutes from './routes/notifications.js';
 import statusRoutes from './routes/status.js';
 import { UpstreamSseManager } from './sse/upstreamManager.js';
 import sseStreamRoutes from './routes/sseStream.js';
@@ -257,7 +256,10 @@ export async function createApp(cfg) {
   supervisor.link({ eventBus: localEventBus });
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
-  app.use('/v1/notifications', notificationRoutes(storage));
+  // /v1/notifications CUT (WO 8201 / Jon: terminal state). The route had no
+  // consumer (renderer notifications are a local zustand store) and no real
+  // persistence lane — a permanent 501 stub is just a slower lie about intent.
+  // If notifications becomes a real feature it gets built WITH a real consumer.
   // Agent self-report status (comprehensive-installer-v1 §4) — the AGENT decides its status;
   // single writer to the agent-status SSE the board reads. Retires PTY-activity inference.
   app.use('/v1/status', statusRoutes(storage, localEventBus));
