@@ -80,30 +80,8 @@ export default function statusRoutes(storage: any, eventBus: LocalEventBus): Rou
 
       // SINGLE AUTHORITY: emit the same agent-status SSE event hooks.ts emits → the board
       // updates by push, one writer. `note` → last_action_summary (the showSummary subline).
+      // (The party signal-store mirror was removed with the party cut — WO 8201.)
       eventBus.emitAgentStatus({ agent: agentName, status, last_action_summary: summary });
-
-      // Best-effort mirror into the party signal store IFF the storage adapter implements it
-      // (the same store hooks.ts writes). Guarded + non-fatal: the SSE emit above is the live
-      // authority; signal persistence is supplementary and must never fail the report.
-      if (typeof storage?.upsertSignal === 'function' && typeof storage?.listSignals === 'function') {
-        try {
-          const signals = await storage.listSignals();
-          const existing = (signals || []).find(
-            (s: any) => (s.agentId || s.agent_id) === `agent:${agentName}`,
-          );
-          if (existing) {
-            await storage.upsertSignal({
-              ...existing,
-              agentId: existing.agentId || existing.agent_id,
-              agentName: existing.agentName || existing.agent_name,
-              status,
-              workingOn: summary,
-            });
-          }
-        } catch {
-          // non-fatal — signal store is supplementary to the SSE authority
-        }
-      }
 
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(

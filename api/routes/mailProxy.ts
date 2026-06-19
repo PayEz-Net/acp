@@ -1,8 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { error } from '../response.js';
 import type { Config } from '../../config.js';
-import type { ContractorService } from '../contractors/service.js';
-import type { SessionManager } from '../contractors/sessionManager.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
 
@@ -160,8 +158,6 @@ function sendProxyError(res: Response, req: Request, err: any, operation: string
 export default function mailProxyRoutes(
   cfg: Config,
   onMailSent?: MailSentCallback,
-  contractorService?: ContractorService,
-  sessionManager?: SessionManager,
 ): Router {
   const router = Router();
 
@@ -334,7 +330,6 @@ export default function mailProxyRoutes(
   });
 
   // POST /v1/mail/send -> idealvibe.online/v1/agentmail/send
-  // v2: Validates recipients (no more hiring side-effect — use POST /v1/contractors/hire)
   // WO-agent-mail-project-isolation §Sidecar: stamp project_id from session's
   // cached current-project before forwarding. Cloud-side enforces.
   router.post('/send', async (req: Request, res: Response) => {
@@ -353,19 +348,6 @@ export default function mailProxyRoutes(
           error('VALIDATION_ERROR', 'to must be a non-empty array of non-empty string recipient names', 'mail_send', (req as any).requestId)
         );
         return;
-      }
-
-      // v2: validate recipients — reject unknown names (AC-11), pass existing agents (AC-12)
-      if (contractorService) {
-        for (const recipientName of to) {
-          const result = await contractorService.resolveRecipient(from_agent, recipientName);
-          if (result.action === 'rejected') {
-            res.status(404).json(
-              error('UNKNOWN_RECIPIENT', result.error!, 'mail_send', (req as any).requestId)
-            );
-            return;
-          }
-        }
       }
 
       // Sidecar attach (WO-agent-mail-project-isolation §Sidecar): stamp the
@@ -389,12 +371,6 @@ export default function mailProxyRoutes(
 
       // Post-send hooks
       if ((cloudResult.data as any)?.success) {
-        // DONE: auto-completion — check if sender is a contractor completing work
-        if (contractorService && from_agent && subject && Array.isArray(to)) {
-          try {
-            await contractorService.checkDoneAutoComplete(from_agent, subject, to);
-          } catch { /* non-fatal — don't break mail delivery */ }
-        }
         if (onMailSent && from_agent && subject) {
           try { onMailSent(from_agent, subject, to || []); } catch { /* non-fatal */ }
         }

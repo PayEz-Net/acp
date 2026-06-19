@@ -6,7 +6,6 @@ export class Supervisor {
     this._cfg = cfg;
     this._maxRuntimeHours = cfg.autonomyMaxRuntimeHours || 4;
     this._notifyWebhook = cfg.notifyWebhook || null;
-    this._partyEngine = null;
     this._eventBus = null;
     this.unattendedMode = false;
     // Nightly Kanban ping timer
@@ -14,16 +13,15 @@ export class Supervisor {
     this._pingConfig = null; // { leadAgent, pingIntervalMinutes }
   }
 
-  /** Inject party engine and event bus for unattended mode wiring. */
-  link({ partyEngine, eventBus }) {
-    this._partyEngine = partyEngine;
+  /** Inject the event bus for unattended mode wiring. */
+  link({ eventBus }) {
     this._eventBus = eventBus;
   }
 
   /**
    * Dead man's switch: if 0 SSE clients for deadManTimeoutMs (default 5 min)
    * while unattended mode is ON, auto-pause.
-   * Called on party engine tick or its own interval.
+   * Driven by its own interval timer.
    */
   _deadManZeroSince = null;
   _deadManTimeoutMs = 5 * 60 * 1000;
@@ -114,10 +112,12 @@ export class Supervisor {
       await this.stopUnattended('restart');
     }
 
-    // If DB says enabled (stale from server restart), clear it first
-    const dbState = await this.getState();
-    if (dbState?.enabled) {
-      console.log('[Supervisor] Stale autonomy state in DB — clearing before start');
+    // If state already says enabled, clear it first. NOTE: autonomy state is
+    // IN-MEMORY only and is NOT restart-durable — Phase-2 (WO 8201) wires it to
+    // relational vibe_projects.project_lifecycle_state for restart-survival.
+    const priorState = await this.getState();
+    if (priorState?.enabled) {
+      console.log('[Supervisor] Prior autonomy state enabled — clearing before start');
       try { await this.stop('restart'); } catch { /* already handled */ }
     }
 
@@ -131,10 +131,10 @@ export class Supervisor {
 
     this.unattendedMode = true;
 
-    // Persist unattended fields — include leadAgent so _getLeadAgent can
-    // find it without a DB query. The underlying vibe.global_vibe_agents
-    // write is also attempted below for parity with the legacy flow, but
-    // the in-memory state is the dependable source of truth.
+    // Persist unattended fields to the IN-MEMORY autonomy state — the ONLY
+    // store today (NOT restart-durable; evaporates on restart). Despite the
+    // legacy naming, updateAutonomyState does NOT write a DB row. Phase-2 (WO
+    // 8201) backs this with relational vibe_projects.project_lifecycle_state.
     await this._storage.updateAutonomyState({
       unattendedMode: true,
       escalationLevel: config.escalationLevel ?? 2,
@@ -232,7 +232,6 @@ export class Supervisor {
     const state = await this._storage.getAutonomyState();
     if (state) {
       state.unattendedMode = this.unattendedMode;
-      state.partyEngineActive = this._partyEngine?.running ?? false;
     }
     return state;
   }
@@ -242,10 +241,11 @@ export class Supervisor {
    * Stops party engine, stops supervisor, returns kill list for caller to terminate PTYs.
    */
   async emergencyStop() {
-    // Check both in-memory flag AND DB state — server restart clears in-memory
-    // but DB may still have enabled: true (stale session)
-    const dbState = await this.getState();
-    if (!this.unattendedMode && !dbState?.enabled) return { stopped: false, reason: 'not_running' };
+    // Check the in-memory autonomy flag/state. NOTE: there is NO DB state today
+    // — this is IN-MEMORY only and is cleared on restart (Phase-2/WO 8201 adds
+    // the restart-durable relational backing).
+    const priorState = await this.getState();
+    if (!this.unattendedMode && !priorState?.enabled) return { stopped: false, reason: 'not_running' };
     this.unattendedMode = false;
     this._stopPingTimer();
     this._pingConfig = null;

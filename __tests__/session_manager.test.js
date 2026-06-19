@@ -56,81 +56,49 @@ describe('SessionManager', () => {
     expect(manager.storage).toBeDefined();
   });
 
-  test('getAgentRegistration returns registered agent', async () => {
-    const result = await manager.getAgentRegistration('agent:DotNetPert');
-    expect(result).not.toBeNull();
-    expect(result.name).toBe('DotNetPert');
+  // The agent roster migrated from an in-memory registry to CLOUD hydration. A fresh
+  // manager with no hydrated roster CANNOT report "not registered" — it must throw
+  // (it can't distinguish an unknown agent from a never-loaded roster). Honest-fail,
+  // not a silent null. (Updated from the stale pre-migration in-memory expectations.)
+  test('getAgentRegistration throws when the roster is not hydrated (no session)', async () => {
+    await expect(manager.getAgentRegistration('agent:DotNetPert'))
+      .rejects.toThrow(/roster could not be resolved/i);
   });
 
-  test('getAgentRegistration returns null for unknown agent', async () => {
-    const result = await manager.getAgentRegistration('agent:Unknown');
-    expect(result).toBeNull();
+  test('getAgentRegistration throws for any name when roster unhydrated (never a silent null)', async () => {
+    await expect(manager.getAgentRegistration('agent:Unknown'))
+      .rejects.toThrow(/roster could not be resolved/i);
   });
 
-  describe('documents', () => {
-    test('createDocument returns doc with id and timestamps', async () => {
-      const doc = await manager.createDocument({
-        project_id: 14,
-        title: 'Test Doc',
-        content_md: '# Hello',
-        type: 'context',
-        version: '1.0',
-      });
-      expect(doc.id).toBeDefined();
-      expect(doc.project_id).toBe(14);
-      expect(doc.title).toBe('Test Doc');
-      expect(doc.created_at).toBeDefined();
-      expect(doc.updated_at).toBeDefined();
+  // WO 8196 lane B: the in-memory document stub was RIPPED OUT. Documents are now
+  // CLOUD-backed (project-scoped /v1/projects/:id/documents) and HONEST-FAIL — every
+  // method requires a project_id and throws when the cloud is unreachable (no session
+  // in this test). NEVER fakes success / persists to a Map. These tests assert that
+  // contract (the lie is gone), not the old in-memory behavior.
+  describe('documents (cloud-backed, honest-fail)', () => {
+    test('createDocument requires project_id (project-scoped)', async () => {
+      await expect(manager.createDocument({ title: 'X', content_md: 'y' }))
+        .rejects.toThrow(/projectId is required/i);
     });
 
-    test('listDocuments returns all docs without filter', async () => {
-      await manager.createDocument({ project_id: 14, title: 'A', content_md: 'a' });
-      await manager.createDocument({ project_id: 15, title: 'B', content_md: 'b' });
-      const docs = await manager.listDocuments();
-      expect(docs.length).toBeGreaterThanOrEqual(2);
+    test('listDocuments requires project_id', async () => {
+      await expect(manager.listDocuments())
+        .rejects.toThrow(/projectId is required/i);
     });
 
-    test('listDocuments filters by project_id', async () => {
-      await manager.createDocument({ project_id: 99, title: 'Project 99', content_md: 'x' });
-      const docs = await manager.listDocuments({ project_id: 99 });
-      expect(docs).toHaveLength(1);
-      expect(docs[0].title).toBe('Project 99');
+    test('getDocument requires project_id', async () => {
+      await expect(manager.getDocument(1))
+        .rejects.toThrow(/projectId is required/i);
     });
 
-    test('getDocument returns doc by id', async () => {
-      const created = await manager.createDocument({ title: 'Get Me', content_md: 'body' });
-      const found = await manager.getDocument(created.id);
-      expect(found).not.toBeNull();
-      expect(found.title).toBe('Get Me');
+    test('createDocument never fakes success — throws when the cloud is unreachable (no in-memory)', async () => {
+      await expect(manager.createDocument({ project_id: 14, title: 'X', content_md: 'y' }))
+        .rejects.toThrow();
     });
 
-    test('getDocument returns null for missing id', async () => {
-      const found = await manager.getDocument(99999);
-      expect(found).toBeNull();
-    });
-
-    test('updateDocument patches fields', async () => {
-      const created = await manager.createDocument({ title: 'Old', content_md: 'old' });
-      const updated = await manager.updateDocument(created.id, { title: 'New' });
-      expect(updated.title).toBe('New');
-      expect(updated.content_md).toBe('old'); // unchanged
-    });
-
-    test('updateDocument returns null for missing id', async () => {
-      const result = await manager.updateDocument(99999, { title: 'Nope' });
-      expect(result).toBeNull();
-    });
-
-    test('deleteDocument removes doc', async () => {
-      const created = await manager.createDocument({ title: 'Delete Me', content_md: 'x' });
-      const deleted = await manager.deleteDocument(created.id);
-      expect(deleted).toBe(true);
-      expect(await manager.getDocument(created.id)).toBeNull();
-    });
-
-    test('deleteDocument returns false for missing id', async () => {
-      const result = await manager.deleteDocument(99999);
-      expect(result).toBe(false);
+    test('listDocuments never returns a silent empty — throws when the cloud is unreachable', async () => {
+      await expect(manager.listDocuments({ project_id: 14 }))
+        .rejects.toThrow();
     });
   });
 

@@ -28,45 +28,9 @@ beforeAll(async () => {
 
 const authedRequest = () => request.agent(app).set('Authorization', 'Bearer test-secret');
 
-describe('Party Routes — Validation', () => {
-  test('POST /v1/party/signal requires agentId and agentName', async () => {
-    const res = await authedRequest()
-      .post('/v1/party/signal')
-      .send({});
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_REQUEST');
-  });
-
-  test('POST /v1/party/mingle requires agentA and agentB', async () => {
-    const res = await authedRequest()
-      .post('/v1/party/mingle')
-      .send({});
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_REQUEST');
-  });
-
-  test('PUT /v1/party/agents/:id/zone requires zone', async () => {
-    const res = await authedRequest()
-      .put('/v1/party/agents/sage/zone')
-      .send({});
-    expect(res.status).toBe(400);
-  });
-});
-
-describe('Party Routes — Storage-dependent (returns error envelope on no DB)', () => {
-  test('GET /v1/party/state returns error envelope when storage unavailable', async () => {
-    const res = await authedRequest().get('/v1/party/state');
-    expect(res.body).toHaveProperty('success');
-    expect(res.body).toHaveProperty('request_id');
-    expect(res.body).toHaveProperty('meta');
-  });
-
-  test('GET /v1/party/relevance returns error envelope when storage unavailable', async () => {
-    const res = await authedRequest().get('/v1/party/relevance');
-    expect(res.body).toHaveProperty('success');
-    expect(res.body).toHaveProperty('meta');
-  });
-});
+// NOTE: Party + legacy /v1/messages route tests were removed — those surfaces were
+// CUT (WO 8201): party feature deferred from v1, /v1/messages superseded by the cloud
+// mail proxy at /v1/mail. They are intentionally gone, so there's nothing to assert.
 
 describe('Kanban Routes — Validation', () => {
   test('POST /v1/kanban/tasks requires title', async () => {
@@ -94,28 +58,6 @@ describe('Kanban Routes — Storage-dependent', () => {
   });
 });
 
-describe('Messaging Routes — Storage-dependent', () => {
-  test('POST /v1/messages/broadcast returns error envelope on no DB', async () => {
-    const res = await authedRequest()
-      .post('/v1/messages/broadcast')
-      .send({ fromAgent: 'BAPert', body: 'Test' });
-    expect(res.body).toHaveProperty('success');
-    expect(res.body).toHaveProperty('meta');
-  });
-
-  test('GET /v1/messages/inbox/:agent returns error envelope on no DB', async () => {
-    const res = await authedRequest().get('/v1/messages/inbox/BAPert');
-    expect(res.body).toHaveProperty('success');
-    expect(res.body).toHaveProperty('meta');
-  });
-
-  test('GET /v1/messages/broadcasts returns error envelope on no DB', async () => {
-    const res = await authedRequest().get('/v1/messages/broadcasts');
-    expect(res.body).toHaveProperty('success');
-    expect(res.body).toHaveProperty('meta');
-  });
-});
-
 describe('Autonomy Routes — Storage-dependent', () => {
   test('GET /v1/autonomy/status returns error envelope on no DB', async () => {
     const res = await authedRequest().get('/v1/autonomy/status');
@@ -133,17 +75,6 @@ describe('Autonomy Routes — Storage-dependent', () => {
 describe('Route Registration', () => {
   test('all collaboration routes are mounted (not 404)', async () => {
     const routes = [
-      { method: 'post', path: '/v1/party/signal', body: {} },
-      { method: 'get', path: '/v1/party/state' },
-      { method: 'get', path: '/v1/party/relevance' },
-      { method: 'post', path: '/v1/party/mingle', body: {} },
-      { method: 'put', path: '/v1/party/mingle/test/resolve', body: {} },
-      { method: 'put', path: '/v1/party/agents/sage/zone', body: {} },
-      { method: 'post', path: '/v1/messages/broadcast', body: {} },
-      { method: 'post', path: '/v1/messages/mail', body: {} },
-      { method: 'get', path: '/v1/messages/inbox/test' },
-      { method: 'get', path: '/v1/messages/broadcasts' },
-      { method: 'put', path: '/v1/messages/inbox/test/read', body: {} },
       { method: 'post', path: '/v1/kanban/tasks', body: {} },
       { method: 'get', path: '/v1/kanban/tasks' },
       { method: 'get', path: '/v1/kanban/tasks/1' },

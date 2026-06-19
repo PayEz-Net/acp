@@ -29,8 +29,6 @@ export class SessionManager {
     this._currentProjectAt = 0;
     this._projectListCache = null;
     this._projectListAt = 0;
-    this._projects = new Map();          // retained only for createProject's in-memory path (TODO: cloud)
-    this._nextProjectId = 1;
 
     // Project documents are CLOUD-backed (project-scoped typed lane
     // /v1/projects/:id/documents, Decision-C Bearer). No in-memory Map — the
@@ -357,21 +355,12 @@ export class SessionManager {
     return true;
   }
 
-  async createProject(data) {
-    if (!data || !data.name) {
-      throw new Error('createProject: name is required');
-    }
-    const id = this._nextProjectId++;
-    const project = {
-      id,
-      name: data.name,
-      description: data.description || '',
-      status: data.status || 'active',
-      created_at: new Date().toISOString(),
-    };
-    this._projects.set(id, project);
-    return project;
-  }
+  // createProject REMOVED (WO 8201 Phase 1). It wrote to a dead in-memory
+  // _projects Map that NO route or code ever read (reads are cloud-backed), so
+  // any "created" project was invisible + lost on restart — fake-persistence.
+  // The real lane already exists: project creation goes to the cloud POST
+  // /v1/projects (agents.ts proxyAgentCloud); the local /v1/projects POST returns
+  // 410 GONE directing to idealvibe. Nothing to wire — the stub was dead code.
 
   // -----------------------------------------------------------------------
   // Project documents — CLOUD-backed (WO 8196 lane B). Proxies the typed,
@@ -771,7 +760,7 @@ export class SessionManager {
       getProject: (id) => self.getProject(id),
       getActiveProjectId: () => self.getActiveProjectId(),
       setActiveProjectId: (id) => self.setActiveProjectId(id),
-      createProject: (data) => self.createProject(data),
+      // createProject removed (WO 8201) — dead in-memory stub; real lane = cloud POST /v1/projects.
       // Project documents — CLOUD-backed (WO 8196 lane B), project-scoped.
       createDocument: (fields) => self.createDocument(fields),
       listDocuments: (filter) => self.listDocuments(filter),

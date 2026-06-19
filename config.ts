@@ -58,11 +58,11 @@ export const config = {
   vibeApiUrl: required('VIBE_API_URL'),
   // Decision-C / durable #104: the vibe_ HMAC client SLUG is MACHINE-AUTH ONLY now.
   // User-session proxies (mail/standup/projects/agents/team) are bearer-only and
-  // never touch it. So it is required ONLY when the machine path is active —
-  // contractors enabled, or explicit hmac mode. A pure user-session build boots
-  // with NO baked Vibe HMAC secret (the public unlock). HMAC stays the machine-
-  // auth-only fallback per Bearer-primary policy.
-  vibeClientId: (process.env.ENABLE_CONTRACTORS === 'true' || process.env.VIBE_AUTH_MODE === 'hmac')
+  // never touch it. So it is required ONLY in explicit hmac (machine-auth) mode.
+  // A pure user-session build boots with NO baked Vibe HMAC secret (the public
+  // unlock). HMAC stays the machine-auth-only fallback per Bearer-primary policy.
+  // (The contractors coupling was removed when contractors were cut — WO 8201.)
+  vibeClientId: (process.env.VIBE_AUTH_MODE === 'hmac')
     ? required('VIBE_CLIENT_ID')
     : (process.env.VIBE_CLIENT_ID || ''),
   // RETIRED 2026-06-11: the bearer X-Client-Id is no longer a baked constant.
@@ -72,9 +72,9 @@ export const config = {
   // OWN client_id claim at each call site (auth/tokenManager.requireTokenClientId),
   // so the Vibe admin gate's own-tenant resolution matches. Field deleted to kill
   // the hydra — do NOT reintroduce a constant tenant id here.
-  // Required when the machine path is active (contractors sign HMAC unconditionally;
-  // hmac mode signs everywhere). User-session bearer build needs none.
-  vibeHmacKey: (process.env.VIBE_AUTH_MODE === 'hmac' || process.env.ENABLE_CONTRACTORS === 'true')
+  // Required only in explicit hmac (machine-auth) mode; the user-session bearer
+  // build needs none. (Contractors coupling removed — WO 8201.)
+  vibeHmacKey: (process.env.VIBE_AUTH_MODE === 'hmac')
     ? required('VIBE_HMAC_KEY')
     : process.env.VIBE_HMAC_KEY,
   acpLocalSecret: process.env.ACP_LOCAL_SECRET || '',
@@ -88,8 +88,6 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',
-  enableContractors: process.env.ENABLE_CONTRACTORS === 'true', // Disabled by default - not stable yet
-  partyTickMs: parseInt(process.env.PARTY_TICK_MS ?? '', 10) || 5000,
   autonomyMaxRuntimeHours: parseInt(process.env.AUTONOMY_MAX_RUNTIME_HOURS ?? '', 10) || 4,
   escalationSensitivity: parseInt(process.env.ESCALATION_SENSITIVITY ?? '', 10) || 2,
 

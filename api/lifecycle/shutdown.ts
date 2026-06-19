@@ -5,7 +5,6 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 interface ShutdownDeps {
   cfg: Config;
-  partyEngine: { stop: () => void };
   upstreamSse: { stop: () => void };
   healthMonitor: { stop: () => void };
   backoffManager: { shutdown: () => void };
@@ -15,12 +14,11 @@ interface ShutdownDeps {
 
 /**
  * Graceful shutdown sequence:
- * 1. Stop party engine
- * 2. Close upstream SSE
- * 3. Stop health monitor + backoff timers
- * 4. Notify Electron callback (/internal/shutdown)
- * 5. Close Express server
- * 6. Exit
+ * 1. Close upstream SSE
+ * 2. Stop health monitor + backoff timers
+ * 3. Notify Electron callback (/internal/shutdown)
+ * 4. Close Express server
+ * 5. Exit
  * Force-exit after 10s if stalled.
  */
 export function registerShutdownHandlers(deps: ShutdownDeps): void {
@@ -39,19 +37,15 @@ export function registerShutdownHandlers(deps: ShutdownDeps): void {
     forceTimer.unref();
 
     try {
-      // 1. Stop party engine
-      logger.info('shutdown', 'Stopping party engine');
-      deps.partyEngine.stop();
-
-      // 2. Close upstream SSE
+      // 1. Close upstream SSE
       logger.info('shutdown', 'Closing upstream SSE connections');
       deps.upstreamSse.stop();
 
-      // 3. Stop health monitor + backoff timers
+      // 2. Stop health monitor + backoff timers
       deps.healthMonitor.stop();
       deps.backoffManager.shutdown();
 
-      // 4. Notify Electron callback
+      // 3. Notify Electron callback
       try {
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 3000);
@@ -69,7 +63,7 @@ export function registerShutdownHandlers(deps: ShutdownDeps): void {
         logger.warn('shutdown', 'Failed to notify Electron callback (may already be down)');
       }
 
-      // 5. Close Express server
+      // 4. Close Express server
       if (deps.server) {
         await new Promise<void>((resolve) => {
           deps.server!.close(() => resolve());
@@ -77,7 +71,7 @@ export function registerShutdownHandlers(deps: ShutdownDeps): void {
         logger.info('shutdown', 'Express server closed');
       }
 
-      // 6. Exit
+      // 5. Exit
       logger.info('shutdown', 'Shutdown complete');
       clearTimeout(forceTimer);
       process.exit(0);

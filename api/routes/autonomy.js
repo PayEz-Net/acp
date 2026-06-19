@@ -116,7 +116,6 @@ export default function autonomyRoutes(supervisor) {
       res.json(success({
         ...(state || { enabled: false }),
         unattendedMode: supervisor.unattendedMode,
-        partyEngineActive: supervisor._partyEngine?.running ?? false,
       }, 'unattended_status', req.requestId, {
         performance: { response_time_ms: elapsed },
       }));

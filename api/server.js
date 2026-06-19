@@ -10,15 +10,12 @@ import bootstrapRoutes from './routes/bootstrap.js';
 import modifyRoutes from './routes/modify.js';
 import execRoutes from './routes/exec.js';
 import sessionRoutes from './routes/sessions.js';
-import partyRoutes from './routes/party.js';
 import messagingRoutes from './routes/messaging.js';
 import kanbanRoutes from './routes/kanban.js';
-import chatRoutes from './routes/chat.js';
 import autonomyRoutes from './routes/autonomy.js';
 import registryRoutes from './routes/registry.js';
 import notificationRoutes from './routes/notifications.js';
 import statusRoutes from './routes/status.js';
-import { PartyEngine } from '../collaboration/party_engine.js';
 import { UpstreamSseManager } from './sse/upstreamManager.js';
 import sseStreamRoutes from './routes/sseStream.js';
 import { BackoffManager } from './lifecycle/backoff.js';
@@ -31,10 +28,6 @@ import { LifecycleHooks } from './lifecycle/hooks.js';
 import { Supervisor } from '../autonomy/supervisor.js';
 import { logger, setLogLevel, requestLogger } from './logging/logger.js';
 import { registerShutdownHandlers } from './lifecycle/shutdown.js';
-import { ContractorService } from './contractors/service.js';
-import { SessionManager as ContractorSessionManager } from './contractors/sessionManager.js';
-import contractorRoutes from './routes/contractors.js';
-import contractRoutes from './routes/contracts.js';
 import projectRoutes from './routes/projects.js';
 import standupProxyRoutes from './routes/standupProxy.js';
 import documentRoutes from './routes/documents.js';
@@ -140,30 +133,15 @@ export async function createApp(cfg) {
     });
   });
 
-  // Contractor service — disabled by default (not stable yet)
-  const contractorService = appConfig.enableContractors 
-    ? new ContractorService(storage, localEventBus, appConfig)
-    : null;
+  // Contractors + chat CUT (WO 8201 / Jon: deferred from v1). The contractor
+  // service/sessionManager + their chat-backed hire/DONE flow were removed.
 
-  // Session manager — auto-spawn contractor sessions (Phase 2b)
-  const contractorSessionManager = appConfig.enableContractors
-    ? new ContractorSessionManager(storage, localEventBus, appConfig)
-    : null;
-    
-  // Orphan detection on startup (only if contractors enabled)
-  if (contractorSessionManager) {
-    contractorSessionManager.checkOrphans().then(n => {
-      if (n > 0) logger.info(`[SessionManager] Marked ${n} orphaned contract(s) as expired`);
-    }).catch(() => {});
-  }
-
-  // Mail proxy — acp-api signs with HMAC, renderer only needs local bearer token
-  // onMailSent callback wired after lifecycleHooks is created (below)
-  // contractorService injected for pre-send contractor resolution (null if disabled)
+  // Mail proxy — acp-api signs with HMAC, renderer only needs local bearer token.
+  // onMailSent callback wired after lifecycleHooks is created (below).
   let mailSentCallback = null;
   app.use('/v1/mail', mailProxyRoutes(appConfig, (from, subject, to) => {
     if (mailSentCallback) mailSentCallback(from, subject, to);
-  }, contractorService, contractorSessionManager));
+  }));
 
   // SSE — upstream (mail from cloud) + local (party/autonomy) events → downstream fan-out
   const upstreamSse = new UpstreamSseManager(appConfig);
@@ -252,17 +230,16 @@ export async function createApp(cfg) {
   app.use('/v1/agents', execRoutes(sessionManager));
   app.use('/v1/sessions', sessionRoutes(sessionManager));
 
-  const partyEngine = new PartyEngine(storage, appConfig);
-  app.use('/v1/party', partyRoutes(storage, partyEngine));
-  // /v1/messages — chat + clusters RETIRED in Phase 5 (replaced by /v1/chat/*)
-  app.use('/v1/messages', messagingRoutes(storage));
+  // /v1/party CUT (WO 8201 / Jon: party feature out of v1). Route + PartyEngine
+  // + signal wiring removed; signals were already non-functional no-ops.
+  // /v1/messages CUT (WO 8201 Phase 1): legacy mail+broadcast called dropped
+  // storage methods (createMessage/getMessages/...) — fake-persistence. Superseded
+  // by the cloud mail proxy at /v1/mail (below). Unmounted so it can't lie. The
+  // honest makeApiMailSender (kanban's /v1/mail use) lives on in collaboration/mail.js.
+  // app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
-  app.use('/v1/chat', chatRoutes(appConfig, localEventBus, storage));
-  // Contractor routes — only mounted if enabled (disabled by default)
-  if (contractorService && contractorSessionManager) {
-    app.use('/v1/contractors', contractorRoutes(contractorService, appConfig, contractorSessionManager));
-    app.use('/v1/contracts', contractRoutes(contractorService, contractorSessionManager));
-  }
+  // /v1/chat + /v1/contractors + /v1/contracts CUT (WO 8201 / Jon: chat + the
+  // contractor hire/DONE flow deferred from v1). Chat was a hard dep of contractors.
   // Standup (Team Check-in) proxy — #66 W1. MOUNTED BEFORE projectRoutes so the
   // deeper /v1/projects/:id/standup/* paths forward to the typed .NET vibe-api;
   // all other /v1/projects/* fall through to the projects proxy below.
@@ -277,7 +254,7 @@ export async function createApp(cfg) {
 
   // Autonomy supervisor — single instance shared with routes and lifecycle hooks
   const supervisor = new Supervisor(storage, appConfig);
-  supervisor.link({ partyEngine, eventBus: localEventBus });
+  supervisor.link({ eventBus: localEventBus });
   app.use('/v1/autonomy', autonomyRoutes(supervisor));
   app.use('/v1/agents', registryRoutes(storage));
   app.use('/v1/notifications', notificationRoutes(storage));
@@ -307,7 +284,6 @@ export async function createApp(cfg) {
   app.use(errorHandler);
 
   app._sessionManager = sessionManager;
-  app._partyEngine = partyEngine;
   app._upstreamSse = upstreamSse;
   app._backoffManager = backoffManager;
   app._healthMonitor = healthMonitor;
@@ -349,7 +325,6 @@ if (process.argv[1]?.endsWith('server.js')) {
     // Register graceful shutdown handlers
     registerShutdownHandlers({
       cfg: config,
-      partyEngine: app._partyEngine,
       upstreamSse: app._upstreamSse,
       healthMonitor: app._healthMonitor,
       backoffManager: app._backoffManager,
