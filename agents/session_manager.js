@@ -597,7 +597,14 @@ export class SessionManager {
       attempt = await doFetch(refreshed);
     }
     if (attempt.status < 200 || attempt.status >= 300) {
-      const msg = attempt.body?.error?.message || attempt.body?.error || `HTTP ${attempt.status}`;
+      let msg = attempt.body?.error?.message || attempt.body?.error || `HTTP ${attempt.status}`;
+      // Surface the VERBATIM cause: the cloud names the failing field in
+      // error.details[] (e.g. [{field:'version',...}]). Without this the caller
+      // only sees 'Invalid request' and every bad body is an opaque 400.
+      const details = attempt.body?.error?.details;
+      if (details != null && (!Array.isArray(details) || details.length > 0)) {
+        msg += `: ${JSON.stringify(details)}`;
+      }
       throw new Error(`${label} ${method} ${path}: ${msg}`);
     }
     return attempt.body;
