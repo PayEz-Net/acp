@@ -1,162 +1,162 @@
 {
-  "name": "agent-collaboration-platform",
-  "version": "1.0.1",
-  "description": "Desktop application for orchestrating AI agent collaboration",
-  "main": "dist/main/index.js",
-  "author": "PayEz <dev@payez.net>",
-  "license": "MIT",
-  "scripts": {
-    "kill-port": "powershell -Command \"Get-NetTCPConnection -LocalPort 40020,40021 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }\"",
-    "dev": "vite",
-    "dev:electron": "tsc -p tsconfig.main.json && concurrently -k \"vite\" \"wait-on http://localhost:40020 && electron .\"",
-    "gen-env:93": "node scripts/gen-env.cjs dev93",
-    "gen-env:prod": "node scripts/gen-env.cjs prod",
-    "dev:93": "npm run gen-env:93 && npm run dev:electron",
-    "dev:prod": "npm run gen-env:prod && npm run dev:electron",
-    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "tsc && vite build",
-    "build:electron": "npm run clean:dist && npm run build && tsc -p tsconfig.main.json",
-    "electron": "electron .",
-    "start": "npm run build:electron && electron .",
-    "dist": "node scripts/prepare-acp-api.cjs && npm run gen-env:prod && node scripts/assert-env.cjs prod && npm run build:electron && node scripts/eb-build.cjs",
-    "dist:93": "node scripts/prepare-acp-api.cjs && npm run gen-env:93 && node scripts/assert-env.cjs dev93 && npm run build:electron && node scripts/eb-build.cjs",
-    "dist:win": "npm run dist -- --win",
-    "dist:mac": "npm run dist -- --mac",
-    "dist:linux": "npm run dist -- --linux",
-    "release:github": "node scripts/publish-github-release.cjs",
-    "guard:workspace": "node scripts/guard-workspace-debt.mjs",
-    "pretest": "node scripts/guard-workspace-debt.mjs",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@microsoft/signalr": "^10.0.0",
-    "electron-store": "^8.1.0",
-    "electron-updater": "^6.1.0",
-    "lucide-react": "^0.294.0",
-    "node-pty": "1.2.0-beta.12",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-markdown": "^10.1.0",
-    "rehype-highlight": "^7.0.2",
-    "remark-gfm": "^4.0.1",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0",
-    "xterm-addon-web-links": "^0.9.0",
-    "zustand": "^4.5.0"
-  },
-  "build": {
-    "appId": "net.payez.agent-collaboration-platform",
-    "afterSign": "build/afterSign.js",
-    "productName": "ACP",
-    "extraMetadata": {
-      "name": "ACP"
-    },
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "resources/**/*",
-      "!acp-api-release",
-      "!scripts",
-      "!src",
-      "!build",
-      "!release",
-      "!tsconfig*.json",
-      "!vite.config.ts",
-      "!eslint.config.js",
-      "!vitest.config.ts"
-    ],
-    "asarUnpack": [
-      "**/node_modules/node-pty/**",
-      "**/*.node"
-    ],
-    "extraResources": [
-      {
-        "from": "acp-api-release",
-        "to": "acp-api",
-        "filter": [
-          "dist/**/*",
-          "package.json",
-          "node_modules/**/*"
-        ]
-      },
-      {
-        "from": "skills/acp-skills.json",
-        "to": "acp-api/acp-desktop/skills/acp-skills.json"
-      },
-      {
-        "from": "colonize-templates",
-        "to": "colonize-templates"
-      },
-      {
-        "from": "resources/bin",
-        "to": "bin"
-      }
-    ],
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "icon": "build/icon.ico"
-    },
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "icon": "build/icon.icns",
-      "category": "public.app-category.developer-tools",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
-    },
-    "dmg": {
-      "sign": false
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "build/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh",
-      "artifactName": "${productName} Setup ${version}${env.ACP_ARTIFACT_SUFFIX}.${ext}"
-    },
-    "portable": {
-      "artifactName": "${productName} ${version}${env.ACP_ARTIFACT_SUFFIX}.${ext}"
-    },
-    "publish": {
-      "provider": "github",
-      "owner": "PayEz-Net",
-      "repo": "acp"
-    }
-  },
-  "devDependencies": {
-    "@electron/rebuild": "^3.7.2",
-    "@fiahfy/icns": "^0.0.7",
-    "@types/node": "^20.10.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "@vitejs/plugin-react": "^4.2.0",
-    "autoprefixer": "^10.4.16",
-    "concurrently": "^8.2.0",
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.0",
-    "png-to-ico": "^3.0.1",
-    "postcss": "^8.4.32",
-    "sharp": "^0.34.5",
-    "tailwindcss": "^3.4.0",
-    "typescript": "^5.3.0",
-    "vite": "^5.0.0",
-    "vitest": "^1.6.1",
-    "wait-on": "^7.2.0"
-  }
+    "name":  "agent-collaboration-platform",
+    "version":  "1.0.5",
+    "description":  "Desktop application for orchestrating AI agent collaboration",
+    "main":  "dist/main/index.js",
+    "author":  "PayEz \u003cdev@payez.net\u003e",
+    "license":  "MIT",
+    "scripts":  {
+                    "kill-port":  "powershell -Command \"Get-NetTCPConnection -LocalPort 40020,40021 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }\"",
+                    "dev":  "vite",
+                    "dev:electron":  "tsc -p tsconfig.main.json \u0026\u0026 concurrently -k \"vite\" \"wait-on http://localhost:40020 \u0026\u0026 electron .\"",
+                    "gen-env:93":  "node scripts/gen-env.cjs dev93",
+                    "gen-env:prod":  "node scripts/gen-env.cjs prod",
+                    "dev:93":  "npm run gen-env:93 \u0026\u0026 npm run dev:electron",
+                    "dev:prod":  "npm run gen-env:prod \u0026\u0026 npm run dev:electron",
+                    "clean:dist":  "node -e \"require(\u0027fs\u0027).rmSync(\u0027dist\u0027,{recursive:true,force:true})\"",
+                    "build":  "tsc \u0026\u0026 vite build",
+                    "build:electron":  "npm run clean:dist \u0026\u0026 npm run build \u0026\u0026 tsc -p tsconfig.main.json",
+                    "electron":  "electron .",
+                    "start":  "npm run build:electron \u0026\u0026 electron .",
+                    "dist":  "node scripts/prepare-acp-api.cjs \u0026\u0026 npm run gen-env:prod \u0026\u0026 node scripts/assert-env.cjs prod \u0026\u0026 npm run build:electron \u0026\u0026 node scripts/eb-build.cjs",
+                    "dist:93":  "node scripts/prepare-acp-api.cjs \u0026\u0026 npm run gen-env:93 \u0026\u0026 node scripts/assert-env.cjs dev93 \u0026\u0026 npm run build:electron \u0026\u0026 node scripts/eb-build.cjs",
+                    "dist:win":  "npm run dist -- --win",
+                    "dist:mac":  "npm run dist -- --mac",
+                    "dist:linux":  "npm run dist -- --linux",
+                    "release:github":  "node scripts/publish-github-release.cjs",
+                    "guard:workspace":  "node scripts/guard-workspace-debt.mjs",
+                    "pretest":  "node scripts/guard-workspace-debt.mjs",
+                    "test":  "vitest run",
+                    "test:watch":  "vitest"
+                },
+    "dependencies":  {
+                         "@microsoft/signalr":  "^10.0.0",
+                         "electron-store":  "^8.1.0",
+                         "electron-updater":  "^6.1.0",
+                         "lucide-react":  "^0.294.0",
+                         "node-pty":  "1.2.0-beta.12",
+                         "react":  "^18.2.0",
+                         "react-dom":  "^18.2.0",
+                         "react-markdown":  "^10.1.0",
+                         "rehype-highlight":  "^7.0.2",
+                         "remark-gfm":  "^4.0.1",
+                         "xterm":  "^5.3.0",
+                         "xterm-addon-fit":  "^0.8.0",
+                         "xterm-addon-web-links":  "^0.9.0",
+                         "zustand":  "^4.5.0"
+                     },
+    "build":  {
+                  "appId":  "net.payez.agent-collaboration-platform",
+                  "afterSign":  "build/afterSign.js",
+                  "productName":  "ACP",
+                  "extraMetadata":  {
+                                        "name":  "ACP"
+                                    },
+                  "directories":  {
+                                      "output":  "release"
+                                  },
+                  "files":  [
+                                "dist/**/*",
+                                "resources/**/*",
+                                "!acp-api-release",
+                                "!scripts",
+                                "!src",
+                                "!build",
+                                "!release",
+                                "!tsconfig*.json",
+                                "!vite.config.ts",
+                                "!eslint.config.js",
+                                "!vitest.config.ts"
+                            ],
+                  "asarUnpack":  [
+                                     "**/node_modules/node-pty/**",
+                                     "**/*.node"
+                                 ],
+                  "extraResources":  [
+                                         {
+                                             "from":  "acp-api-release",
+                                             "to":  "acp-api",
+                                             "filter":  [
+                                                            "dist/**/*",
+                                                            "package.json",
+                                                            "node_modules/**/*"
+                                                        ]
+                                         },
+                                         {
+                                             "from":  "skills/acp-skills.json",
+                                             "to":  "acp-api/acp-desktop/skills/acp-skills.json"
+                                         },
+                                         {
+                                             "from":  "colonize-templates",
+                                             "to":  "colonize-templates"
+                                         },
+                                         {
+                                             "from":  "resources/bin",
+                                             "to":  "bin"
+                                         }
+                                     ],
+                  "win":  {
+                              "target":  [
+                                             "nsis",
+                                             "portable"
+                                         ],
+                              "icon":  "build/icon.ico"
+                          },
+                  "mac":  {
+                              "target":  [
+                                             "dmg",
+                                             "zip"
+                                         ],
+                              "icon":  "build/icon.icns",
+                              "category":  "public.app-category.developer-tools",
+                              "hardenedRuntime":  true,
+                              "gatekeeperAssess":  false,
+                              "entitlements":  "build/entitlements.mac.plist",
+                              "entitlementsInherit":  "build/entitlements.mac.plist"
+                          },
+                  "dmg":  {
+                              "sign":  false
+                          },
+                  "linux":  {
+                                "target":  [
+                                               "AppImage",
+                                               "deb"
+                                           ],
+                                "icon":  "build/icon.png"
+                            },
+                  "nsis":  {
+                               "oneClick":  false,
+                               "allowToChangeInstallationDirectory":  true,
+                               "include":  "build/installer.nsh",
+                               "artifactName":  "${productName} Setup ${version}${env.ACP_ARTIFACT_SUFFIX}.${ext}"
+                           },
+                  "portable":  {
+                                   "artifactName":  "${productName} ${version}${env.ACP_ARTIFACT_SUFFIX}.${ext}"
+                               },
+                  "publish":  {
+                                  "provider":  "github",
+                                  "owner":  "PayEz-Net",
+                                  "repo":  "acp"
+                              }
+              },
+    "devDependencies":  {
+                            "@electron/rebuild":  "^3.7.2",
+                            "@fiahfy/icns":  "^0.0.7",
+                            "@types/node":  "^20.10.0",
+                            "@types/react":  "^18.2.0",
+                            "@types/react-dom":  "^18.2.0",
+                            "@vitejs/plugin-react":  "^4.2.0",
+                            "autoprefixer":  "^10.4.16",
+                            "concurrently":  "^8.2.0",
+                            "electron":  "^28.0.0",
+                            "electron-builder":  "^24.9.0",
+                            "png-to-ico":  "^3.0.1",
+                            "postcss":  "^8.4.32",
+                            "sharp":  "^0.34.5",
+                            "tailwindcss":  "^3.4.0",
+                            "typescript":  "^5.3.0",
+                            "vite":  "^5.0.0",
+                            "vitest":  "^1.6.1",
+                            "wait-on":  "^7.2.0"
+                        }
 }
