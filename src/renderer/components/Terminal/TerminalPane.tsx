@@ -3,6 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
+import { fitTerminal } from './terminalFit';
 import { AgentState } from '@shared/types';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
@@ -51,34 +52,19 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     const run = () => {
       const term = xtermRef.current;
       const fit = fitAddonRef.current;
-      if (!term || !fit) return;
+      const host = terminalRef.current;
+      if (!term || !fit || !host) return;
 
       const prevCols = term.cols;
       const prevRows = term.rows;
+
+      // Custom fit with scrollbar-width guard (#92267). Replaces fitAddon.fit()
+      // so the rightmost column is not pushed under the vertical scrollbar.
       try {
-        fit.fit();
+        fitTerminal(term, fit, host, 'resize-observer');
       } catch {
         // Container detached mid-transition — skip resize/scroll
         return;
-      }
-
-      // Bottom-row guard (#164): FitAddon proposes rows by flooring
-      // container/cellHeight, but rounding + stale-dimension transitions can
-      // leave the rendered grid taller than the visible container. Since the
-      // pane is overflow:hidden, the surplus rows are clipped at the BOTTOM —
-      // exactly where the agent's input prompt lives — so on large displays
-      // the input "balloons" off the bottom of the viewport. Drop rows until
-      // the rendered terminal fits inside its container; scrollback then
-      // scrolls WITHIN the viewport (Jon: max-rows + scroll-within). Bounded
-      // loop + DOM-measure only (no xterm private API); no-ops if it fits.
-      const host = terminalRef.current;
-      const screen = host?.querySelector('.xterm-screen') as HTMLElement | null;
-      if (host && screen) {
-        let guard = 0;
-        while (screen.offsetHeight > host.clientHeight && term.rows > 1 && guard < 12) {
-          term.resize(term.cols, term.rows - 1);
-          guard++;
-        }
       }
 
       const tid = useAppStore.getState().agents.find(a => a.name === agent.name)?.terminalId;
