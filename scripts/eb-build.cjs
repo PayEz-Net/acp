@@ -38,17 +38,22 @@ if (!m) {
 }
 const envName = m[1];
 
+// Respect an externally-supplied suffix (e.g., rebuild labels) while keeping
+// the safety default: derive the suffix from the baked env when not provided.
 let suffix;
-if (envName === 'prod') {
+if (process.env.ACP_ARTIFACT_SUFFIX) {
+  suffix = process.env.ACP_ARTIFACT_SUFFIX;
+  console.log(`[eb-build] using supplied ACP_ARTIFACT_SUFFIX='${suffix}' (baked env is '${envName}')`);
+} else if (envName === 'prod') {
   suffix = '';
+  console.log(`[eb-build] baked ACP_ENV_NAME='${envName}' -> installer suffix='(none — prod)'`);
 } else if (envName === 'dev93') {
   suffix = '_93';
+  console.log(`[eb-build] baked ACP_ENV_NAME='${envName}' -> installer suffix='${suffix}'`);
 } else {
   console.error(`[eb-build] FATAL: unknown baked env '${envName}' — no naming rule. (Known: prod -> '', dev93 -> '_93'.)`);
   process.exit(1);
 }
-
-console.log(`[eb-build] baked ACP_ENV_NAME='${envName}' -> installer suffix='${suffix || '(none — prod)'}'`);
 
 const passthrough = process.argv.slice(2); // e.g. --win / --mac / --linux
 const child = spawnSync('electron-builder', passthrough, {
