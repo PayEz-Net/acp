@@ -91,6 +91,18 @@
                                              "to":  "colonize-templates"
                                          },
                                          {
+                                             "from":  "colonize-templates/.acp",
+                                             "to":  "colonize-templates/.acp"
+                                         },
+                                         {
+                                             "from":  "colonize-templates/.claude",
+                                             "to":  "colonize-templates/.claude"
+                                         },
+                                         {
+                                             "from":  "colonize-templates/.kimi",
+                                             "to":  "colonize-templates/.kimi"
+                                         },
+                                         {
                                              "from":  "resources/bin",
                                              "to":  "bin"
                                          }
