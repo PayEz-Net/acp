@@ -110,8 +110,10 @@ export function fitTerminal(
   const screenOffsetHeight = screen?.offsetHeight ?? hostClientHeight;
   const viewportOffsetWidth = viewport?.offsetWidth ?? hostClientWidth;
 
-  // Horizontal padding inside the host that FitAddon already accounts for.
-  const paddingHor = hostClientWidth - screenOffsetWidth;
+  // Horizontal padding inside the host. The scrollbar is part of the viewport,
+  // so padding must be measured against viewport width, not screen width,
+  // otherwise the scrollbar width is subtracted twice in calculateFit.
+  const paddingHor = Math.max(0, hostClientWidth - viewportOffsetWidth);
 
   const proposed = fitAddon.proposeDimensions();
   const cellWidth = getCellWidth(term);
