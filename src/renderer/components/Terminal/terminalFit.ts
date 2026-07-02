@@ -32,7 +32,10 @@ interface Diagnostics {
   scrollBarWidth?: number;
   paddingHor?: number;
   termCols?: number;
+  termRows?: number;
   targetCols?: number;
+  targetRows?: number;
+  cellHeight?: number;
   widthGuardFired?: boolean;
   rowGuardFired?: boolean;
 }
@@ -71,17 +74,16 @@ export function calculateFit(
   let targetCols = proposed?.cols ?? currentCols;
   let targetRows = proposed?.rows ?? currentRows;
 
-  if (scrollBarWidth > 0 && measurements.cellWidth > 0) {
+  // Always recompute columns from the true render budget (host - padding -
+  // scrollbar gutter). This guarantees every horizontal pixel is used and also
+  // corrects FitAddon when it ignores the scrollbar or under-proposes.
+  if (measurements.cellWidth > 0) {
     const availableWidth = Math.max(0, measurements.hostClientWidth - measurements.paddingHor - scrollBarWidth);
-    const correctedCols = Math.floor(availableWidth / measurements.cellWidth);
-    if (correctedCols < targetCols) {
-      targetCols = correctedCols;
-    }
+    targetCols = Math.max(MIN_COLS, Math.floor(availableWidth / measurements.cellWidth));
   }
 
-  // Width guard fires only if the terminal's current columns exceed the
-  // corrected target. If the terminal already fits the corrected budget, the
-  // guard stays quiet (the fix prevented over-expansion, it did not shrink).
+  // Width guard fires when the terminal's current columns exceed the corrected
+  // target (i.e., we had to shrink to fit).
   const widthGuardFired = currentCols > targetCols;
 
   // Bottom-row guard (#164): when the rendered screen is taller than its host,
@@ -170,7 +172,10 @@ export function fitTerminal(
     scrollBarWidth: result.scrollBarWidth,
     paddingHor,
     termCols: term.cols,
+    termRows: term.rows,
     targetCols: result.cols,
+    targetRows: result.rows,
+    cellHeight,
     widthGuardFired: result.widthGuardFired,
     rowGuardFired: result.rowGuardFired,
   });

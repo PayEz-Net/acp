@@ -33,7 +33,9 @@ describe('calculateFit', () => {
     expect(result.rows).toBe(24);
   });
 
-  it('reduces cols when the container genuinely shrinks', () => {
+  it('uses full available width when the container shrinks', () => {
+    // host 800px, padding 16px, no scrollbar => usable width 784px.
+    // cell width 12px => floor(784 / 12) = 65 cols, maximizing every pixel.
     const result = calculateFit(
       { cols: 60, rows: 24 },
       80,
@@ -44,14 +46,14 @@ describe('calculateFit', () => {
         hostRectWidth: 800,
         screenOffsetWidth: 784,
         screenOffsetHeight: 580,
-        viewportOffsetWidth: 800,
+        viewportOffsetWidth: 784,
         paddingHor: 16,
         cellWidth: 12,
         cellHeight: 24,
       },
     );
 
-    expect(result.cols).toBe(60);
+    expect(result.cols).toBe(65);
     expect(result.rows).toBe(24);
     expect(result.widthGuardFired).toBe(true);
   });
@@ -75,7 +77,7 @@ describe('calculateFit', () => {
     );
 
     expect(result.scrollBarWidth).toBe(0);
-    expect(result.cols).toBe(80);
+    expect(result.cols).toBe(83);
     expect(result.rows).toBe(24);
   });
 
@@ -194,6 +196,56 @@ describe('calculateFit', () => {
 
     expect(result.rows).toBe(24);
     expect(result.rowGuardFired).toBe(false);
+  });
+
+  it('maximizes columns in a wide pane without wasting horizontal space', () => {
+    // host 1600px, padding 16px, scrollbar 24px, cell width 12px.
+    // Correct cols = floor((1600 - 16 - 24) / 12) = 130. No margin left over.
+    const result = calculateFit(
+      { cols: 125, rows: 56 },
+      125,
+      56,
+      {
+        hostClientWidth: 1600,
+        hostClientHeight: 900,
+        hostRectWidth: 1600,
+        screenOffsetWidth: 1560,
+        screenOffsetHeight: 880,
+        viewportOffsetWidth: 1584,
+        paddingHor: 16,
+        cellWidth: 12,
+        cellHeight: 24,
+      },
+    );
+
+    expect(result.cols).toBe(130);
+    expect(result.widthGuardFired).toBe(false);
+  });
+
+  it('yields usable columns in a ~320px compact sidebar pane', () => {
+    // Approximates the compact left sidebar in focus-left layout.
+    // host 320px, padding 8px, scrollbar 12px, cell width 12px.
+    // Correct cols = floor((320 - 8 - 12) / 12) = 25, well above MIN_COLS.
+    const result = calculateFit(
+      { cols: 20, rows: 12 },
+      20,
+      12,
+      {
+        hostClientWidth: 320,
+        hostClientHeight: 300,
+        hostRectWidth: 320,
+        screenOffsetWidth: 300,
+        screenOffsetHeight: 280,
+        viewportOffsetWidth: 312,
+        paddingHor: 8,
+        cellWidth: 12,
+        cellHeight: 24,
+      },
+    );
+
+    expect(result.cols).toBe(25);
+    expect(result.cols).toBeGreaterThanOrEqual(MIN_COLS);
+    expect(result.rows).toBe(12);
   });
 });
 
