@@ -53,7 +53,7 @@
                                         "name":  "ACP"
                                     },
                   "directories":  {
-                                      "output":  "release"
+                                      "output":  "release-rebuild-20260702"
                                   },
                   "files":  [
                                 "dist/**/*",
