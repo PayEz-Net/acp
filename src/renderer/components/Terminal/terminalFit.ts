@@ -1,6 +1,17 @@
 import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
 
+/**
+ * Minimum usable terminal dimensions. These values are the floor for any
+ * resize operation. Going below them causes xterm to render its red
+ * "window too small..." banner and makes scrollback unreachable.
+ *
+ * Tuned for the compact sidebar panes used in focus-left layout: even a very
+ * narrow pane must stay a functional terminal with reachable history.
+ */
+export const MIN_COLS = 10;
+export const MIN_ROWS = 4;
+
 interface FitMeasurements {
   hostClientWidth: number;
   hostClientHeight: number;
@@ -10,6 +21,7 @@ interface FitMeasurements {
   viewportOffsetWidth: number;
   paddingHor: number;
   cellWidth: number;
+  cellHeight: number;
 }
 
 interface Diagnostics {
@@ -43,6 +55,9 @@ function logDiagnostics(phase: string, data: Diagnostics) {
  * with the scrollbar width subtracted: host - padding - scrollbar. If the
  * terminal's current cols already equal the corrected target, the width guard
  * does not fire (diagnostic shows widthGuardFired: false).
+ *
+ * Additionally, the result is clamped to MIN_COLS/MIN_ROWS so that compact
+ * sidebar panes never collapse into xterm's "window too small" state.
  */
 export function calculateFit(
   proposed: { cols: number; rows: number } | undefined,
@@ -69,16 +84,23 @@ export function calculateFit(
   // guard stays quiet (the fix prevented over-expansion, it did not shrink).
   const widthGuardFired = currentCols > targetCols;
 
-  // Bottom-row guard (#164): drop rows until the rendered terminal fits.
+  // Bottom-row guard (#164): when the rendered screen is taller than its host,
+  // derive the maximum rows from the host height and cell height instead of
+  // blindly decrementing. The result is clamped to MIN_ROWS so the terminal
+  // stays usable even in a very short pane.
   let rowGuardFired = false;
-  if (measurements.screenOffsetHeight > measurements.hostClientHeight) {
-    let guard = 0;
-    while (measurements.screenOffsetHeight > measurements.hostClientHeight && targetRows > 1 && guard < 12) {
-      targetRows--;
+  if (measurements.screenOffsetHeight > measurements.hostClientHeight && measurements.cellHeight > 0) {
+    const maxRowsFromHeight = Math.floor(measurements.hostClientHeight / measurements.cellHeight);
+    const clampedMaxRows = Math.max(MIN_ROWS, maxRowsFromHeight);
+    if (targetRows > clampedMaxRows) {
+      targetRows = clampedMaxRows;
       rowGuardFired = true;
-      guard++;
     }
   }
+
+  // Enforce absolute minimum usable dimensions.
+  targetCols = Math.max(MIN_COLS, targetCols);
+  targetRows = Math.max(MIN_ROWS, targetRows);
 
   return { cols: targetCols, rows: targetRows, scrollBarWidth, widthGuardFired, rowGuardFired };
 }
@@ -86,6 +108,11 @@ export function calculateFit(
 function getCellWidth(term: Terminal): number {
   const dims = term as unknown as { _core?: { _renderService?: { dimensions: { css: { cell: { width: number } } } } } };
   return dims._core?._renderService?.dimensions?.css?.cell?.width ?? 0;
+}
+
+function getCellHeight(term: Terminal): number {
+  const dims = term as unknown as { _core?: { _renderService?: { dimensions: { css: { cell: { height: number } } } } } };
+  return dims._core?._renderService?.dimensions?.css?.cell?.height ?? 0;
 }
 
 /**
@@ -117,6 +144,7 @@ export function fitTerminal(
 
   const proposed = fitAddon.proposeDimensions();
   const cellWidth = getCellWidth(term);
+  const cellHeight = getCellHeight(term);
 
   const result = calculateFit(proposed, term.cols, term.rows, {
     hostClientWidth,
@@ -127,6 +155,7 @@ export function fitTerminal(
     viewportOffsetWidth,
     paddingHor,
     cellWidth,
+    cellHeight,
   });
 
   if (result.cols !== term.cols || result.rows !== term.rows) {
