@@ -8,6 +8,7 @@ import * as crypto from 'crypto';
 import * as http from 'http';
 import { IPC_CHANNELS, type SpawnFailedPayload } from '../shared/types';
 import { getSettings } from './store';
+import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 
 interface ManagedPty {
   id: string;
@@ -567,7 +568,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // Tell the renderer this agent now has a live terminal — covers the
   // spawn-orchestrator path (main spawned it; the renderer never called
   // pty:spawn so it has no terminalId and the pane sits idle). Renderer
-  // maps agentName→terminalId and binds its xterm to the running PTY.
+  // maps agentName→terminalId and binds its UnifiedTerminal surface to the running PTY.
   safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id });
 
   // Forward PTY output to renderer. Tap the stream just to notice when
@@ -575,6 +576,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // now that mail push is handled by the MCP Channels path.
   ptyProcess.onData((data) => {
     safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data });
+    reportPtyOutput(agentName, id, data, provider, opts?.projectId ? String(opts.projectId) : undefined);
 
     const buf = Buffer.from(data);
     if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {
@@ -587,6 +589,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
 
   ptyProcess.onExit(({ exitCode }) => {
     safeSend(IPC_CHANNELS.PTY_EXIT, { terminalId: id, exitCode });
+    flushPtyOutput(id);
     if (managed.mailPollTimer) {
       clearInterval(managed.mailPollTimer);
       managed.mailPollTimer = null;
@@ -759,6 +762,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
 export function killTerminal(terminalId: string): boolean {
   const terminal = terminals.get(terminalId);
   if (terminal) {
+    dropPtyOutput(terminalId);
     if (terminal.mailPollTimer) {
       clearInterval(terminal.mailPollTimer);
       terminal.mailPollTimer = null;

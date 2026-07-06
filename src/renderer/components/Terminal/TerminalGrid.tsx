@@ -23,8 +23,8 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
   if (layout === 'focus-left' || layout === 'focus-right') {
     return (
       <div className={`h-full flex gap-2 ${layout === 'focus-right' ? 'flex-row-reverse' : ''}`}>
-        {/* Focus pane GÇö h-full ensures terminal-pane's h-full resolves correctly */}
-        <div className="flex-1 min-w-0 h-full">
+        {/* Focus pane Gï¿½ï¿½ h-full ensures terminal-pane's h-full resolves correctly */}
+        <div className="flex-1 min-w-0 h-full max-w-full overflow-hidden min-h-0">
           {focusedAgent && (
             <TerminalPane
               agent={focusedAgent}
@@ -35,7 +35,7 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
         </div>
 
         {/* Sidebar panes */}
-        <div className="w-80 flex flex-col gap-2">
+        <div className="w-80 flex flex-col gap-2 shrink-0 min-h-0">
           {sidebarAgents.map((agent) => (
             <div key={agent.id} className="flex-1 min-h-0">
               <TerminalPane
@@ -51,7 +51,7 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
     );
   }
 
-  // Grid layout GÇö adapts columns to agent count
+  // Grid layout Gï¿½ï¿½ adapts columns to agent count
   const cols = agents.length <= 2 ? 'grid-cols-1' : agents.length <= 4 ? 'grid-cols-2' : 'grid-cols-3';
   const rows = agents.length <= 3 ? 'grid-rows-1' : 'grid-rows-2';
 

@@ -45,26 +45,6 @@ html, body, #root {
   background: #475569;
 }
 
-/* xterm.js terminal styles */
-.xterm {
-  padding: 8px 8px 0;
-  overflow: hidden;
-  height: 100%;
-}
-
-.xterm-viewport::-webkit-scrollbar {
-  width: 8px;
-}
-
-.xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-}
-
 /* Draggable title bar */
 .titlebar {
   -webkit-app-region: drag;
@@ -103,10 +83,6 @@ html, body, #root {
   position: relative;
   display: flex;
   flex-direction: column;
-  /* WO-terminal-focus-viewport rd2: no justify-content:flex-end. xterm fills
-     the container (FitAddon sizes it) and the bottom-pin is scrollToBottom
-     only. flex-end fought xterm's own layout — when fit() rows slightly
-     exceeded the container it pushed the input below the visible fold. */
 }
 
 /* Status indicators */

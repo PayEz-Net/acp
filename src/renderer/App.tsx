@@ -26,6 +26,7 @@ import { useProjectStore } from './stores/projectStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useTeamStore } from './stores/teamStore';
 import { useAcpSse } from './hooks/useAcpSse';
+import { useVsqlCacheSse } from './hooks/useVsqlCacheSse';
 import { useTeamPoll } from './hooks/useTeamPoll';
 import { agentReconcile } from './lib/agentReconcile';
 
@@ -179,7 +180,7 @@ export default function App() {
   // agent has no terminalId and the pane sits idle ("Press ▷") while a
   // live Claude session runs behind it. Main now emits pty:spawned with
   // agentName→terminalId; map it onto the agent so TerminalPane's
-  // terminalId-gated effects attach the xterm to the running PTY.
+  // terminalId-gated effects attach the UnifiedTerminal surface to the running PTY.
   useEffect(() => {
     const unsub = window.electronAPI.onAgentSpawned(({ agentName, terminalId }) => {
       const st = useAppStore.getState();
@@ -284,8 +285,11 @@ export default function App() {
     };
   }, [settingsLoaded, activeProject?.id, pickerHasStarted]);
 
-  // Phase 1b: Single centralized SSE connection through acp-api
+  // Phase 1b: Single centralized SSE connection through acp-api (mail / lifecycle events)
   useAcpSse();
+
+  // BAPert #10583: vsql-cache agent-output stream
+  useVsqlCacheSse();
 
   // 60s background poll — keeps active-project + team auto-converged
   // across surfaces (web GSD / CLI → desktop). Spec §4.6 / Decision 7.
