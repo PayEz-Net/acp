@@ -10,6 +10,23 @@
   --text-secondary: #94a3b8;
   --accent: #7c3aed;
   --accent-hover: #6d28d9;
+
+  /* ACP Design System v1 tokens */
+  --acp-bg: #0B0F17;
+  --acp-surface: #111827;
+  --acp-surface-raised: #1F2937;
+  --acp-border: #374151;
+  --acp-border-focus: #6366F1;
+  --acp-text-primary: #F9FAFB;
+  --acp-text-secondary: #9CA3AF;
+  --acp-text-muted: #6B7280;
+  --acp-accent: #6366F1;
+  --acp-accent-hover: #4F46E5;
+  --acp-status-ready: #10B981;
+  --acp-status-busy: #F59E0B;
+  --acp-status-idle: #3B82F6;
+  --acp-status-error: #EF4444;
+  --acp-status-offline: #6B7280;
 }
 
 * {

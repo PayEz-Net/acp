@@ -1,4 +1,8 @@
 <!-- gitnexus:start -->
+# ACP Output Frame
+
+All responses must follow `docs/ACP_OUTPUT_FRAME.md`. Read it at the start of every task and apply its verdict-first structure, file-reference conventions, status words, verification block, and forbidden phrases. If the user request conflicts with the frame, the user request wins — note the override explicitly.
+
 # GitNexus — Code Intelligence
 
 This project is indexed by GitNexus as **acp-desktop** (625 symbols, 1257 relationships, 37 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.

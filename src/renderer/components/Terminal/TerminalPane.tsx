@@ -1,12 +1,12 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { AgentState } from '@shared/types';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
-import { archetypeLabelFor } from '../../lib/agentLabels';
 import { UnifiedTerminal } from './UnifiedTerminal';
+import { getStatusPill } from './TerminalFooter';
 import { Play, Square, RotateCcw } from 'lucide-react';
 
 interface TerminalPaneProps {
@@ -17,9 +17,16 @@ interface TerminalPaneProps {
 }
 
 export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPaneProps) {
-  const { updateAgentStatus, setAgentTerminalId, backendAvailable } = useAppStore();
-  // Active team runtime for the per-pane badge (SPEC-team-runtime §3.4).
+  const { agents, updateAgentStatus, setAgentTerminalId, backendAvailable } = useAppStore();
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
+
+  // Provider badge is only useful when the team mixes providers.
+  const mixedProviders = useMemo(() => {
+    const providers = new Set(agents.map((a) => a.provider ?? teamRuntime).filter(Boolean));
+    return providers.size > 1;
+  }, [agents, teamRuntime]);
+
+  const effectiveProvider = agent.provider ?? teamRuntime;
 
   // Push a visible error line into the agent output stream when something fails.
   const emitErrorLine = useCallback((message: string) => {
@@ -31,7 +38,6 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     });
   }, [agent.name, agent.terminalId]);
 
-  // Start agent — route through acp-api when available, fallback to direct IPC
   const startAgent = useCallback(async () => {
     updateAgentStatus(agent.id, 'starting');
     try {
@@ -81,9 +87,6 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     }
   }, [agent.id, agent.name, backendAvailable, updateAgentStatus, setAgentTerminalId, emitErrorLine]);
 
-  // Stop agent — kill PTY via both lifecycle API and direct IPC, then drop the
-  // terminal stream normalizer history and clear the output store so stale
-  // frames do not bleed into the next session.
   const stopAgent = useCallback(async () => {
     const tid = agent.terminalId;
     try {
@@ -111,70 +114,73 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     updateAgentStatus(agent.id, 'offline');
   }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus, setAgentTerminalId]);
 
-  // Restart agent — stop then start fresh
   const restartAgent = useCallback(async () => {
     await stopAgent();
     await new Promise(r => setTimeout(r, 500));
     await startAgent();
   }, [stopAgent, startAgent]);
 
-  // Auto-start if configured
   useEffect(() => {
     if (agent.autoStart && agent.status === 'offline' && !agent.terminalId) {
       startAgent();
     }
   }, [agent.autoStart, agent.status, agent.terminalId, startAgent]);
 
-  const statusColors: Record<string, string> = {
-    offline: 'bg-slate-500',
-    starting: 'bg-purple-500 animate-pulse',
-    ready: 'bg-blue-500',
-    busy: 'bg-amber-500 animate-pulse',
-    idle: 'bg-green-500',
-    error: 'bg-red-500',
-    failed: 'bg-red-600 animate-pulse',
-  };
+  const statusPill = getStatusPill(agent.status);
+
+  const providerBadgeColor =
+    effectiveProvider === 'claude'
+      ? 'bg-amber-500/15 text-amber-300'
+      : effectiveProvider === 'kimi'
+      ? 'bg-violet-500/15 text-violet-300'
+      : 'bg-cyan-500/15 text-cyan-300';
 
   return (
     <div
-      className={`terminal-pane h-full ${isFocused ? 'focused' : ''}`}
+      className={`
+        h-full flex flex-col overflow-hidden rounded-xl border
+        ${isFocused ? 'border-acp-border-focus shadow-[inset_0_0_0_1px_rgba(99,102,241,0.3)]' : 'border-acp-border'}
+        bg-acp-surface
+      `}
       onClick={onFocus}
-      style={{ borderColor: isFocused ? agent.color : undefined }}
+      data-testid="terminal-pane"
     >
-      {/* Header */}
-      <div className="terminal-header" style={{ borderColor: agent.color }}>
-        <div className={`status-dot ${statusColors[agent.status]}`} />
-        <div className="flex flex-col leading-tight min-w-0">
-          <span className="text-sm font-medium text-slate-200 truncate">{agent.displayName}</span>
-          {(() => {
-            const archetype = archetypeLabelFor(agent);
-            return archetype ? (
-              <span className="text-[10px] uppercase tracking-wide text-slate-500 truncate">{archetype}</span>
-            ) : null;
-          })()}
-        </div>
-        <span className="text-xs text-slate-500 capitalize">{agent.status}</span>
-        {teamRuntime ? (
+      {/* Header — stays at the top */}
+      <div className="relative h-10 shrink-0 flex items-center gap-2 px-3 border-b border-acp-border bg-acp-surface-raised">
+        <span
+          className={`w-2 h-2 rounded-full ${statusPill.color} ${statusPill.animate ? 'animate-pulse' : ''}`}
+          title={statusPill.label}
+        />
+
+        <span className="text-sm font-semibold text-acp-text-primary truncate">
+          {agent.displayName}
+        </span>
+
+        <span
+          className={`
+            text-[10px] font-medium px-1.5 py-0.5 rounded-full
+            ${statusPill.color}/15 ${statusPill.color.replace('bg-', 'text-')}
+          `}
+        >
+          {statusPill.label}
+        </span>
+
+        {mixedProviders && effectiveProvider && (
           <span
-            className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${
-              teamRuntime === 'claude'
-                ? 'bg-amber-500/15 text-amber-300'
-                : teamRuntime === 'kimi'
-                ? 'bg-violet-500/15 text-violet-300'
-                : 'bg-cyan-500/15 text-cyan-300'
-            }`}
-            title={`Team runtime: ${teamRuntime}`}
+            className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${providerBadgeColor}`}
+            title={`Provider: ${effectiveProvider}`}
           >
-            {teamRuntime}
+            {effectiveProvider}
           </span>
-        ) : null}
+        )}
+
         <div className="flex-1" />
 
         {/* Controls */}
         {agent.status === 'offline' ? (
           <button
-            onClick={startAgent}
-            className="p-1 text-slate-400 hover:text-green-400 transition-colors"
+            onClick={(e) => { e.stopPropagation(); startAgent(); }}
+            className="p-1 text-acp-text-muted hover:text-acp-status-ready transition-colors"
             title="Start Agent"
           >
             <Play className="w-4 h-4" />
@@ -182,15 +188,15 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         ) : (
           <>
             <button
-              onClick={stopAgent}
-              className="p-1 text-slate-400 hover:text-red-400 transition-colors"
+              onClick={(e) => { e.stopPropagation(); stopAgent(); }}
+              className="p-1 text-acp-text-muted hover:text-acp-status-error transition-colors"
               title="Stop Agent"
             >
               <Square className="w-4 h-4" />
             </button>
             <button
-              onClick={restartAgent}
-              className="p-1 text-slate-400 hover:text-amber-400 transition-colors"
+              onClick={(e) => { e.stopPropagation(); restartAgent(); }}
+              className="p-1 text-acp-text-muted hover:text-acp-status-busy transition-colors"
               title="Restart Agent"
             >
               <RotateCcw className="w-4 h-4" />
@@ -199,9 +205,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         )}
       </div>
 
-      {/* Terminal surface */}
+      {/* Terminal surface + footer + composer */}
       <UnifiedTerminal
-        agentName={agent.name}
+        agent={agent}
         terminalId={agent.terminalId}
         isFocused={isFocused}
         onFocus={onFocus}

@@ -51,12 +51,24 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
     );
   }
 
-  // Grid layout G�� adapts columns to agent count
-  const cols = agents.length <= 2 ? 'grid-cols-1' : agents.length <= 4 ? 'grid-cols-2' : 'grid-cols-3';
-  const rows = agents.length <= 3 ? 'grid-rows-1' : 'grid-rows-2';
+  // Deck layout — responsive reflow based on active agent count.
+  // 2 agents → 2 columns (~50% each).
+  // 3–4 agents → 2 columns, 2 rows, vertical scroll if needed.
+  // 5–6 agents → 3 columns, 2 rows, min pane width 480px.
+  // >6 agents → 3 columns with overflow / compact strip.
+  let deckClass = '';
+  if (agents.length <= 2) {
+    deckClass = 'grid-cols-2 grid-rows-1';
+  } else if (agents.length <= 4) {
+    deckClass = 'grid-cols-2 grid-rows-2';
+  } else if (agents.length <= 6) {
+    deckClass = 'grid-cols-3 grid-rows-2';
+  } else {
+    deckClass = 'grid-cols-3 auto-rows-fr overflow-y-auto';
+  }
 
   return (
-    <div className={`h-full grid ${cols} ${rows} gap-2`}>
+    <div className={`h-full grid gap-2 ${deckClass}`} data-testid="terminal-deck">
       {sortedAgents.map((agent) => (
         <TerminalPane
           key={agent.id}

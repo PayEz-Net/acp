@@ -11,11 +11,16 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { ChevronDown, Send } from 'lucide-react';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { ThinkingBlock } from '../ThinkingBlock';
+import { TerminalFooter } from './TerminalFooter';
 
 export interface UnifiedTerminalProps {
   /** Agent whose output stream to render. */
-  agentName: string;
+  agentName?: string;
+  /** Full agent state (preferred). */
+  agent?: import('@shared/types').AgentState;
   /** Active PTY terminal id for this agent. Undefined when the agent is offline. */
   terminalId?: string;
   /** Pane is the actively focused terminal. */
@@ -32,12 +37,15 @@ export const MIN_ROWS = 4;
 const SAMPLE_CHARS = 'MMMMMMMMMM';
 
 export function UnifiedTerminal({
-  agentName,
+  agentName: agentNameProp,
+  agent: agentProp,
   terminalId,
   isFocused,
   compact,
   onFocus,
 }: UnifiedTerminalProps) {
+  const agent = agentProp ?? null;
+  const agentName = agent?.name ?? agentNameProp ?? '';
   const lines = useAgentOutputStore((s) => s.lines);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
   const filteredLines = useMemo(() => lines.filter((l) => l.agent === agentName), [lines, agentName]);
@@ -53,6 +61,14 @@ export function UnifiedTerminal({
 
   const [paused, setPaused] = useState(false);
   const [showNewOutput, setShowNewOutput] = useState(false);
+
+  // Per-session output stats for the footer.
+  const lineCount = filteredLines.length;
+  const thinkingCount = filteredLines.filter((l) => l.thinking && !l.thinkingLive).length;
+  const activeProject = useProjectStore((s) => s.activeProject);
+  const repoPath = activeProject?.repo_path ?? '';
+  const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
+  const contextUsage = agentStatus?.contextUsage ?? 0;
 
   const computeDimensions = useCallback(() => {
     const container = containerRef.current;
@@ -360,7 +376,7 @@ export function UnifiedTerminal({
       <div
         ref={containerRef}
         data-testid="terminal-host"
-        className="relative flex-1 min-h-0 overflow-hidden bg-slate-900"
+        className="relative flex-1 min-h-0 overflow-hidden bg-acp-bg"
         onClick={handleClick}
       >
         {/* Hidden measurement span for dimension math. */}
@@ -380,7 +396,7 @@ export function UnifiedTerminal({
           onScroll={handleScroll}
           onContextMenu={handleContextMenu}
           onKeyDown={handleKeyDown}
-          className={`h-full w-full overflow-y-auto outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
+          className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
             compact ? 'text-[11px]' : 'text-[13px]'
           } p-2 space-y-0.5`}
           role="log"
@@ -416,7 +432,7 @@ export function UnifiedTerminal({
                 {showThinking && line.thinking && (
                   <div className={line.thinkingLive ? '' : 'ml-2 mt-0.5'}>
                     <ThinkingBlock
-                      label={line.thinkingLive ? line.line : 'Thinking'}
+                      label={line.thinkingLive ? line.line : 'Thinking…'}
                       content={line.thinking}
                       live={line.thinkingLive}
                       compact={compact}
@@ -446,6 +462,18 @@ export function UnifiedTerminal({
         )}
       </div>
 
+      {/* Footer context bar — metadata above the input */}
+      {agent && (
+        <TerminalFooter
+          agent={agent}
+          provider={agent.provider ?? null}
+          repoPath={repoPath}
+          lineCount={lineCount}
+          thinkingCount={thinkingCount}
+          contextUsage={contextUsage}
+        />
+      )}
+
       {/* Vercel-style composer — single chat input for the pane */}
       <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2">
         <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-2 border border-slate-700/50 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/30 transition-all">
@@ -456,7 +484,7 @@ export function UnifiedTerminal({
             onKeyDown={handleInputKeyDown}
             onFocus={onFocus}
             disabled={!terminalId}
-            placeholder={terminalId ? 'Type a command or message...' : 'Start the agent to type...'}
+            placeholder={terminalId ? `Message ${agentName}…` : 'Start the agent to type…'}
             className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid="terminal-input"
           />

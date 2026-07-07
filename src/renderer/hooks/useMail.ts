@@ -109,9 +109,13 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     return result;
   }, [mailboxes, activeProjectId]);
 
-  // Total unread across all agents (scoped to current project)
+  // Total unread across all agents (scoped to current project).
+  // Info-tier scout chatter does not interrupt workflow, so it is excluded from
+  // the unread count surfaced on the mail icon.
   const totalUnread = Object.values(scopedMailboxes).reduce(
-    (sum, mb) => sum + (mb?.unreadCount || 0),
+    (sum, mb) =>
+      sum +
+      (mb?.messages?.filter((m) => !m.is_read && m.importance !== 'info').length || 0),
     0
   );
 

@@ -5,7 +5,9 @@ import { act } from 'react';
 
 import { UnifiedTerminal } from './UnifiedTerminal';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { useAppStore } from '../../stores/appStore';
+import type { AgentState } from '@shared/types';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -32,6 +34,7 @@ beforeEach(() => {
   });
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
   useAgentOutputStore.setState({ lines: [] });
+  useAgentStatusStore.setState({ statuses: {} });
 });
 
 afterEach(() => {
@@ -323,5 +326,31 @@ describe('UnifiedTerminal', () => {
       expect(input.value).toBe('');
       cleanup(root, container);
     });
+  });
+
+  it('renders parsed agent status in the footer', () => {
+    useAgentStatusStore.getState().setStatus('NextPert', {
+      contextUsage: 42,
+      model: 'K2.7 Code',
+      cwd: 'E:\\repos\\acp-desktop',
+      composing: { duration: '<1s', tokens: 140 },
+    });
+
+    const agent: AgentState = {
+      id: '1',
+      name: 'NextPert',
+      displayName: 'NextPert',
+      workDir: '',
+      autoStart: false,
+      position: 'top-left',
+      status: 'busy',
+      provider: 'kimi',
+    };
+
+    const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+    expect(container.querySelector('[title="Context usage: 42%"]')).not.toBeNull();
+    expect(container.textContent).toContain('K2.7 Code');
+    expect(container.textContent).toContain('<1s · 140t');
+    cleanup(root, container);
   });
 });

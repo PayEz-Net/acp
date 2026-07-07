@@ -1,13 +1,11 @@
-import { useState } from 'react';
-import { CheckCheck, FolderOpen, Loader2, Mail, MailOpen, RefreshCw, X } from 'lucide-react';
-import { AgentState } from '@shared/types';
+import { useState, useEffect } from 'react';
+import { CheckCheck, FolderOpen, Loader2, Mail, MailOpen, RefreshCw, X, ArrowLeft, AlertTriangle, Info } from 'lucide-react';
+import { AgentState, MailMessage } from '@shared/types';
 import { useMail } from '../../hooks/useMail';
 import { useProjectStore } from '../../stores/projectStore';
-import { useMailStore } from '../../stores/mailStore';
+import { useMailStore, markMessageRead } from '../../stores/mailStore';
 import { MailAgentSection } from './MailAgentSection';
 import { MailDetail } from './MailDetail';
-// ComposeModal removed: human mail is OBSERVE-ONLY until the rethink (BAPert
-// 1369). The never-worked human->agent send (compose + reply) is taken off.
 
 interface MailSidebarProps {
   agents: AgentState[];
@@ -18,22 +16,12 @@ interface MailSidebarProps {
 
 export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
   const agentNames = agents.map((a) => a.name);
-  // Gate mail polling on the user's CONFIRMATION (the [Start] click), not on
-  // current_project_state. A returning user boots with state already 'stored',
-  // so a state-based gate fired mail GETs behind the still-open confirm picker
-  // before [Start] (BAPert WO 1560 R3). pickerHasStarted is false on every cold
-  // boot and flips true only when the user clicks [Start] G�� and survives switch/
-  // relaunch (resets false G�� picker re-confirms G�� loads).
   const pickerHasStarted = useProjectStore((s) => s.pickerHasStarted);
-  // Live push state — surface a non-green indicator so a dead/reconnecting
-  // SignalR connection is VISIBLE rather than a silent freeze (#225).
   const pushConnectionState = useMailStore((s) => s.pushConnectionState);
 
   const {
-    selectedMessage,
     selectedMessageActions,
     selectedMessageSuggested,
-    getUnreadCount,
     getMessages,
     isLoading,
     selectMessage,
@@ -48,13 +36,26 @@ export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
     pollInterval: 30000,
     enabled: isOpen && pickerHasStarted,
   });
+  const selectedMessage = useMailStore((s) => s.selectedMessage);
 
   const [markingAll, setMarkingAll] = useState(false);
+  const [activeTab, setActiveTab] = useState<'attention' | 'chatter'>('attention');
 
-  // Mark-all-read for the CURRENT project (BAPert 1310). Clears every agent
-  // with unread in one gesture G�� the human surface for the reliable bulk
-  // read-all. Feedback: the unread badges + total drop to 0 on refresh; a
-  // failure leaves the un-cleared badges visible (never a silent success).
+  // Auto-mark info-tier scout chatter as read on arrival so it does not bump
+  // the unread count or interrupt workflow.
+  useEffect(() => {
+    if (!isOpen) return;
+    for (const agent of agents) {
+      for (const msg of getMessages(agent.name)) {
+        if (msg.importance === 'info' && !msg.is_read) {
+          markMessageRead(msg.message_id).then((ok) => {
+            if (ok) useMailStore.getState().markAsRead(msg.message_id);
+          });
+        }
+      }
+    }
+  }, [isOpen, agents, getMessages]);
+
   const handleMarkAllRead = async () => {
     if (markingAll || totalUnread === 0) return;
     setMarkingAll(true);
@@ -65,119 +66,207 @@ export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
     }
   };
 
+  const attentionMessagesByAgent = agents.map((agent) => ({
+    agent,
+    messages: getMessages(agent.name).filter((m) => m.importance !== 'info'),
+    unreadCount: getMessages(agent.name).filter((m) => m.importance !== 'info' && !m.is_read).length,
+  }));
+
+  const chatterMessagesByAgent = agents.map((agent) => ({
+    agent,
+    messages: getMessages(agent.name).filter((m) => m.importance === 'info'),
+    unreadCount: 0,
+  }));
+
+  const hasAttention = attentionMessagesByAgent.some((g) => g.messages.length > 0);
+  const hasChatter = chatterMessagesByAgent.some((g) => g.messages.length > 0);
+
   if (!isOpen) return null;
 
   return (
-    <div className="flex h-full bg-slate-900 border-l border-slate-700">
-      {/* Mail List */}
-      <div className="w-72 flex flex-col border-r border-slate-800">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-          <div className="flex items-center gap-2">
-            <Mail className="w-5 h-5 text-violet-400" />
-            <span className="text-sm font-semibold text-slate-200">Mail</span>
-            {/* Push-connection indicator (#225): only shown when NOT connected,
-                so a dead/reconnecting SignalR push is visible rather than a
-                silent freeze. Mail still updates via the 30s poll meanwhile. */}
-            {pushConnectionState !== 'connected' && (() => {
-              // Live SSE push state (#225). 'disconnected' = the stream is down
-              // / failing (red "Offline"); 'reconnecting' = transient retry
-              // (amber pulse). IDP auth-death is NOT shown here — it routes to
-              // the login screen via AUTH_SESSION_DEAD, not this indicator.
-              const isOff = pushConnectionState === 'disconnected';
-              return (
-                <span
-                  className="flex items-center gap-1 text-[10px] uppercase tracking-wide"
-                  title={`Mail push: ${pushConnectionState}`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${isOff ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`} />
-                  <span className={isOff ? 'text-red-400' : 'text-amber-400'}>
-                    {isOff ? 'Offline' : 'Reconnecting'}
-                  </span>
-                </span>
-              );
-            })()}
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={toggleUnreadFilter}
-              className={`p-1.5 rounded transition-colors ${showUnreadOnly ? 'text-violet-400 bg-violet-900/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
-              title={showUnreadOnly ? 'Show all messages' : 'Show unread only'}
-            >
-              {showUnreadOnly ? <Mail className="w-4 h-4" /> : <MailOpen className="w-4 h-4" />}
-            </button>
-            <button
-              onClick={handleMarkAllRead}
-              disabled={markingAll || totalUnread === 0}
-              className="p-1.5 text-slate-400 hover:text-violet-400 hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title={totalUnread === 0 ? 'No unread messages' : `Mark all ${totalUnread} read (this project)`}
-            >
-              {markingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
-            </button>
-            <button
-              onClick={refresh}
-              className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
-              title="Refresh"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            {/* Compose (new agent-mail) icon REMOVED per BAPert 1364 / Jon: the
-                non-terminal human->agent compose never worked; taken off, NOT
-                replaced (Aurum owns the ground-up outside-terminal rethink). */}
-            <button
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors"
-              title="Close"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/50 z-40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
 
-        {/* Project Banner */}
-        <div className="flex items-center gap-2 px-4 py-2 bg-cyan-950/40 border-b border-cyan-900/50">
-          <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">{useProjectStore.getState().activeProject?.name || 'ACP'}</span>
-        </div>
-
-        {/* Agent Sections */}
-        <div className="flex-1 overflow-y-auto">
-          {agents.map((agent) => (
-            <MailAgentSection
-              key={agent.name}
-              agent={agent.name}
-              messages={getMessages(agent.name)}
-              unreadCount={getUnreadCount(agent.name)}
-              isLoading={isLoading(agent.name)}
-              selectedMessageId={selectedMessage?.message_id}
-              onSelectMessage={selectMessage}
-              color={agent.color}
-              status={agent.status}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* Detail Pane */}
-      <div className="w-80 flex flex-col">
+      {/* Drawer */}
+      <div className="fixed right-0 top-0 bottom-0 w-[360px] bg-acp-surface border-l border-acp-border z-50 flex flex-col shadow-2xl">
         {selectedMessage ? (
-          <MailDetail
-            message={selectedMessage}
-            actions={selectedMessageActions}
-            suggested={selectedMessageSuggested}
-            onClose={() => selectMessage(null)}
-            onAction={executeAction}
-          />
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-            <Mail className="w-12 h-12 text-slate-700 mb-4" />
-            <p className="text-sm text-slate-500">
-              Select a message to view
-            </p>
+          <div className="flex flex-col h-full">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-acp-border bg-acp-surface-raised shrink-0">
+              <button
+                onClick={() => selectMessage(null)}
+                className="flex items-center gap-1 text-sm text-acp-text-secondary hover:text-acp-text-primary transition-colors"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back
+              </button>
+              <button
+                onClick={onClose}
+                className="p-1.5 text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <MailDetail
+                message={selectedMessage}
+                actions={selectedMessageActions}
+                suggested={selectedMessageSuggested}
+                onClose={() => selectMessage(null)}
+                onAction={executeAction}
+              />
+            </div>
           </div>
+        ) : (
+          <>
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-acp-border bg-acp-surface-raised shrink-0">
+              <div className="flex items-center gap-2">
+                <Mail className="w-5 h-5 text-acp-accent" />
+                <span className="text-sm font-semibold text-acp-text-primary">Mail</span>
+                {pushConnectionState !== 'connected' && (() => {
+                  const isOff = pushConnectionState === 'disconnected';
+                  return (
+                    <span
+                      className="flex items-center gap-1 text-[10px] uppercase tracking-wide"
+                      title={`Mail push: ${pushConnectionState}`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${isOff ? 'bg-acp-status-error' : 'bg-acp-status-busy animate-pulse'}`} />
+                      <span className={isOff ? 'text-acp-status-error' : 'text-acp-status-busy'}>
+                        {isOff ? 'Offline' : 'Reconnecting'}
+                      </span>
+                    </span>
+                  );
+                })()}
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={toggleUnreadFilter}
+                  className={`p-1.5 rounded transition-colors ${showUnreadOnly ? 'text-acp-accent bg-acp-accent/10' : 'text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised'}`}
+                  title={showUnreadOnly ? 'Show all messages' : 'Show unread only'}
+                >
+                  {showUnreadOnly ? <Mail className="w-4 h-4" /> : <MailOpen className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={handleMarkAllRead}
+                  disabled={markingAll || totalUnread === 0}
+                  className="p-1.5 text-acp-text-muted hover:text-acp-accent hover:bg-acp-surface-raised rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={totalUnread === 0 ? 'No unread messages' : `Mark all ${totalUnread} read (this project)`}
+                >
+                  {markingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={refresh}
+                  className="p-1.5 text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors"
+                  title="Refresh"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={onClose}
+                  className="p-1.5 text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors"
+                  title="Close"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Project Banner */}
+            <div className="flex items-center gap-2 px-4 py-2 bg-acp-surface-raised/50 border-b border-acp-border">
+              <FolderOpen className="w-3.5 h-3.5 text-acp-status-idle" />
+              <span className="text-xs font-semibold text-acp-status-idle uppercase tracking-wider">
+                {useProjectStore.getState().activeProject?.name || 'ACP'}
+              </span>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-acp-border shrink-0">
+              <button
+                onClick={() => setActiveTab('attention')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                  activeTab === 'attention'
+                    ? 'text-acp-text-primary border-b-2 border-acp-accent bg-acp-surface-raised'
+                    : 'text-acp-text-muted hover:text-acp-text-secondary'
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Needs attention
+                {totalUnread > 0 && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-bold bg-acp-status-error text-white rounded-full">
+                    {totalUnread}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setActiveTab('chatter')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors ${
+                  activeTab === 'chatter'
+                    ? 'text-acp-text-primary border-b-2 border-acp-accent bg-acp-surface-raised'
+                    : 'text-acp-text-muted hover:text-acp-text-secondary'
+                }`}
+              >
+                <Info className="w-3.5 h-3.5" />
+                Scout chatter
+              </button>
+            </div>
+
+            {/* Message list */}
+            <div className="flex-1 overflow-y-auto">
+              {activeTab === 'attention' ? (
+                <>
+                  {!hasAttention && (
+                    <div className="flex flex-col items-center justify-center h-full text-center p-8 text-acp-text-muted">
+                      <MailOpen className="w-10 h-10 mb-3 opacity-30" />
+                      <p className="text-sm">No messages need attention.</p>
+                    </div>
+                  )}
+                  {attentionMessagesByAgent.map(({ agent, messages, unreadCount }) => (
+                    <MailAgentSection
+                      key={agent.name}
+                      agent={agent.name}
+                      messages={messages}
+                      unreadCount={unreadCount}
+                      isLoading={isLoading(agent.name)}
+                      selectedMessageId={(selectedMessage as MailMessage | null)?.message_id}
+                      onSelectMessage={selectMessage}
+                      color={agent.color}
+                      status={agent.status}
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  {!hasChatter && (
+                    <div className="flex flex-col items-center justify-center h-full text-center p-8 text-acp-text-muted">
+                      <Info className="w-10 h-10 mb-3 opacity-30" />
+                      <p className="text-sm">No scout chatter yet.</p>
+                    </div>
+                  )}
+                  {chatterMessagesByAgent.map(({ agent, messages }) => (
+                    <MailAgentSection
+                      key={agent.name}
+                      agent={agent.name}
+                      messages={messages}
+                      unreadCount={0}
+                      isLoading={isLoading(agent.name)}
+                      selectedMessageId={(selectedMessage as MailMessage | null)?.message_id}
+                      onSelectMessage={selectMessage}
+                      color={agent.color}
+                      status={agent.status}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
+          </>
         )}
       </div>
-
-    </div>
+    </>
   );
 }

@@ -24,6 +24,7 @@
 import { stripAnsi } from './ansi';
 import { normalizeTerminalLine } from './terminalProviderAdapters';
 import { type CodeProvider } from './agentProviders';
+import { useAgentStatusStore } from '../stores/agentStatusStore';
 
 export interface StreamLine {
   agent: string;
@@ -47,8 +48,6 @@ interface TerminalHistory {
   // Aggressive footer suppression: TUI status bars redraw across non-status
   // lines, so we suppress any footer-like line within a window of the last one.
   lastFooterTs: string | null;
-  // Recent user input sent to this terminal, used to suppress PTY echo.
-  echoBuffer: { text: string; ts: string }[];
   // Thinking-block state.
   thinkingBuffer: string[];
   thinkingLabel: string | null;
@@ -57,7 +56,6 @@ interface TerminalHistory {
 }
 
 const DEDUP_WINDOW_MS = 5000;
-const ECHO_WINDOW_MS = 5000;
 const MAX_THINKING_BUFFER_LINES = 1000;
 
 // Spinner glyphs that may appear anywhere in a provider TUI redraw (not just
@@ -79,7 +77,7 @@ const THINKING_GLYPHS = /^(?:[\s]*(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛
 // Common TUI thinking / working labels. These are emitted repeatedly while the
 // model is processing and create scrolling noise in the line-printer renderer.
 // Allows optional prompt/box-drawing prefixes (e.g. "│ › Thinking").
-const THINKING_LABEL = /^(?:[\s│┃┣├]*[›>➤]\s*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing)[\s\.…]*|[\s]*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing)[\s\.…]*|[\s]*\.{3,}[\s]*)$/i;
+const THINKING_LABEL = /^(?:[\s│┃┣├]*[›>➤]\s*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing|composing)[\s\.…]*|[\s]*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing|composing)[\s\.…]*|[\s]*\.{3,}[\s]*)$/i;
 
 // Repeated separator characters emitted by provider TUIs (e.g. "--- input ---",
 // "==========", "~~~~~~~~~~").
@@ -89,7 +87,7 @@ const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█]{3,}[\s]*)+$/;
 // Catches context-usage lines ("context: 69.4%"), token/cost counters, Kimi
 // Code CLI status bars ("yolo agent (K2.7 Code ●) ..."), input prompts, and
 // repeating keybinding/help hint lines ("ctrl-x: toggle mode", "@: mention files").
-const FOOTER_LINE = /^(?:[\s|]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+(?:\s*(?:tokens?|%))?|yolo agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\)|[—–]\s*input.*|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|@:\s*mention files|jnewline)\s*[\s|]*)+$/i;
+const FOOTER_LINE = /^(?:[\s|⫶·]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+.*|yolo\s+agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\).*|⫶.*|[—–]\s*input.*|[-=]{2,}\s*input\b.*|composing\b.*\d+[\d\.,]*[kmbt]?\s*tokens?|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|ctl-x:.*|crl-v(?:paste)?.*|[@#]\s*:\s*mention files|jnewline|\/(?:feedback|theme)\b.*|(?:thme|theme)\b.*|↑.*|ctrl-s\b.*)\s*[\s|⫶·]*)+$/i;
 
 // Explicit XML-style thinking markers (some providers/TUIs emit these).
 const THINKING_START_MARKER = /<thinking\b/i;
@@ -99,6 +97,98 @@ const THINKING_END_MARKER = /<\/thinking>/i;
 // collapse key because we want to suppress *families* of status lines, not just
 // exact matches.
 type NoiseCategory = 'status-glyph' | 'thinking' | 'separator' | 'footer';
+
+// Parse token shorthand like 1.2k, 140, 262.1k into a raw number.
+function parseTokens(value: string): number {
+  const cleaned = value.trim().toLowerCase().replace(/,/g, '');
+  const match = cleaned.match(/^(\d+(?:\.\d+)?)\s*([kmbt])?$/);
+  if (!match) return NaN;
+  const num = parseFloat(match[1]);
+  const suffix = match[2];
+  switch (suffix) {
+    case 'k': return Math.round(num * 1_000);
+    case 'm': return Math.round(num * 1_000_000);
+    case 'b': return Math.round(num * 1_000_000_000);
+    case 't': return Math.round(num * 1_000_000_000_000);
+    default: return Math.round(num);
+  }
+}
+
+interface StatusExtract {
+  contextUsage?: number;
+  tokenUsed?: number;
+  tokenMax?: number;
+  cwd?: string;
+  model?: string;
+  composing?: { duration: string; tokens: number } | null;
+}
+
+const STATUS_EXTRACTORS: { regex: RegExp; extract: (m: RegExpMatchArray) => StatusExtract | null }[] = [
+  // context: 38.5%
+  {
+    regex: /context\s*[:=]\s*(\d+(?:\.\d+)?)\s*%/i,
+    extract: (m) => ({ contextUsage: parseFloat(m[1]) }),
+  },
+  // (101.9k/262.1k)
+  {
+    regex: /\(\s*(\d[\d\.,]*[kmbt]?)\s*\/\s*(\d[\d\.,]*[kmbt]?)\s*\)/i,
+    extract: (m) => {
+      const used = parseTokens(m[1]);
+      const max = parseTokens(m[2]);
+      return {
+        tokenUsed: Number.isNaN(used) ? undefined : used,
+        tokenMax: Number.isNaN(max) ? undefined : max,
+      };
+    },
+  },
+  // yolo agent (K2.7 Code •) E:\repos ...
+  {
+    regex: /yolo\s+agent\s*\(\s*([^)]+?)\s*(?:•|\*)\s*\)\s*(.+?)(?=\s+(?:ctrl|shift|alt|cmd)-[a-z0-9]+:|$)/i,
+    extract: (m) => {
+      const model = m[1].trim();
+      const cwd = m[2].trim();
+      return { model: model || undefined, cwd: cwd || undefined };
+    },
+  },
+  // Composing... <1s · 140 tokens
+  {
+    regex: /composing[\s\.…]*([<]?\d+[smh]?)\s*[·.]?\s*(\d[\d\.,]*[kmbt]?)\s*tokens?/i,
+    extract: (m) => {
+      const tokens = parseTokens(m[2]);
+      return {
+        composing: {
+          duration: m[1].trim(),
+          tokens: Number.isNaN(tokens) ? 0 : tokens,
+        },
+      };
+    },
+  },
+];
+
+function extractStatus(text: string): StatusExtract | null {
+  for (const { regex, extract } of STATUS_EXTRACTORS) {
+    const m = text.match(regex);
+    if (m) {
+      const result = extract(m);
+      if (result) return result;
+    }
+  }
+  return null;
+}
+
+function updateAgentStatus(agentName: string, extract: StatusExtract | null) {
+  if (!agentName || !extract) return;
+  const update: Record<string, unknown> = {};
+  if (extract.contextUsage !== undefined) update.contextUsage = extract.contextUsage;
+  if (extract.tokenUsed !== undefined) update.tokenUsed = extract.tokenUsed;
+  if (extract.tokenMax !== undefined) update.tokenMax = extract.tokenMax;
+  if (extract.cwd !== undefined) update.cwd = extract.cwd;
+  if (extract.model !== undefined) update.model = extract.model;
+  if (extract.composing !== undefined) update.composing = extract.composing;
+  if (Object.keys(update).length > 0) {
+    useAgentStatusStore.getState().setStatus(agentName, update);
+  }
+}
 
 function collapseKey(text: string): string {
   return text
@@ -123,15 +213,6 @@ function isBlank(text: string): boolean {
   return text.trim().length === 0;
 }
 
-// Provider input prompt prefixes that wrap echoed user input (e.g. "— input hello",
-// "$ hello"). Stripping these lets us compare the raw user text against what we
-// sent to the PTY.
-const INPUT_PROMPT_PREFIX = /^(?:[\s│┃]*[—–]\s*input[\s—–]*|[\s]*[>$#%›➤]\s*)/i;
-
-function stripInputPrompt(text: string): string {
-  return text.replace(INPUT_PROMPT_PREFIX, '').trim();
-}
-
 function emptyHistory(ts: string): TerminalHistory {
   return {
     lastText: '',
@@ -140,7 +221,6 @@ function emptyHistory(ts: string): TerminalHistory {
     consecutiveBlankCount: 0,
     lastNoiseCategory: null,
     lastFooterTs: null,
-    echoBuffer: [],
     thinkingBuffer: [],
     thinkingLabel: null,
     thinkingSawBlank: false,
@@ -205,6 +285,9 @@ export class TerminalStreamNormalizer {
       // into the accumulated content; just keep the live placeholder spinning.
       const noiseCategory = classifyNoise(text);
       if (noiseCategory === 'footer' || noiseCategory === 'separator') {
+        if (noiseCategory === 'footer') {
+          updateAgentStatus(input.agent, extractStatus(text));
+        }
         this.history.set(terminalId, hist);
         return this.makeThinkingLine(input, hist);
       }
@@ -283,6 +366,28 @@ export class TerminalStreamNormalizer {
     const key = collapseKey(text);
     const noiseCategory = classifyNoise(text);
 
+    // Aggressive TUI chrome suppression: provider status bars, context/token
+    // counters, input separators, keybinding hints, yolo agent banners, and pure
+    // status-glyph lines must never reach the user-facing pane stream. Drop them
+    // immediately rather than emitting the first variant and deduplicating the rest.
+    if (noiseCategory === 'footer' || noiseCategory === 'separator' || noiseCategory === 'status-glyph') {
+      if (!hist) {
+        hist = emptyHistory(ts);
+        this.history.set(input.terminal_id, hist);
+      }
+      hist.lastText = text;
+      hist.lastKey = key;
+      hist.lastTs = ts;
+      hist.consecutiveBlankCount = 0;
+      hist.lastNoiseCategory = noiseCategory;
+      if (noiseCategory === 'footer') {
+        hist.lastFooterTs = ts;
+        updateAgentStatus(input.agent, extractStatus(text));
+      }
+      this.history.set(input.terminal_id, hist);
+      return null;
+    }
+
     // Consecutive-frame collapse + 5-second deduplication.
     if (hist && hist.lastKey === key) {
       const prevTs = new Date(hist.lastTs).getTime();
@@ -291,43 +396,6 @@ export class TerminalStreamNormalizer {
         // Refresh the timestamp so the window keeps sliding.
         hist.lastTs = ts;
         hist.lastNoiseCategory = noiseCategory;
-        hist.consecutiveBlankCount = 0;
-        this.history.set(input.terminal_id, hist);
-        return null;
-      }
-    }
-
-    // Aggressive footer suppression: provider status bars (yolo agent, context%,
-    // token usage, input separators) redraw across command output and other lines.
-    // Suppress any footer-like line that appears within the dedup window of the
-    // last footer, regardless of intervening content.
-    if (noiseCategory === 'footer' && hist && hist.lastFooterTs) {
-      const prevFooterTs = new Date(hist.lastFooterTs).getTime();
-      const now = new Date(ts).getTime();
-      if (now - prevFooterTs < DEDUP_WINDOW_MS) {
-        hist.lastTs = ts;
-        hist.lastKey = key;
-        hist.lastText = text;
-        hist.lastNoiseCategory = noiseCategory;
-        hist.consecutiveBlankCount = 0;
-        this.history.set(input.terminal_id, hist);
-        return null;
-      }
-    }
-
-    // Interim TUI noise-family collapse: repeated status dots, "Thinking..."
-    // variants, and decorative separator lines redraw continuously in interactive
-    // TUIs. Drop variants of the same noise family within the same dedup window so
-    // the human can follow the actual conversation. This runs *after* identical-
-    // line dedup so a genuinely stale repeated line still reappears after the
-    // window. Only lines that are *purely* status/thinking/separator collapse.
-    if (noiseCategory && hist && hist.lastNoiseCategory === noiseCategory) {
-      const prevTs = new Date(hist.lastTs).getTime();
-      const now = new Date(ts).getTime();
-      if (now - prevTs < DEDUP_WINDOW_MS) {
-        hist.lastTs = ts;
-        hist.lastKey = key;
-        hist.lastText = text;
         hist.consecutiveBlankCount = 0;
         this.history.set(input.terminal_id, hist);
         return null;
@@ -343,9 +411,6 @@ export class TerminalStreamNormalizer {
     hist.lastTs = ts;
     hist.consecutiveBlankCount = 0;
     hist.lastNoiseCategory = noiseCategory;
-    if (noiseCategory === 'footer') {
-      hist.lastFooterTs = ts;
-    }
 
     return { ...input, line: text };
   }
@@ -359,20 +424,6 @@ export class TerminalStreamNormalizer {
       // We intentionally do not emit a finalized line here because there is no
       // caller to consume it. The next session starts with emptyHistory().
     }
-  }
-
-  /** Record user input sent to a terminal so echoed PTY output can be suppressed. */
-  recordInput(terminalId: string, text: string, ts = new Date().toISOString()): void {
-    const hist = this.history.get(terminalId);
-    if (!hist) {
-      this.history.set(terminalId, { ...emptyHistory(ts), echoBuffer: [{ text, ts }] });
-      return;
-    }
-    hist.echoBuffer.push({ text, ts });
-    // Prune entries older than the echo window to keep the buffer small.
-    const cutoff = new Date(ts).getTime() - ECHO_WINDOW_MS;
-    hist.echoBuffer = hist.echoBuffer.filter((e) => new Date(e.ts).getTime() > cutoff);
-    this.history.set(terminalId, hist);
   }
 
   /** Reset all history. */

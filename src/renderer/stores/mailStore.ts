@@ -42,6 +42,26 @@ function extractAgentFromKey(key: string): string {
   return idx >= 0 ? key.slice(idx + 1) : key;
 }
 
+// TEMP-SHIM(agent-identity-overhaul): the cloud agentmail registry currently
+// contains spawned instances (e.g. Nextpert-Scout) but not the base archetype
+// persona (NextPert). Route mail addressed to the base persona to its primary
+// executor instance so task dispatch works until the registry is rebuilt.
+const AGENT_MAIL_ALIASES: Record<string, string> = {
+  NextPert: 'Nextpert-Scout',
+};
+
+export function resolveMailAlias(agent: string): string {
+  return AGENT_MAIL_ALIASES[agent] || agent;
+}
+
+/** Reverse map an aliased API agent name back to the UI-facing agent name. */
+export function unresolveMailAlias(alias: string): string {
+  for (const [name, mapped] of Object.entries(AGENT_MAIL_ALIASES)) {
+    if (mapped === alias) return name;
+  }
+  return alias;
+}
+
 // ---------------------------------------------------------------------------
 // P0 mail comms-lockup guards (task #11). Root: fetchAllInboxes per-agent
 // fan-out, fired by 5 stacking triggers (poll/focus/mount/SSE/post-read) +
@@ -270,7 +290,8 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
         while (page <= totalPages && page <= 20) { // safety cap at 20 pages
           const qs = `?page=${page}&page_size=50`;
-          const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}${qs}`, { agentName: agent });
+          const apiAgent = resolveMailAlias(agent);
+          const res = await mailRequest(`/inbox/${encodeURIComponent(apiAgent)}${qs}`, { agentName: apiAgent });
           if (res.status === 429) { _rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS; throw new Error('rate limited (429)'); }
           if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
           const response = await res.json();
@@ -304,7 +325,8 @@ export const useMailStore = create<MailStore>((set, get) => ({
         }, pid);
       } else {
         // Normal fetch: single page
-        const res = await mailRequest(`/inbox/${encodeURIComponent(agent)}`, { agentName: agent });
+        const apiAgent = resolveMailAlias(agent);
+        const res = await mailRequest(`/inbox/${encodeURIComponent(apiAgent)}`, { agentName: apiAgent });
         if (res.status === 429) { _rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS; throw new Error('rate limited (429)'); }
         if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
         const response = await res.json();
@@ -357,7 +379,9 @@ export const useMailStore = create<MailStore>((set, get) => ({
       }
 
       try {
-        const qs = `?agents=${encodeURIComponent(agents.join(','))}${pid != null ? `&project_id=${pid}` : ''}`;
+        const aliasToAgent = new Map(agents.map((a) => [resolveMailAlias(a), a]));
+        const apiAgents = agents.map((a) => resolveMailAlias(a));
+        const qs = `?agents=${encodeURIComponent(apiAgents.join(','))}${pid != null ? `&project_id=${pid}` : ''}`;
         const res = await mailRequest(`/inboxes${qs}`);
         if (res.status === 429) { _rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS; return; }
         if (!res.ok) throw new Error(`Failed to fetch inboxes: ${res.status}`);
@@ -370,8 +394,11 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
         // Per-agent isolation is enforced server-side (a failing agent → error+empty,
         // others intact, QA 6751 axis-2). Map each into the store exactly as fetchInbox does.
-        for (const agent of agents) {
-          const box = inboxes[agent];
+        // Aliased agents are requested by their registered name, so map response keys back
+        // to the UI-facing agent name before storing.
+        for (const apiAgent of Object.keys(inboxes)) {
+          const agent = aliasToAgent.get(apiAgent) ?? unresolveMailAlias(apiAgent);
+          const box = inboxes[apiAgent];
           if (!box) { setMailbox(agent, { loading: false }, pid); continue; }
           if (box.error) { setMailbox(agent, { loading: false, error: box.error.message || 'Failed to fetch' }, pid); continue; }
           const raw = box.messages || [];
@@ -432,11 +459,12 @@ export const useMailStore = create<MailStore>((set, get) => ({
 
   sendMessage: async (from, to, subject, body) => {
     try {
+      const apiTo = resolveMailAlias(to);
       const res = await mailRequest('/send', {
         method: 'POST',
         body: {
           from_agent: from,
-          to: [to],
+          to: [apiTo],
           subject,
           body,
         },

@@ -13,6 +13,7 @@ interface AppStore {
   showChat: boolean;
   showTeamEditor: boolean;
   showTeamBuilder: boolean;
+  showLogs: boolean;
 
   // Agents
   agents: AgentState[];
@@ -41,6 +42,7 @@ interface AppStore {
   toggleChat: () => void;
   toggleTeamEditor: () => void;
   toggleTeamBuilder: () => void;
+  toggleLogs: () => void;
   setActiveAgent: (id: string | null) => void;
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
@@ -65,6 +67,7 @@ export const useAppStore = create<AppStore>((set) => ({
   showChat: false,
   showTeamEditor: false,
   showTeamBuilder: false,
+  showLogs: false,
   agents: [],
   activeAgentId: null,
   backendAvailable: false,
@@ -84,6 +87,7 @@ export const useAppStore = create<AppStore>((set) => ({
   toggleChat: () => set((s) => ({ showChat: !s.showChat })),
   toggleTeamEditor: () => set((s) => ({ showTeamEditor: !s.showTeamEditor })),
   toggleTeamBuilder: () => set((s) => ({ showTeamBuilder: !s.showTeamBuilder })),
+  toggleLogs: () => set((s) => ({ showLogs: !s.showLogs })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
   setAgents: (configs) => set({

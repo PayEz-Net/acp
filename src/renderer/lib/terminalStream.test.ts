@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { TerminalStreamNormalizer } from './terminalStream';
+import { useAgentStatusStore } from '../stores/agentStatusStore';
 
 function makeLine(line: string, provider = 'claude', terminalId = 't1', ts = new Date().toISOString()) {
   return {
@@ -108,15 +109,15 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine('A', 'claude', 't1', t2))?.line).toBe('A');
   });
 
-  it('collapses consecutive status-glyph-only lines', () => {
+  it('drops status-glyph-only lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('✓'))?.line).toBe('✓');
+    expect(n.process(makeLine('✓'))).toBeNull();
     expect(n.process(makeLine('✓'))).toBeNull();
     expect(n.process(makeLine('  ✓  '))).toBeNull();
     expect(n.process(makeLine('✓ ✓'))).toBeNull();
-    // A non-status line resets the noise family.
+    // A non-status line still reaches the stream.
     expect(n.process(makeLine('done'))?.line).toBe('done');
-    expect(n.process(makeLine('✓'))?.line).toBe('✓');
+    expect(n.process(makeLine('✓'))).toBeNull();
   });
 
   it('accumulates thinking content and attaches it to the answer line', () => {
@@ -152,15 +153,15 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine('I was thinking about this'))?.line).toBe('I was thinking about this');
   });
 
-  it('collapses consecutive pure separator lines', () => {
+  it('drops pure separator lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('---'))?.line).toBe('---');
+    expect(n.process(makeLine('---'))).toBeNull();
     expect(n.process(makeLine('---'))).toBeNull();
     expect(n.process(makeLine('=========='))).toBeNull();
     expect(n.process(makeLine('~~~~~~~~~~'))).toBeNull();
     // A line that merely contains dashes but has real words should not collapse.
     expect(n.process(makeLine('git diff --cached'))?.line).toBe('git diff --cached');
-    expect(n.process(makeLine('--- input ---'))?.line).toBe('--- input ---');
+    expect(n.process(makeLine('--- input ---'))).toBeNull();
   });
 
   it('does not collapse thinking labels that appear as real content', () => {
@@ -171,34 +172,34 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine('Thinking...'))?.line).toBe('Thinking...');
   });
 
-  it('collapses repeated context-percent footer lines', () => {
+  it('drops context-percent footer lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('context: 69.4%'))?.line).toBe('context: 69.4%');
+    expect(n.process(makeLine('context: 69.4%'))).toBeNull();
     expect(n.process(makeLine('context: 70.1%'))).toBeNull();
     expect(n.process(makeLine('Context: 72.0%'))).toBeNull();
   });
 
-  it('suppresses footer lines across non-footer lines within the dedup window', () => {
+  it('drops footer lines before and after real content', () => {
     const n = new TerminalStreamNormalizer();
     const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
     const t1 = new Date('2026-07-03T12:00:01.000Z').toISOString();
     const t2 = new Date('2026-07-03T12:00:06.000Z').toISOString();
-    expect(n.process(makeLine('context: 69.4%', 'claude', 't1', t0))?.line).toBe('context: 69.4%');
+    expect(n.process(makeLine('context: 69.4%', 'claude', 't1', t0))).toBeNull();
     expect(n.process(makeLine('Here is the answer', 'claude', 't1', t1))?.line).toBe('Here is the answer');
-    // Still within the 5-second footer window -> suppressed.
+    // Footer variants are always dropped, even within the previous 5-second window.
     expect(n.process(makeLine('context: 10%', 'claude', 't1', t1))).toBeNull();
-    // After the window expires the footer reappears.
-    expect(n.process(makeLine('context: 11%', 'claude', 't1', t2))?.line).toBe('context: 11%');
+    // After the window expires the footer is still dropped.
+    expect(n.process(makeLine('context: 11%', 'claude', 't1', t2))).toBeNull();
   });
 
-  it('collapses repeated Kimi keybinding hint lines', () => {
+  it('drops Kimi keybinding hint lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('ctrl-o: editor'))?.line).toBe('ctrl-o: editor');
+    expect(n.process(makeLine('ctrl-o: editor'))).toBeNull();
     expect(n.process(makeLine('ctrl-x: toggle mode'))).toBeNull();
     expect(n.process(makeLine('shift-tab: pan mode'))).toBeNull();
     expect(n.process(makeLine('@: mention files'))).toBeNull();
     expect(n.process(makeLine('jnewline'))).toBeNull();
-    // A non-hint line resets the footer window.
+    // A non-hint line still reaches the stream.
     expect(n.process(makeLine('real output'))?.line).toBe('real output');
   });
 
@@ -218,9 +219,9 @@ describe('TerminalStreamNormalizer', () => {
     expect(answer?.thinking).not.toContain('— input');
   });
 
-  it('collapses repeated footer bars with mixed metadata', () => {
+  it('drops footer bars with mixed metadata entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('| Context: 69.4% | Tools: 3 |'))?.line).toBe('| Context: 69.4% | Tools: 3 |');
+    expect(n.process(makeLine('| Context: 69.4% | Tools: 3 |'))).toBeNull();
     expect(n.process(makeLine('| Context: 70.0% | Tools: 3 |'))).toBeNull();
     expect(n.process(makeLine('| Context: 71.0% | Tools: 4 |'))).toBeNull();
   });
@@ -239,44 +240,225 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine('> Analyzing...'))?.thinkingLive).toBe(true);
   });
 
-  it('suppresses footer lines across intervening non-footer lines', () => {
+  it('drops yolo agent banner and footer metadata entirely', () => {
     const n = new TerminalStreamNormalizer();
     const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
     const t1 = new Date('2026-07-03T12:00:01.000Z').toISOString();
     const t2 = new Date('2026-07-03T12:00:02.000Z').toISOString();
     const t3 = new Date('2026-07-03T12:00:03.000Z').toISOString();
-    expect(n.process(makeLine('yolo agent (K2.7 Code ●) E:\\repos', 'kimi', 't1', t0))?.line).toContain('yolo agent');
+    expect(n.process(makeLine('yolo agent (K2.7 Code ●) E:\\repos', 'kimi', 't1', t0))).toBeNull();
     expect(n.process(makeLine('real command output', 'kimi', 't1', t1))?.line).toBe('real command output');
     expect(n.process(makeLine('context: 33.8%', 'kimi', 't1', t2))).toBeNull();
     expect(n.process(makeLine('(88.7k/262.1k)', 'kimi', 't1', t3))).toBeNull();
   });
 
-  it('collapses repeated Kimi Code CLI status bar lines', () => {
+  it('drops Kimi Code CLI status bar lines entirely', () => {
     const n = new TerminalStreamNormalizer();
     expect(
-      n.process(makeLine('yolo agent (K2.7 Code ●) E:\\repos @: mention files'))?.line,
-    ).toBe('yolo agent (K2.7 Code ●) E:\\repos @: mention files');
+      n.process(makeLine('yolo agent (K2.7 Code ●) E:\\repos @: mention files')),
+    ).toBeNull();
     expect(
       n.process(makeLine('yolo agent (K2.7 Code ●) E:\\repos @: mention files')),
     ).toBeNull();
   });
 
-  it('collapses repeated token-usage footer lines', () => {
+  it('drops token-usage footer lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('(182k/262.1k)'))?.line).toBe('(182k/262.1k)');
+    expect(n.process(makeLine('(182k/262.1k)'))).toBeNull();
     expect(n.process(makeLine('(183k/262.1k)'))).toBeNull();
   });
 
-  it('collapses repeated em-dash input prompts', () => {
+  it('drops em-dash input prompts entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('— input'))?.line).toBe('— input');
+    expect(n.process(makeLine('— input'))).toBeNull();
     expect(n.process(makeLine('— input'))).toBeNull();
   });
 
-  it('collapses repeated input prompts that include typed text', () => {
+  it('drops input prompts that include typed text entirely', () => {
     const n = new TerminalStreamNormalizer();
-    expect(n.process(makeLine('— input hello world'))?.line).toBe('— input hello world');
+    expect(n.process(makeLine('— input hello world'))).toBeNull();
     expect(n.process(makeLine('— input hello worl'))).toBeNull();
     expect(n.process(makeLine('— input hello'))).toBeNull();
+  });
+
+  it('drops every junk pattern visible in thisishowwecomeout.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    const junk = [
+      'yolo agent (K2.7 Code ●) E:\\repos',
+      'yolo agent (K2.7 Code ●) E:\\repos ctrl-o: editor',
+      'yolo agent (K2.7 Code ●) E:\\repos jnewline',
+      'context: 5.2%',
+      'context: 5.3%',
+      'context: 5.4%',
+      '(13.8k/262.1k)',
+      '(14.3k/262.1k)',
+      '— input',
+      'ctrl-o: editor',
+      'jnewline',
+      'shift-tab: pan mode',
+      'Composing... 31s · 1.2k tokens',
+      'Composing... 27s · 1.2k tokens',
+    ];
+    for (const line of junk) {
+      const result = n.process(makeLine(line, 'kimi'));
+      if (result !== null) {
+        console.log('NOT DROPPED:', JSON.stringify(line), '=>', JSON.stringify(result?.line));
+      }
+      expect(result).toBeNull();
+    }
+  });
+
+  it('treats composing labels as live thinking placeholders', () => {
+    const n = new TerminalStreamNormalizer();
+    const out = n.process(makeLine('Composing...', 'kimi', 't1'));
+    expect(out?.line).toBe('Composing...');
+    expect(out?.thinkingLive).toBe(true);
+  });
+
+  it('drops every junk pattern visible in freshscrenshot.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    const junk = [
+      'yolo agent (K2.7 Code •) E:\\repos shift-tab: plan mode | ctrl-o: editor',
+      'yolo agent (K2.7 Code •) E:\\repos ctrl-v: paste clipboard | @: mention files',
+      'yolo agent (K2.7 Code •) E:\\repos ctrl-x: toggle mode',
+      'yolo agent (K2.7 Code •) E:\\repos ctrl-j: newline',
+      'yolo agent (K2.7 Code •) E:\\repos /feedback: send feedback',
+      '— input',
+      'ctrl-v: paste clipboard | @: mention files',
+      'ctrl-x: toggle mode',
+      'ctrl-j: newline',
+      '/feedback: send feedback',
+      'thme: switch dark/light',
+      '/theme: switch dark/light',
+      'crl-vpaste clipboard | @: mention files',
+      '@: mention files | ctl-x: toggle mode',
+      'shift-tab: plan mode',
+      'ctrl-o: editor',
+      'jnewline | /feedback: send feedback',
+    ];
+    for (const line of junk) {
+      expect(n.process(makeLine(line, 'kimi'))).toBeNull();
+    }
+  });
+
+  it('drops every junk pattern visible in seewhersresikl.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    const junk = [
+      '— input · 1 queued',
+      '↑ to edit · ctrl-s to send immediately',
+      'yolo agent (K2.7 Code •) E:\\repos /feedback: send feedback',
+      '(101.9k/262.1k) ⫶ (acp-desktop\\src\\renderer\\...Terminal\\TerminalPane.tsx)',
+      'context: 38.5%',
+      'context: 3.3% (83',
+      'context: 39.% (104.5',
+    ];
+    for (const line of junk) {
+      expect(n.process(makeLine(line, 'kimi'))).toBeNull();
+    }
+  });
+
+  it('drops every junk pattern visible in isthereanyposbilidyffy.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    const junk = [
+      'yolo  agent (K2.7 Code •) E:\\repos ctrl-o: editor | ctrl-j: newline',
+      'yolo  agent (K2.7 Code •) E:\\repos /feedback: send feedback',
+      'yolo   agent (K2.7 Code •) E:\\repos /feedback: send feedback',
+      '— input',
+      '— input ',
+      '________________________',
+      '___',
+    ];
+    for (const line of junk) {
+      const result = n.process(makeLine(line, 'kimi'));
+      if (result !== null) {
+        console.log('NOT DROPPED:', JSON.stringify(line), '=>', JSON.stringify(result?.line));
+      }
+      expect(result).toBeNull();
+    }
+  });
+
+  it('drops — input from itsdomcing.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('— input', 'kimi'))).toBeNull();
+  });
+
+  it('drops yolo agent + ctrl-j + /feedback from itsdomcing.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('yolo agent (K2.7 Code •) E:\\repos ctrl-j: newline | /feedback: send feedback', 'kimi'))).toBeNull();
+  });
+
+  it('drops Composing... <1s · 140 tokens from itsdomcing.jpg', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('Composing... <1s · 140 tokens', 'kimi'))).toBeNull();
+  });
+
+  it('extracts context usage from footer lines', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('context: 38.5%', 'kimi'));
+    expect(useAgentStatusStore.getState().getStatus('Agent').contextUsage).toBe(38.5);
+  });
+
+  it('extracts token usage from footer lines', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('(101.9k/262.1k)', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.tokenUsed).toBe(101900);
+    expect(status.tokenMax).toBe(262100);
+  });
+
+  it('extracts cwd and model from yolo agent banner', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('yolo agent (K2.7 Code •) E:\\repos ctrl-o: editor', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.model).toBe('K2.7 Code');
+    expect(status.cwd).toBe('E:\\repos');
+  });
+
+  it('extracts composing state from footer lines', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('Composing... <1s · 140 tokens', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.composing).toEqual({ duration: '<1s', tokens: 140 });
+  });
+
+  it('extracts status even when footer arrives during a thinking block', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('Thinking...', 'claude', 't1'));
+    n.process(makeLine('context: 55.5%', 'claude', 't1'));
+    n.process(makeLine('', 'claude', 't1'));
+    n.process(makeLine('Here is the answer', 'claude', 't1'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.contextUsage).toBe(55.5);
+  });
+
+  it('extracts cwd and model from multi-space yolo agent banners', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('yolo  agent (K2.7 Code •) E:\\repos ctrl-o: editor', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.model).toBe('K2.7 Code');
+    expect(status.cwd).toBe('E:\\repos');
+  });
+
+  it('parses token suffixes m and plain numbers', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('(5.5m/8m)', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.tokenUsed).toBe(5_500_000);
+    expect(status.tokenMax).toBe(8_000_000);
+  });
+
+  it('extracts composing durations in seconds and minutes', () => {
+    useAgentStatusStore.getState().clear('Agent');
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('Composing... 2m · 5k tokens', 'kimi'));
+    const status = useAgentStatusStore.getState().getStatus('Agent');
+    expect(status.composing).toEqual({ duration: '2m', tokens: 5000 });
   });
 });

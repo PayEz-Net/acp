@@ -77,7 +77,7 @@ describe('TerminalPane', () => {
       <TerminalPane agent={agent} isFocused={false} onFocus={() => {}} compact />,
     );
     expect(container.textContent).toContain('NextPert');
-    expect(container.textContent).toContain('offline');
+    expect(container.textContent).toContain('Offline');
     cleanup(root, container);
   });
 

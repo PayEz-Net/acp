@@ -47,40 +47,40 @@ export function LogViewer({ isOpen, onClose }: LogViewerProps) {
   });
 
   return (
-    <div className="w-96 bg-slate-900 border-l border-slate-700 flex flex-col h-full overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-        <span className="text-sm font-semibold text-slate-200">API Logs</span>
+    <div className="w-96 bg-acp-surface border-l border-acp-border flex flex-col h-full overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-acp-border">
+        <span className="text-sm font-semibold text-acp-text-primary">API Logs</span>
         <div className="flex items-center gap-2">
           <select
             value={level}
             onChange={(e) => setLevel(e.target.value as LogLevel)}
-            className="text-xs bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-300"
+            className="text-xs bg-acp-surface-raised border border-acp-border rounded px-2 py-1 text-acp-text-secondary"
           >
             <option value="all">All</option>
             <option value="error">Errors</option>
             <option value="warn">Warn+</option>
             <option value="info">Info</option>
           </select>
-          <button onClick={() => setPaused(!paused)} className="text-slate-400 hover:text-white" title={paused ? 'Resume' : 'Pause'}>
+          <button onClick={() => setPaused(!paused)} className="text-acp-text-muted hover:text-acp-text-primary" title={paused ? 'Resume' : 'Pause'}>
             {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
           </button>
-          <button onClick={onClose} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="text-acp-text-muted hover:text-acp-text-primary"><X className="w-4 h-4" /></button>
         </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-2 font-mono text-xs">
         {!backendAvailable ? (
-          <div className="text-slate-500 text-center py-4">Backend not running</div>
+          <div className="text-acp-text-muted text-center py-4">Backend not running</div>
         ) : filtered.length === 0 ? (
-          <div className="text-slate-500 text-center py-4">No logs</div>
+          <div className="text-acp-text-muted text-center py-4">No logs</div>
         ) : (
           filtered.map((line, i) => (
             <div
               key={`${line}-${i}`}
               className={`py-0.5 ${
-                line.includes('[err]') ? 'text-red-400' :
-                line.toLowerCase().includes('warn') ? 'text-amber-400' :
-                'text-slate-400'
+                line.includes('[err]') ? 'text-acp-status-error' :
+                line.toLowerCase().includes('warn') ? 'text-acp-status-busy' :
+                'text-acp-text-muted'
               }`}
             >
               {line}
@@ -89,7 +89,7 @@ export function LogViewer({ isOpen, onClose }: LogViewerProps) {
         )}
       </div>
 
-      <div className="px-3 py-2 border-t border-slate-800 text-xs text-slate-500">
+      <div className="px-3 py-2 border-t border-acp-border text-xs text-acp-text-muted">
         {filtered.length} lines {paused && '(paused)'}
       </div>
     </div>
