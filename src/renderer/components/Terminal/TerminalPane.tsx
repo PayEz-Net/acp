@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, useState } from 'react';
 import { AgentState } from '@shared/types';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
@@ -19,6 +19,7 @@ interface TerminalPaneProps {
 export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPaneProps) {
   const { agents, updateAgentStatus, setAgentTerminalId, backendAvailable } = useAppStore();
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
+  const [isThinkingLive, setIsThinkingLive] = useState(false);
 
   // Provider badge is only useful when the team mixes providers.
   const mixedProviders = useMemo(() => {
@@ -126,7 +127,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     }
   }, [agent.autoStart, agent.status, agent.terminalId, startAgent]);
 
-  const statusPill = getStatusPill(agent.status);
+  const statusPill = isThinkingLive
+    ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
+    : getStatusPill(agent.status);
 
   const providerBadgeColor =
     effectiveProvider === 'claude'
@@ -212,6 +215,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         isFocused={isFocused}
         onFocus={onFocus}
         compact={compact}
+        onThinkingLiveChange={setIsThinkingLive}
       />
     </div>
   );

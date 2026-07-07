@@ -29,6 +29,8 @@ export interface UnifiedTerminalProps {
   compact?: boolean;
   /** Called when the user focuses the terminal surface or composer. */
   onFocus?: () => void;
+  /** Called when the live-thinking state changes so the parent can sync status. */
+  onThinkingLiveChange?: (isThinkingLive: boolean) => void;
 }
 
 export const MIN_COLS = 10;
@@ -43,6 +45,7 @@ export function UnifiedTerminal({
   isFocused,
   compact,
   onFocus,
+  onThinkingLiveChange,
 }: UnifiedTerminalProps) {
   const agent = agentProp ?? null;
   const agentName = agent?.name ?? agentNameProp ?? '';
@@ -68,6 +71,8 @@ export function UnifiedTerminal({
   const isThinkingLive = filteredLines.length > 0 && !!filteredLines[filteredLines.length - 1].thinkingLive;
   const activeProject = useProjectStore((s) => s.activeProject);
   const repoPath = activeProject?.repo_path ?? '';
+  const teamRuntime = activeProject?.runtime_choice ?? null;
+  const effectiveProvider = agent?.provider ?? teamRuntime;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
 
@@ -169,6 +174,12 @@ export function UnifiedTerminal({
       inputRef.current?.focus();
     }
   }, [isFocused]);
+
+  // Notify the parent when live-thinking state changes so the header status
+  // pill can stay in sync with the footer.
+  useEffect(() => {
+    onThinkingLiveChange?.(isThinkingLive);
+  }, [isThinkingLive, onThinkingLiveChange]);
 
   const getSelectionText = useCallback((): string => {
     const selection = window.getSelection();
@@ -469,7 +480,7 @@ export function UnifiedTerminal({
       {agent && (
         <TerminalFooter
           agent={agent}
-          provider={agent.provider ?? null}
+          provider={effectiveProvider}
           repoPath={repoPath}
           lineCount={lineCount}
           thinkingCount={thinkingCount}

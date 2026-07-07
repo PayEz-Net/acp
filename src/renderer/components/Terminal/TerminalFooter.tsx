@@ -53,6 +53,7 @@ export function TerminalFooter({
   lineCount,
   thinkingCount,
   contextUsage,
+  isThinkingLive,
 }: {
   agent: AgentState;
   provider: string | null;
@@ -60,11 +61,17 @@ export function TerminalFooter({
   lineCount: number;
   thinkingCount: number;
   contextUsage: number;
+  isThinkingLive?: boolean;
 }) {
   const status = useAgentStatusStore((s) => s.statuses[agent.name]);
-  const statusPill = getStatusPill(agent.status);
+  const statusPill = isThinkingLive
+    ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
+    : getStatusPill(agent.status);
 
-  const effectiveProvider = status?.provider ?? provider;
+  // The provider prop is the single source of truth (agent.provider with the
+  // team-runtime fallback already applied by the caller). Do not let the status
+  // store override it — that creates dueling provider badges.
+  const effectiveProvider = provider;
   const effectiveModel = status?.model;
   const effectiveCwd = status?.cwd ?? repoPath;
   const effectiveContext = status?.contextUsage ?? contextUsage;
@@ -85,8 +92,8 @@ export function TerminalFooter({
     <div className="h-6 shrink-0 flex items-center justify-between px-2.5 border-t border-acp-border bg-acp-surface text-[10px] text-acp-text-muted">
       <div className="flex items-center gap-2.5 min-w-0">
         <span className="flex items-center gap-1">
-          <span className={`w-1.5 h-1.5 rounded-full ${statusPill.color}`} />
-          <span className="capitalize">{agent.status}</span>
+          <span className={`w-1.5 h-1.5 rounded-full ${statusPill.color} ${statusPill.animate ? 'animate-pulse' : ''}`} />
+          <span className="capitalize">{statusPill.label}</span>
         </span>
         {effectiveProvider && (
           <span className="uppercase tracking-wide text-acp-text-secondary" title={effectiveModel ?? ''}>
