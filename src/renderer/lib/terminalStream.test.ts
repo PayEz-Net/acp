@@ -99,14 +99,23 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine(''))).toBeNull();
   });
 
-  it('resets dedup after a different line appears', () => {
+  it('suppresses identical lines that reappear within the dedup window', () => {
     const n = new TerminalStreamNormalizer();
     const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
     const t1 = new Date('2026-07-03T12:00:01.000Z').toISOString();
     const t2 = new Date('2026-07-03T12:00:02.000Z').toISOString();
     expect(n.process(makeLine('A', 'claude', 't1', t0))?.line).toBe('A');
     expect(n.process(makeLine('B', 'claude', 't1', t1))?.line).toBe('B');
-    expect(n.process(makeLine('A', 'claude', 't1', t2))?.line).toBe('A');
+    // A reappears within 5 s even though B came in between — should be suppressed.
+    expect(n.process(makeLine('A', 'claude', 't1', t2))).toBeNull();
+  });
+
+  it('allows identical lines after the dedup window expires', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
+    const t1 = new Date('2026-07-03T12:00:06.000Z').toISOString();
+    expect(n.process(makeLine('A', 'claude', 't1', t0))?.line).toBe('A');
+    expect(n.process(makeLine('A', 'claude', 't1', t1))?.line).toBe('A');
   });
 
   it('drops status-glyph-only lines entirely', () => {
@@ -272,6 +281,36 @@ describe('TerminalStreamNormalizer', () => {
     const n = new TerminalStreamNormalizer();
     expect(n.process(makeLine('— input'))).toBeNull();
     expect(n.process(makeLine('— input'))).toBeNull();
+  });
+
+  it('drops box-drawing and hyphen input prompts entirely', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('─ input'))).toBeNull();
+    expect(n.process(makeLine('━ input'))).toBeNull();
+    expect(n.process(makeLine('- input'))).toBeNull();
+    expect(n.process(makeLine('─── input'))).toBeNull();
+    expect(n.process(makeLine('━━━ input'))).toBeNull();
+  });
+
+  it('does not regress multi-dash or equals input prompt suppression', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('--- input'))).toBeNull();
+    expect(n.process(makeLine('-- input'))).toBeNull();
+    expect(n.process(makeLine('== input'))).toBeNull();
+  });
+
+  it('does not drop prose starting with a hyphen or dash', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('- item one'))?.line).toBe('- item one');
+    expect(n.process(makeLine('--flag value'))?.line).toBe('--flag value');
+    expect(n.process(makeLine('─ item one'))?.line).toBe('─ item one');
+  });
+
+  it('drops box-drawing horizontal separator lines entirely', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('───'))).toBeNull();
+    expect(n.process(makeLine('━━━'))).toBeNull();
+    expect(n.process(makeLine('─━─'))).toBeNull();
   });
 
   it('drops input prompts that include typed text entirely', () => {
@@ -461,4 +500,5 @@ describe('TerminalStreamNormalizer', () => {
     const status = useAgentStatusStore.getState().getStatus('Agent');
     expect(status.composing).toEqual({ duration: '2m', tokens: 5000 });
   });
+
 });

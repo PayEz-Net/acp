@@ -48,6 +48,10 @@ interface TerminalHistory {
   // Aggressive footer suppression: TUI status bars redraw across non-status
   // lines, so we suppress any footer-like line within a window of the last one.
   lastFooterTs: string | null;
+  // Recent-seen structural keys with their last emission timestamp (ms). Used
+  // to suppress non-consecutive duplicate lines within the dedup window, which
+  // catches provider TUIs that redraw conversation history or echo input.
+  recentKeys: Map<string, number>;
   // Thinking-block state.
   thinkingBuffer: string[];
   thinkingLabel: string | null;
@@ -80,14 +84,16 @@ const THINKING_GLYPHS = /^(?:[\s]*(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛
 const THINKING_LABEL = /^(?:[\s│┃┣├]*[›>➤]\s*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing|composing)[\s\.…]*|[\s]*(?:thinking|analyzing|analysing|processing|working|reasoning|loading|waiting|running|executing|composing)[\s\.…]*|[\s]*\.{3,}[\s]*)$/i;
 
 // Repeated separator characters emitted by provider TUIs (e.g. "--- input ---",
-// "==========", "~~~~~~~~~~").
-const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█]{3,}[\s]*)+$/;
+// "==========", "~~~~~~~~~~", "───", "━━━"). Includes ASCII separators and
+// box-drawing horizontal lines.
+const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█─━]{3,}[\s]*)+$/;
 
 // Provider footer / status metadata that is redrawn on every TUI frame.
 // Catches context-usage lines ("context: 69.4%"), token/cost counters, Kimi
 // Code CLI status bars ("yolo agent (K2.7 Code ●) ..."), input prompts, and
 // repeating keybinding/help hint lines ("ctrl-x: toggle mode", "@: mention files").
-const FOOTER_LINE = /^(?:[\s|⫶·]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+.*|yolo\s+agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\).*|⫶.*|[—–]\s*input.*|[-=]{2,}\s*input\b.*|composing\b.*\d+[\d\.,]*[kmbt]?\s*tokens?|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|ctl-x:.*|crl-v(?:paste)?.*|[@#]\s*:\s*mention files|jnewline|\/(?:feedback|theme)\b.*|(?:thme|theme)\b.*|↑.*|ctrl-s\b.*)\s*[\s|⫶·]*)+$/i;
+// Input prompts use em-dash, en-dash, box-drawing horizontals, or a lone hyphen.
+const FOOTER_LINE = /^(?:[\s|⫶·]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+.*|yolo\s+agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\).*|⫶.*|[—–─━=\-]+\s*input\b.*|composing\b.*\d+[\d\.,]*[kmbt]?\s*tokens?|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|ctl-x:.*|crl-v(?:paste)?.*|[@#]\s*:\s*mention files|jnewline|\/(?:feedback|theme)\b.*|(?:thme|theme)\b.*|↑.*|ctrl-s\b.*)\s*[\s|⫶·]*)+$/i;
 
 // Explicit XML-style thinking markers (some providers/TUIs emit these).
 const THINKING_START_MARKER = /<thinking\b/i;
@@ -221,6 +227,7 @@ function emptyHistory(ts: string): TerminalHistory {
     consecutiveBlankCount: 0,
     lastNoiseCategory: null,
     lastFooterTs: null,
+    recentKeys: new Map(),
     thinkingBuffer: [],
     thinkingLabel: null,
     thinkingSawBlank: false,
@@ -388,15 +395,27 @@ export class TerminalStreamNormalizer {
       return null;
     }
 
-    // Consecutive-frame collapse + 5-second deduplication.
-    if (hist && hist.lastKey === key) {
-      const prevTs = new Date(hist.lastTs).getTime();
+    // Recent-seen deduplication: suppress the same structural key if it was
+    // emitted within the sliding window, even if other lines came in between.
+    // Provider TUIs (especially Claude Code) redraw conversation history and
+    // echo user input repeatedly; this prevents those redraws from spamming the
+    // pane. The timestamp is refreshed on every duplicate so the window slides
+    // while the provider keeps redrawing the same content.
+    if (hist) {
       const now = new Date(ts).getTime();
-      if (now - prevTs < DEDUP_WINDOW_MS) {
-        // Refresh the timestamp so the window keeps sliding.
+      for (const [k, t] of hist.recentKeys.entries()) {
+        if (now - t > DEDUP_WINDOW_MS) {
+          hist.recentKeys.delete(k);
+        }
+      }
+      const lastSeen = hist.recentKeys.get(key);
+      if (lastSeen != null && now - lastSeen < DEDUP_WINDOW_MS) {
+        hist.recentKeys.set(key, now);
+        hist.lastText = text;
+        hist.lastKey = key;
         hist.lastTs = ts;
-        hist.lastNoiseCategory = noiseCategory;
         hist.consecutiveBlankCount = 0;
+        hist.lastNoiseCategory = noiseCategory;
         this.history.set(input.terminal_id, hist);
         return null;
       }
@@ -411,6 +430,7 @@ export class TerminalStreamNormalizer {
     hist.lastTs = ts;
     hist.consecutiveBlankCount = 0;
     hist.lastNoiseCategory = noiseCategory;
+    hist.recentKeys.set(key, new Date(ts).getTime());
 
     return { ...input, line: text };
   }
