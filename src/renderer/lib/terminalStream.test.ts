@@ -501,4 +501,60 @@ describe('TerminalStreamNormalizer', () => {
     expect(status.composing).toEqual({ duration: '2m', tokens: 5000 });
   });
 
+  it('detects a code-change block with file path and operation', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
+    const t1 = new Date('2026-07-03T12:00:01.000Z').toISOString();
+    const t2 = new Date('2026-07-03T12:00:02.000Z').toISOString();
+    const t3 = new Date('2026-07-03T12:00:03.000Z').toISOString();
+
+    expect(n.process(makeLine('Now modify TerminalPane.tsx...', 'claude', 't1', t0))).toBeNull();
+    const diff1 = n.process(makeLine('| 71 const isThinkingLive = true;', 'claude', 't1', t1));
+    expect(diff1?.codeChange).toBeUndefined();
+    const diff2 = n.process(makeLine('| 483 +provider={effectiveProvider}', 'claude', 't1', t2));
+    expect(diff2?.codeChange).toBeUndefined();
+    const tool = n.process(makeLine('Using StrReplaceFile', 'claude', 't1', t3));
+    expect(tool?.codeChange).toBeDefined();
+    expect(tool?.line).toBe('Modified: TerminalPane.tsx');
+    expect(tool?.codeChange?.filePath).toBe('TerminalPane.tsx');
+    expect(tool?.codeChange?.operation).toBe('modified');
+    expect(tool?.codeChange?.hunks[0].lines).toHaveLength(2);
+    expect(tool?.codeChange?.hunks[0].lines[0]).toEqual({ type: 'context', text: 'const isThinkingLive = true;', lineNumber: 71 });
+    expect(tool?.codeChange?.hunks[0].lines[1]).toEqual({ type: 'add', text: 'provider={effectiveProvider}', lineNumber: 483 });
+  });
+
+  it('detects created and deleted code-change operations', () => {
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('Creating src/main/foo.ts', 'claude', 't1'));
+    n.process(makeLine('+ export const foo = 1;', 'claude', 't1'));
+    const created = n.process(makeLine('Using WriteFile', 'claude', 't1'));
+    expect(created?.codeChange?.operation).toBe('created');
+    expect(created?.codeChange?.filePath).toBe('src/main/foo.ts');
+
+    const n2 = new TerminalStreamNormalizer();
+    n2.process(makeLine('Delete src/main/old.ts', 'claude', 't2'));
+    n2.process(makeLine('- export const old = 1;', 'claude', 't2'));
+    const deleted = n2.process(makeLine('Using StrReplaceFile', 'claude', 't2'));
+    expect(deleted?.codeChange?.operation).toBe('deleted');
+    expect(deleted?.codeChange?.filePath).toBe('src/main/old.ts');
+  });
+
+  it('does not misclassify normal prose as code-change blocks', () => {
+    const n = new TerminalStreamNormalizer();
+    const out = n.process(makeLine('Here is a + sign in prose.', 'claude', 't1'));
+    expect(out?.codeChange).toBeUndefined();
+    expect(out?.line).toBe('Here is a + sign in prose.');
+  });
+
+  it('defers the line that ends a code-change block', () => {
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('Now modify App.tsx', 'claude', 't1'));
+    n.process(makeLine('+ const x = 1;', 'claude', 't1'));
+    const card = n.process(makeLine('Next, review the output.', 'claude', 't1'));
+    expect(card?.codeChange).toBeDefined();
+    expect(card?.line).toBe('Modified: App.tsx');
+    const deferred = n.drain();
+    expect(deferred?.line).toBe('Next, review the output.');
+  });
+
 });

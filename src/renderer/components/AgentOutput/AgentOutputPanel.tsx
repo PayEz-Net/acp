@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { X, Trash2, Pause, Play, ChevronDown, Terminal } from 'lucide-react';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { ThinkingBlock } from '../ThinkingBlock';
+import { CodeChangeCard } from '../Terminal/CodeChangeCard';
 import { providerBadgeClasses, providerLabel, type CodeProvider } from '../../lib/agentProviders';
 
 interface AgentOutputPanelProps {
@@ -13,6 +15,7 @@ interface AgentOutputPanelProps {
 export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
   const { lines, paused, selectedAgent, setPaused, setSelectedAgent, clear } = useAgentOutputStore();
   const { agents, settings } = useAppStore();
+  const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
   const showThinking = settings.showThinking !== false;
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -100,7 +103,8 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
         </button>
         {agentNames.map((name) => {
           const agent = agents.find((a) => a.name === name);
-          const provider = agent?.provider as CodeProvider | undefined;
+          // runtime_choice is the single authority; agent.provider may be stale.
+          const provider = (teamRuntime ?? agent?.provider) as CodeProvider | undefined;
           const active = selectedAgent === name;
           return (
             <button
@@ -138,7 +142,8 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
 
         {filtered.map((line, idx) => {
           const agent = agents.find((a) => a.name === line.agent);
-          const provider = (line.provider || agent?.provider) as CodeProvider | undefined;
+          // runtime_choice is the single authority; line.provider/agent.provider may be stale.
+          const provider = (teamRuntime ?? line.provider ?? agent?.provider) as CodeProvider | undefined;
           // Live thinking placeholders are updated in-place by the store.
           // Use a stable key so React reconciles the same DOM node instead of
           // remounting it on every spinner frame.
@@ -158,17 +163,25 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
                 >
                   {line.agent}
                 </span>
-                <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
-                  {line.line}
-                </span>
+                {line.thinkingLive ? (
+                  // Live thinking is shown as a compact inline indicator next to
+                  // the agent badge, matching the terminal-pane footer pill. The
+                  // placeholder line text is not rendered as prose, so it cannot
+                  // wrap or splatter mid-word into the scrollback.
+                  <ThinkingBlock label={line.line || 'Thinking...'} content={line.thinking || ''} live compact />
+                ) : line.codeChange ? (
+                  <div className="flex-1 min-w-0">
+                    <CodeChangeCard codeChange={line.codeChange} compact />
+                  </div>
+                ) : (
+                  <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
+                    {line.line}
+                  </span>
+                )}
               </div>
-              {showThinking && line.thinking !== undefined && (
+              {showThinking && !line.thinkingLive && line.thinking !== undefined && (
                 <div className="ml-14 mt-1">
-                  <ThinkingBlock
-                    label={line.thinkingLive ? line.line : 'Thinking'}
-                    content={line.thinking}
-                    live={line.thinkingLive}
-                  />
+                  <ThinkingBlock label="Thinking" content={line.thinking} compact />
                 </div>
               )}
             </div>

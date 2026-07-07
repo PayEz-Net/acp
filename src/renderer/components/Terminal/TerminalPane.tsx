@@ -21,13 +21,16 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
   const [isThinkingLive, setIsThinkingLive] = useState(false);
 
-  // Provider badge is only useful when the team mixes providers.
+  // Provider badge is only useful when the team mixes providers. Use the same
+  // runtime_choice authority here so stale agent.provider values don't create a
+  // false "mixed" badge when every agent is actually running on the team runtime.
   const mixedProviders = useMemo(() => {
-    const providers = new Set(agents.map((a) => a.provider ?? teamRuntime).filter(Boolean));
+    const providers = new Set(agents.map((a) => (teamRuntime ?? a.provider)).filter(Boolean));
     return providers.size > 1;
   }, [agents, teamRuntime]);
 
-  const effectiveProvider = agent.provider ?? teamRuntime;
+  // runtime_choice is the single authority; agent.provider may be stale.
+  const effectiveProvider = teamRuntime ?? agent.provider ?? null;
 
   // Push a visible error line into the agent output stream when something fails.
   const emitErrorLine = useCallback((message: string) => {

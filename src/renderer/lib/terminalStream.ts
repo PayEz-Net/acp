@@ -26,6 +26,14 @@ import { normalizeTerminalLine } from './terminalProviderAdapters';
 import { type CodeProvider } from './agentProviders';
 import { useAgentStatusStore } from '../stores/agentStatusStore';
 
+export interface CodeChangeLine {
+  filePath: string;
+  operation: 'modified' | 'created' | 'deleted';
+  hunks: Array<{
+    lines: Array<{ type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number }>;
+  }>;
+}
+
 export interface StreamLine {
   agent: string;
   terminal_id: string;
@@ -37,6 +45,14 @@ export interface StreamLine {
   thinking?: string;
   /** When true, this line is a live thinking placeholder that should be replaced by the final answer. */
   thinkingLive?: boolean;
+  /** Structured code-change payload when this line represents an edit block. */
+  codeChange?: CodeChangeLine;
+}
+
+interface PendingCodeChange {
+  filePath: string;
+  operation: 'modified' | 'created' | 'deleted';
+  lines: Array<{ type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number }>;
 }
 
 interface TerminalHistory {
@@ -52,6 +68,8 @@ interface TerminalHistory {
   // to suppress non-consecutive duplicate lines within the dedup window, which
   // catches provider TUIs that redraw conversation history or echo input.
   recentKeys: Map<string, number>;
+  // Buffered code-change block waiting for more diff lines or a flush trigger.
+  pendingCodeChange: PendingCodeChange | null;
   // Thinking-block state.
   thinkingBuffer: string[];
   thinkingLabel: string | null;
@@ -103,6 +121,56 @@ const THINKING_END_MARKER = /<\/thinking>/i;
 // collapse key because we want to suppress *families* of status lines, not just
 // exact matches.
 type NoiseCategory = 'status-glyph' | 'thinking' | 'separator' | 'footer';
+
+// Code-change detection heuristics for agent-emitted file edits.
+// Trigger lines name the file and operation (e.g. "Now modify TerminalPane.tsx...").
+const CODE_CHANGE_MODIFY_TRIGGER = /Now modify\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
+const CODE_CHANGE_CREATE_TRIGGER = /Creating\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
+const CODE_CHANGE_DELETE_TRIGGER = /Delete\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
+const CODE_CHANGE_TOOL_MARKER = /Using\s+(?:StrReplaceFile|WriteFile)/i;
+
+function extractCodeChangeTrigger(text: string): { filePath: string; operation: 'modified' | 'created' | 'deleted' } | null {
+  const modify = text.match(CODE_CHANGE_MODIFY_TRIGGER);
+  if (modify) return { filePath: modify[1].trim(), operation: 'modified' };
+  const create = text.match(CODE_CHANGE_CREATE_TRIGGER);
+  if (create) return { filePath: create[1].trim(), operation: 'created' };
+  const del = text.match(CODE_CHANGE_DELETE_TRIGGER);
+  if (del) return { filePath: del[1].trim(), operation: 'deleted' };
+  return null;
+}
+
+function parseCodeChangeDiffLine(text: string): { type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number } | null {
+  const trimmed = text.trimStart();
+  // Lines like "| 71 const foo = ..." carry a line number and optional +/- prefix.
+  if (trimmed.startsWith('|')) {
+    const after = trimmed.slice(1).trimStart();
+    const numMatch = after.match(/^(\d+)\s+/);
+    if (numMatch) {
+      const lineNumber = parseInt(numMatch[1], 10);
+      const rest = after.slice(numMatch[0].length);
+      if (rest.startsWith('+')) {
+        return { type: 'add', text: rest.slice(1).trimStart(), lineNumber };
+      }
+      if (rest.startsWith('-')) {
+        return { type: 'remove', text: rest.slice(1).trimStart(), lineNumber };
+      }
+      return { type: 'context', text: rest, lineNumber };
+    }
+    return { type: 'context', text: after };
+  }
+  // Unified-diff style standalone +/- lines.
+  if (trimmed.startsWith('+')) {
+    return { type: 'add', text: trimmed.slice(1).trimStart() };
+  }
+  if (trimmed.startsWith('-')) {
+    return { type: 'remove', text: trimmed.slice(1).trimStart() };
+  }
+  return null;
+}
+
+function isCodeChangeToolMarker(text: string): boolean {
+  return CODE_CHANGE_TOOL_MARKER.test(text);
+}
 
 // Parse token shorthand like 1.2k, 140, 262.1k into a raw number.
 function parseTokens(value: string): number {
@@ -228,6 +296,7 @@ function emptyHistory(ts: string): TerminalHistory {
     lastNoiseCategory: null,
     lastFooterTs: null,
     recentKeys: new Map(),
+    pendingCodeChange: null,
     thinkingBuffer: [],
     thinkingLabel: null,
     thinkingSawBlank: false,
@@ -237,10 +306,15 @@ function emptyHistory(ts: string): TerminalHistory {
 
 export class TerminalStreamNormalizer {
   private history = new Map<string, TerminalHistory>();
+  // A line produced while flushing a code-change block that must be emitted
+  // after the structured card. Callers should drain after each process() call.
+  private deferredLine: StreamLine | null = null;
 
   /**
    * Process one raw PTY line. Returns a normalized line to emit, or `null` if
-   * the line should be dropped.
+   * the line should be dropped. Call drain() after each process() to retrieve
+   * any additional line that was deferred (e.g., a normal line following a
+   * flushed code-change block).
    */
   process(input: StreamLine): StreamLine | null {
     const terminalId = input.terminal_id;
@@ -317,8 +391,91 @@ export class TerminalStreamNormalizer {
       return this.makeThinkingLine(input, hist);
     }
 
+    // --- Code-change block handling --------------------------------------
+    // Skip code-change detection while a thinking block is active; thinking
+    // content is accumulated separately and attached to the answer line.
+    if (!hist?.thinkingLabel) {
+      // Blank lines end a pending code-change block.
+      if (isBlank(text)) {
+        const flushed = this.flushPendingCodeChange(input, hist);
+        const blankResult = this.processNormalLine(input, hist, text, ts);
+        if (flushed) {
+          this.deferredLine = blankResult;
+          return flushed;
+        }
+        return blankResult;
+      }
+
+      const trigger = extractCodeChangeTrigger(text);
+      if (trigger) {
+        const flushed = this.flushPendingCodeChange(input, hist);
+        if (!hist) {
+          hist = emptyHistory(ts);
+        }
+        hist.pendingCodeChange = { filePath: trigger.filePath, operation: trigger.operation, lines: [] };
+        this.history.set(terminalId, hist);
+        return flushed;
+      }
+
+      const diffLine = parseCodeChangeDiffLine(text);
+      if (diffLine) {
+        if (hist?.pendingCodeChange) {
+          hist.pendingCodeChange.lines.push(diffLine);
+          this.history.set(terminalId, hist);
+          return null;
+        }
+        // No pending block: fall through to normal processing.
+      }
+
+      if (isCodeChangeToolMarker(text)) {
+        const flushed = this.flushPendingCodeChange(input, hist);
+        // Tool markers themselves are dropped.
+        return flushed;
+      }
+
+      const flushed = this.flushPendingCodeChange(input, hist);
+      const normalResult = this.processNormalLine(input, hist, text, ts);
+      if (flushed) {
+        this.deferredLine = normalResult;
+        return flushed;
+      }
+      return normalResult;
+    }
+
     // --- Existing normalization ------------------------------------------
     return this.processNormalLine(input, hist, text, ts);
+  }
+
+  /**
+   * Return any line that was deferred during the last process() call. Callers
+   * should invoke this after every process() and emit the result if non-null.
+   */
+  drain(): StreamLine | null {
+    const line = this.deferredLine;
+    this.deferredLine = null;
+    return line;
+  }
+
+  private flushPendingCodeChange(input: StreamLine, hist: TerminalHistory | undefined): StreamLine | null {
+    if (!hist?.pendingCodeChange || hist.pendingCodeChange.lines.length === 0) {
+      if (hist) {
+        hist.pendingCodeChange = null;
+        this.history.set(input.terminal_id, hist);
+      }
+      return null;
+    }
+    const { filePath, operation, lines } = hist.pendingCodeChange;
+    hist.pendingCodeChange = null;
+    this.history.set(input.terminal_id, hist);
+    return {
+      ...input,
+      line: `${operation.charAt(0).toUpperCase() + operation.slice(1)}: ${filePath}`,
+      codeChange: {
+        filePath,
+        operation,
+        hunks: [{ lines }],
+      },
+    };
   }
 
   private makeThinkingLine(input: StreamLine, hist: TerminalHistory): StreamLine {

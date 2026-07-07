@@ -10,6 +10,8 @@ export interface AgentOutputLine {
   thinking?: string;
   /** When true, this line is a live thinking placeholder that should be replaced by the final answer. */
   thinkingLive?: boolean;
+  /** Structured code-change payload when this line represents an edit block. */
+  codeChange?: import('../lib/terminalStream').CodeChangeLine;
 }
 
 interface AgentOutputStore {

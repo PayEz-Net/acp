@@ -15,6 +15,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { TerminalFooter } from './TerminalFooter';
+import { CodeChangeCard } from './CodeChangeCard';
 
 export interface UnifiedTerminalProps {
   /** Agent whose output stream to render. */
@@ -71,8 +72,9 @@ export function UnifiedTerminal({
   const isThinkingLive = filteredLines.length > 0 && !!filteredLines[filteredLines.length - 1].thinkingLive;
   const activeProject = useProjectStore((s) => s.activeProject);
   const repoPath = activeProject?.repo_path ?? '';
-  const teamRuntime = activeProject?.runtime_choice ?? null;
-  const effectiveProvider = agent?.provider ?? teamRuntime;
+  // runtime_choice is the single authority for the team runtime; agent.provider
+  // may be stale from the legacy agentProvider field.
+  const effectiveProvider = activeProject?.runtime_choice ?? agent?.provider ?? null;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
 
@@ -432,6 +434,13 @@ export function UnifiedTerminal({
             // render as repeated blocks inside the stream.
             if (line.thinkingLive) {
               return null;
+            }
+            if (line.codeChange) {
+              return (
+                <div key={`${line.ts}-${idx}`} className="px-1 -mx-1">
+                  <CodeChangeCard codeChange={line.codeChange} compact={compact} />
+                </div>
+              );
             }
             return (
               <div
