@@ -158,11 +158,11 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
                 >
                   {line.agent}
                 </span>
-                <span className="text-slate-300 break-words whitespace-pre-wrap leading-tight">
+                <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
                   {line.line}
                 </span>
               </div>
-              {showThinking && line.thinking && (
+              {showThinking && line.thinking !== undefined && (
                 <div className="ml-14 mt-1">
                   <ThinkingBlock
                     label={line.thinkingLive ? line.line : 'Thinking'}

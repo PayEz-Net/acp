@@ -65,6 +65,7 @@ export function UnifiedTerminal({
   // Per-session output stats for the footer.
   const lineCount = filteredLines.length;
   const thinkingCount = filteredLines.filter((l) => l.thinking && !l.thinkingLive).length;
+  const isThinkingLive = filteredLines.length > 0 && !!filteredLines[filteredLines.length - 1].thinkingLive;
   const activeProject = useProjectStore((s) => s.activeProject);
   const repoPath = activeProject?.repo_path ?? '';
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
@@ -359,7 +360,11 @@ export function UnifiedTerminal({
 
   const handleClick = useCallback(() => {
     onFocus?.();
-    inputRef.current?.focus();
+    // Don't steal focus while the user is selecting text to copy.
+    const selection = window.getSelection();
+    if (!selection || selection.toString().length === 0) {
+      inputRef.current?.focus();
+    }
   }, [onFocus]);
 
   const resumeFollow = useCallback(() => {
@@ -411,30 +416,28 @@ export function UnifiedTerminal({
           )}
 
           {filteredLines.map((line, idx) => {
-            // Live thinking placeholders are updated in-place by the store.
-            // Use a stable key so React reconciles the same DOM node instead of
-            // remounting it on every spinner frame.
-            const key = line.thinkingLive
-              ? `${line.agent}-${line.terminal_id ?? 'none'}-thinking`
-              : `${line.ts}-${idx}`;
+            // Live thinking placeholders are updated in-place by the store and
+            // surfaced as a single-line indicator in the footer. They do not
+            // render as repeated blocks inside the stream.
+            if (line.thinkingLive) {
+              return null;
+            }
             return (
               <div
-                key={key}
+                key={`${line.ts}-${idx}`}
                 className="flex flex-col py-0.5 hover:bg-slate-800/30 rounded px-1 -mx-1"
               >
-                {(!line.thinkingLive || !showThinking) && (
-                  <div className="flex items-start gap-2">
-                    <span className="text-slate-300 break-words whitespace-pre-wrap leading-tight">
-                      {line.line}
-                    </span>
-                  </div>
-                )}
+                <div className="flex items-start gap-2">
+                  <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
+                    {line.line}
+                  </span>
+                </div>
                 {showThinking && line.thinking && (
-                  <div className={line.thinkingLive ? '' : 'ml-2 mt-0.5'}>
+                  <div className="ml-2 mt-0.5">
                     <ThinkingBlock
-                      label={line.thinkingLive ? line.line : 'Thinking…'}
+                      label="Thinking…"
                       content={line.thinking}
-                      live={line.thinkingLive}
+                      live={false}
                       compact={compact}
                     />
                   </div>
@@ -471,6 +474,7 @@ export function UnifiedTerminal({
           lineCount={lineCount}
           thinkingCount={thinkingCount}
           contextUsage={contextUsage}
+          isThinkingLive={isThinkingLive}
         />
       )}
 
