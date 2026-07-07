@@ -9,6 +9,7 @@ import { useChatStore } from '../stores/chatStore';
 import { useContractorStore } from '../stores/contractorStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useCheckinStore } from '../stores/checkinStore';
+import { resolveAgentProvider, shouldInjectMailToPty } from '../lib/agentProviders';
 
 /**
  * Centralized SSE hook — single connection to acp-api, multiplexed by agent.
@@ -121,7 +122,12 @@ export function useAcpSse() {
         headers['Authorization'] = `Bearer ${secret}`;
       }
 
-      const url = 'http://127.0.0.1:3001/v1/sse/stream';
+      const projectId = useProjectStore.getState().activeProject?.id;
+      const agents = useAppStore.getState().agents.map((a) => a.name);
+      const params = new URLSearchParams();
+      if (agents.length > 0) params.set('agents', agents.join(','));
+      if (projectId != null) params.set('project_id', String(projectId));
+      const url = `http://127.0.0.1:3001/v1/sse/stream${params.toString() ? '?' + params.toString() : ''}`;
       console.log(`[AcpSse] Connecting... (attempt ${retryCount + 1})`);
       setConn('reconnecting');
 
@@ -205,14 +211,20 @@ export function useAcpSse() {
 
                 console.log(`[AcpSse] Mail for ${agentName}: ${from} — ${subject} (id=${id})`);
 
-                // Claude Code receives pushed mail via the MCP Channels
-                // path (acp-mail-channel.js + --dangerously-load-development-channels).
-                // Kimi and Codex don't have an equivalent in-session push —
-                // fall back to a PTY stdin inject so the running agent
-                // actually sees that mail arrived.
-                const provider = useAppStore.getState().settings?.agentProvider || 'claude';
-                if (provider !== 'claude') {
-                  const agentState = useAppStore.getState().agents.find(a => a.name === agentName);
+                // Provider-specific mail delivery: Claude Code receives pushed
+                // mail via the MCP Channels path (acp-mail-channel.js +
+                // --dangerously-load-development-channels). Kimi and Codex do
+                // not have an equivalent in-session push, so we inject a PTY
+                // notice so the running agent actually sees the mail arrived.
+                // Per-agent provider overrides take precedence over the team
+                // runtime, which takes precedence over the global fallback.
+                const agentState = useAppStore.getState().agents.find(a => a.name === agentName);
+                const provider = resolveAgentProvider(
+                  agentState,
+                  useProjectStore.getState().activeProject?.runtime_choice,
+                  useAppStore.getState().settings?.agentProvider,
+                );
+                if (shouldInjectMailToPty(provider)) {
                   if (agentState?.terminalId) {
                     const cmd = `[ACP mail] new mail from ${from}: "${subject}" (id: ${id}) — check your inbox`;
                     const tid = agentState.terminalId;

@@ -1,0 +1,46 @@
+{
+  "provider": "codex",
+  "description": "Codex CLI plain-text session after upstream ANSI stripping. Covers status lines, tool-call blocks, spinner frames, and model-label normalization.",
+  "cases": [
+    {
+      "input": "Codex v1.0",
+      "expected": "Codex v1.0"
+    },
+    {
+      "input": "codex-mini",
+      "expected": "Codex"
+    },
+    {
+      "input": "codex-mini-latest",
+      "expected": "Codex"
+    },
+    {
+      "input": "━━━ Running: npm test ━━━",
+      "expected": "━━━ Running: npm test ━━━"
+    },
+    {
+      "input": "⠏ Executing...",
+      "expected": "Executing..."
+    },
+    {
+      "input": "⠛ Executing...",
+      "expected": "Executing..."
+    },
+    {
+      "input": "✔ Command succeeded",
+      "expected": "✔ Command succeeded"
+    },
+    {
+      "input": "[tool: read_file] path=src/main/index.ts",
+      "expected": "[tool: read_file] path=src/main/index.ts"
+    },
+    {
+      "input": "  12 lines read",
+      "expected": "  12 lines read"
+    },
+    {
+      "input": "",
+      "expected": ""
+    }
+  ]
+}

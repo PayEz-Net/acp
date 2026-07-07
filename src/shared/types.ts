@@ -313,6 +313,8 @@ export interface AppSettings {
   installerWorkspaceRoot?: string;
   // v0.3 skill chips feature flag (default OFF)
   showSkillChips?: boolean;
+  // Show thinking blocks in terminal output (default ON)
+  showThinking?: boolean;
 }
 
 // IPC channel names
@@ -383,6 +385,9 @@ export const IPC_CHANNELS = {
   ACP_RETRY_BACKEND: 'acp:retryBackend',
   ACP_GET_LOGS: 'acp:getLogs',
   ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
+
+  // vsql-cache (PayEz Vibe SQL agent-output store)
+  VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
   // Renderer → main: trigger app.relaunch() + app.exit(0). Originally
   // Ship F-bis fail-loud-stub Restart-ACP affordance. Stays for
   // diagnostic / manual relaunch needs (e.g., backend recovery).

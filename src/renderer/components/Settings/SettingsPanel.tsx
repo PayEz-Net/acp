@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
-import { X, Server, Users, Radio, RefreshCw, Bot } from 'lucide-react';
+import { CODE_PROVIDERS, CodeProvider, PROVIDER_LABELS } from '../../lib/agentProviders';
+import { X, Server, Users, Radio, RefreshCw, Bot, Brain } from 'lucide-react';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -11,10 +12,10 @@ interface SettingsPanelProps {
 // Agent Provider selection component
 function AgentProviderSection() {
   const { settings, setSettings } = useAppStore();
-  const [provider, setProvider] = useState(settings.agentProvider || 'kimi');
+  const [provider, setProvider] = useState<CodeProvider>(settings.agentProvider || 'kimi');
   const [effort, setEffort] = useState(settings.claudeEffort || 'high');
 
-  const handleProviderChange = async (newProvider: 'claude' | 'kimi') => {
+  const handleProviderChange = async (newProvider: CodeProvider) => {
     setProvider(newProvider);
     await window.electronAPI.setSettings({ 
       ...settings, 
@@ -40,26 +41,28 @@ function AgentProviderSection() {
       
       {/* Provider Selection */}
       <div className="flex gap-2 mb-3">
-        <button
-          onClick={() => handleProviderChange('kimi')}
-          className={`flex-1 py-2 px-3 text-sm rounded border transition-colors ${
-            provider === 'kimi'
-              ? 'bg-violet-600 border-violet-500 text-white'
-              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          Kimi
-        </button>
-        <button
-          onClick={() => handleProviderChange('claude')}
-          className={`flex-1 py-2 px-3 text-sm rounded border transition-colors ${
-            provider === 'claude'
+        {CODE_PROVIDERS.map((p) => {
+          const active = provider === p;
+          const activeClasses =
+            p === 'claude'
               ? 'bg-amber-600 border-amber-500 text-white'
-              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          Claude
-        </button>
+              : p === 'kimi'
+              ? 'bg-violet-600 border-violet-500 text-white'
+              : 'bg-cyan-600 border-cyan-500 text-white';
+          return (
+            <button
+              key={p}
+              onClick={() => handleProviderChange(p)}
+              className={`flex-1 py-2 px-3 text-sm rounded border transition-colors ${
+                active
+                  ? activeClasses
+                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              {PROVIDER_LABELS[p]}
+            </button>
+          );
+        })}
       </div>
 
       {/* Claude Effort Level (only shown for Claude) */}
@@ -88,6 +91,39 @@ function AgentProviderSection() {
           Kimi Code CLI with project-level skills from .agents/skills/
         </p>
       )}
+    </div>
+  );
+}
+
+// Show/hide thinking blocks in terminal output.
+function ThinkingSection() {
+  const { settings, setSettings } = useAppStore();
+  const [showThinking, setShowThinking] = useState(settings.showThinking !== false);
+
+  const handleChange = async (enabled: boolean) => {
+    setShowThinking(enabled);
+    const next = { ...settings, showThinking: enabled };
+    await window.electronAPI.setSettings(next);
+    setSettings(next);
+  };
+
+  return (
+    <div className="p-4 border-b border-slate-800">
+      <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+        <Brain className="w-4 h-4" /> Thinking Blocks
+      </h3>
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={showThinking}
+          onChange={(e) => handleChange(e.target.checked)}
+          className="w-4 h-4 rounded border-slate-600 text-emerald-500 bg-slate-800 focus:ring-emerald-500/50"
+        />
+        <span className="text-sm text-slate-300">Show agent thinking blocks</span>
+      </label>
+      <p className="text-xs text-slate-500 mt-2">
+        When enabled, collapsed thinking blocks appear alongside agent answers.
+      </p>
     </div>
   );
 }
@@ -223,6 +259,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
         {/* Agent Provider */}
         <AgentProviderSection />
+
+        {/* Thinking blocks */}
+        <ThinkingSection />
 
         {/* SSE */}
         <div className="p-4">

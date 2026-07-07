@@ -1,16 +1,17 @@
 /**
  * UnifiedTerminal — DOM-based terminal surface for per-agent terminal panes.
  *
- * Replaces xterm.js with a lightweight, provider-normalized line renderer that
- * consumes the same `agentOutputStore` stream as `AgentOutputPanel`. Lines are
- * already normalized upstream (ANSI stripped, provider adapter applied, blanks
- * and spinner frames collapsed), so this component only filters, renders, and
- * forwards input/resize back to the PTY.
+ * Consumes the normalized `agentOutputStore` stream (ANSI stripped, provider
+ * adapter applied, blanks and spinner frames collapsed) and renders it as a
+ * scrollable line log. A single Vercel-style composer at the bottom of the pane
+ * is the primary chat/input control.
  */
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Send } from 'lucide-react';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useAppStore } from '../../stores/appStore';
+import { ThinkingBlock } from '../ThinkingBlock';
 
 export interface UnifiedTerminalProps {
   /** Agent whose output stream to render. */
@@ -21,7 +22,7 @@ export interface UnifiedTerminalProps {
   isFocused?: boolean;
   /** Optional compact font size (sidebar mode). */
   compact?: boolean;
-  /** Called when the user focuses the terminal surface. */
+  /** Called when the user focuses the terminal surface or composer. */
   onFocus?: () => void;
 }
 
@@ -38,12 +39,14 @@ export function UnifiedTerminal({
   onFocus,
 }: UnifiedTerminalProps) {
   const lines = useAgentOutputStore((s) => s.lines);
+  const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
   const filteredLines = useMemo(() => lines.filter((l) => l.agent === agentName), [lines, agentName]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const terminalIdRef = useRef(terminalId);
   terminalIdRef.current = terminalId;
@@ -123,7 +126,10 @@ export function UnifiedTerminal({
       setShowNewOutput(true);
       return;
     }
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
     setShowNewOutput(false);
   }, [filteredLines, paused]);
 
@@ -140,10 +146,10 @@ export function UnifiedTerminal({
     }
   }, [paused]);
 
-  // Focus the scroll surface when this pane becomes focused.
+  // Focus the composer when this pane becomes focused.
   useEffect(() => {
     if (isFocused) {
-      scrollRef.current?.focus();
+      inputRef.current?.focus();
     }
   }, [isFocused]);
 
@@ -170,6 +176,24 @@ export function UnifiedTerminal({
       }
     } catch (err) {
       console.warn(`[UnifiedTerminal ${agentName}] paste failed:`, err);
+    }
+  }, [agentName]);
+
+  const insertClipboardIntoInput = useCallback(async (input: HTMLInputElement) => {
+    try {
+      const text = await window.electronAPI.readClipboardText();
+      if (!text) return;
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? input.value.length;
+      const newValue = input.value.slice(0, start) + text + input.value.slice(end);
+      input.value = newValue;
+      const newCursor = start + text.length;
+      requestAnimationFrame(() => {
+        input.setSelectionRange(newCursor, newCursor);
+        input.focus();
+      });
+    } catch (err) {
+      console.warn(`[UnifiedTerminal ${agentName}] input paste failed:`, err);
     }
   }, [agentName]);
 
@@ -263,93 +287,190 @@ export function UnifiedTerminal({
     [getSelectionText, handlePaste, handleCopy],
   );
 
+  const sendInputLine = useCallback(() => {
+    const tid = terminalIdRef.current;
+    const input = inputRef.current;
+    if (!tid || !input) return;
+    const value = input.value;
+    if (!value) return;
+    window.electronAPI.writeTerminal(tid, value + '\r');
+    input.value = '';
+  }, []);
+
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      const tid = terminalIdRef.current;
+      if (!tid) return;
+
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendInputLine();
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        window.electronAPI.writeTerminal(tid, '\u001b');
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        window.electronAPI.writeTerminal(tid, '\t');
+        return;
+      }
+
+      // Ctrl+C: SIGINT if no selection, otherwise let default copy handle it.
+      if (e.key.toLowerCase() === 'c' && (e.ctrlKey || e.metaKey)) {
+        const input = e.currentTarget;
+        if (input.selectionStart === input.selectionEnd) {
+          e.preventDefault();
+          window.electronAPI.writeTerminal(tid, '\u0003');
+          input.value = '';
+        }
+        return;
+      }
+
+      // Ctrl+V: paste into the composer input at the cursor.
+      if (e.key.toLowerCase() === 'v' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        insertClipboardIntoInput(e.currentTarget);
+        return;
+      }
+    },
+    [sendInputLine, insertClipboardIntoInput],
+  );
+
   const handleClick = useCallback(() => {
     onFocus?.();
-    scrollRef.current?.focus();
+    inputRef.current?.focus();
   }, [onFocus]);
 
   const resumeFollow = useCallback(() => {
     setPaused(false);
     setShowNewOutput(false);
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, []);
 
   return (
-    <div
-      ref={containerRef}
-      data-testid="terminal-host"
-      className="relative flex-1 min-h-0 overflow-hidden bg-slate-900"
-      onClick={handleClick}
-    >
-      {/* Hidden measurement span for dimension math. */}
-      <span
-        ref={measureRef}
-        data-testid="terminal-measure"
-        aria-hidden="true"
-        className={`absolute -left-[9999px] top-0 font-mono whitespace-pre pointer-events-none select-none ${
-          compact ? 'text-[11px] leading-tight' : 'text-[13px] leading-tight'
-        }`}
-      >
-        {SAMPLE_CHARS}
-      </span>
-
+    <div className="flex flex-col h-full overflow-hidden">
       <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        onContextMenu={handleContextMenu}
-        onKeyDown={handleKeyDown}
-        className={`h-full w-full overflow-y-auto outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
-          compact ? 'text-[11px]' : 'text-[13px]'
-        } p-2 space-y-0.5`}
-        role="log"
-        aria-live="polite"
-        aria-label={`Terminal output for ${agentName}`}
-        tabIndex={0}
+        ref={containerRef}
+        data-testid="terminal-host"
+        className="relative flex-1 min-h-0 overflow-hidden bg-slate-900"
+        onClick={handleClick}
       >
-        {filteredLines.length === 0 && !terminalId && (
-          <div className="h-full flex items-center justify-center text-slate-500 select-none">
-            Terminal output will appear here.
-          </div>
+        {/* Hidden measurement span for dimension math. */}
+        <span
+          ref={measureRef}
+          data-testid="terminal-measure"
+          aria-hidden="true"
+          className={`absolute -left-[9999px] top-0 font-mono whitespace-pre pointer-events-none select-none ${
+            compact ? 'text-[11px] leading-tight' : 'text-[13px] leading-tight'
+          }`}
+        >
+          {SAMPLE_CHARS}
+        </span>
+
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          onContextMenu={handleContextMenu}
+          onKeyDown={handleKeyDown}
+          className={`h-full w-full overflow-y-auto outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
+            compact ? 'text-[11px]' : 'text-[13px]'
+          } p-2 space-y-0.5`}
+          role="log"
+          aria-live="polite"
+          aria-label={`Terminal output for ${agentName}`}
+          tabIndex={0}
+        >
+          {filteredLines.length === 0 && !terminalId && (
+            <div className="h-full flex items-center justify-center text-slate-500 select-none">
+              Terminal output will appear here.
+            </div>
+          )}
+
+          {filteredLines.map((line, idx) => {
+            // Live thinking placeholders are updated in-place by the store.
+            // Use a stable key so React reconciles the same DOM node instead of
+            // remounting it on every spinner frame.
+            const key = line.thinkingLive
+              ? `${line.agent}-${line.terminal_id ?? 'none'}-thinking`
+              : `${line.ts}-${idx}`;
+            return (
+              <div
+                key={key}
+                className="flex flex-col py-0.5 hover:bg-slate-800/30 rounded px-1 -mx-1"
+              >
+                {(!line.thinkingLive || !showThinking) && (
+                  <div className="flex items-start gap-2">
+                    <span className="text-slate-300 break-words whitespace-pre-wrap leading-tight">
+                      {line.line}
+                    </span>
+                  </div>
+                )}
+                {showThinking && line.thinking && (
+                  <div className={line.thinkingLive ? '' : 'ml-2 mt-0.5'}>
+                    <ThinkingBlock
+                      label={line.thinkingLive ? line.line : 'Thinking'}
+                      content={line.thinking}
+                      live={line.thinkingLive}
+                      compact={compact}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div ref={bottomRef} />
+        </div>
+
+        {showNewOutput && paused && (
+          <button
+            onClick={resumeFollow}
+            className="absolute bottom-4 right-4 flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg cursor-pointer"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+            New output
+          </button>
         )}
 
-        {filteredLines.map((line, idx) => {
-          const time = new Date(line.ts).toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          });
-          return (
-            <div
-              key={`${line.ts}-${idx}`}
-              className="flex items-start gap-2 py-0.5 hover:bg-slate-800/30 rounded px-1 -mx-1"
-            >
-              <span className="text-[10px] text-slate-600 shrink-0 pt-0.5 select-none">
-                {time}
-              </span>
-              <span className="text-slate-300 break-words whitespace-pre-wrap leading-tight">
-                {line.line}
-              </span>
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
+        {!terminalId && filteredLines.length > 0 && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-slate-500 select-none bg-slate-900/80">
+            Session ended.
+          </div>
+        )}
       </div>
 
-      {showNewOutput && paused && (
-        <button
-          onClick={resumeFollow}
-          className="absolute bottom-4 right-4 flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg cursor-pointer"
-        >
-          <ChevronDown className="w-3.5 h-3.5" />
-          New output
-        </button>
-      )}
-
-      {!terminalId && filteredLines.length > 0 && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-slate-500 select-none bg-slate-900/80">
-          Session ended.
+      {/* Vercel-style composer — single chat input for the pane */}
+      <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2">
+        <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-2 border border-slate-700/50 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/30 transition-all">
+          <input
+            ref={inputRef}
+            type="text"
+            defaultValue=""
+            onKeyDown={handleInputKeyDown}
+            onFocus={onFocus}
+            disabled={!terminalId}
+            placeholder={terminalId ? 'Type a command or message...' : 'Start the agent to type...'}
+            className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            data-testid="terminal-input"
+          />
+          <button
+            onClick={sendInputLine}
+            disabled={!terminalId}
+            className="p-1.5 rounded-full text-slate-400 hover:text-emerald-400 hover:bg-slate-700/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            title="Send"
+            data-testid="terminal-send"
+          >
+            <Send className="w-4 h-4" />
+          </button>
         </div>
-      )}
+      </div>
     </div>
   );
 }

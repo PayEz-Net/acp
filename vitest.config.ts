@@ -19,6 +19,9 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    environmentMatchGlobs: [
+      ['src/**/*.test.tsx', 'happy-dom'],
+    ],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'scripts/**/*.test.ts'],
     globals: false,
   },

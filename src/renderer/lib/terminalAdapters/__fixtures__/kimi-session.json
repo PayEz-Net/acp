@@ -1,0 +1,46 @@
+{
+  "provider": "kimi",
+  "description": "Kimi terminal plain-text session after upstream ANSI stripping. Covers spinner frames, inline image placeholders replaced with ⟨image⟩, and blank-line collapse.",
+  "cases": [
+    {
+      "input": "Kimi · Agent mode",
+      "expected": "Kimi · Agent mode"
+    },
+    {
+      "input": "◐ Analyzing repository structure...",
+      "expected": "Analyzing repository structure..."
+    },
+    {
+      "input": "◓ Analyzing repository structure...",
+      "expected": "Analyzing repository structure..."
+    },
+    {
+      "input": "◉ Analyzed 47 files",
+      "expected": "Analyzed 47 files"
+    },
+    {
+      "input": "[IMAGE: screenshot-placeholder-1.png]",
+      "expected": "⟨image⟩"
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "Plan generated:",
+      "expected": "Plan generated:"
+    },
+    {
+      "input": "  1. Update adapter interface",
+      "expected": "  1. Update adapter interface"
+    },
+    {
+      "input": "  2. Add Kimi spinner normalization",
+      "expected": "  2. Add Kimi spinner normalization"
+    }
+  ]
+}

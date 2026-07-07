@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { Terminal } from 'xterm';
 import { AgentConfig, AgentState, AppSettings, LayoutMode, AutonomyStatus } from '@shared/types';
 
 interface AppStore {
@@ -18,9 +17,6 @@ interface AppStore {
   // Agents
   agents: AgentState[];
   activeAgentId: string | null;
-
-  // Terminal refs for SSE message injection
-  terminalRefs: Map<string, Terminal>;
 
   // ACP backend
   backendAvailable: boolean;
@@ -51,16 +47,13 @@ interface AppStore {
   setAgentTerminalId: (agentId: string, terminalId: string) => void;
   setSettings: (settings: AppSettings) => void;
   setAgentProvider: (provider: AgentConfig['provider']) => void;
-  registerTerminal: (agentName: string, terminal: Terminal, projectId?: number) => void;
-  unregisterTerminal: (agentName: string, projectId?: number) => void;
-  injectMessage: (agentName: string, message: string, projectId?: number) => void;
   setBackendAvailable: (available: boolean) => void;
   setAutonomyEnabled: (enabled: boolean) => void;
   setAutonomyStatus: (status: AutonomyStatus | null) => void;
   toggleAutonomyPanel: () => void;
 }
 
-export const useAppStore = create<AppStore>((set, get) => ({
+export const useAppStore = create<AppStore>((set) => ({
   // Initial state
   layout: 'grid',
   focusAgent: 'BAPert',
@@ -74,7 +67,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   showTeamBuilder: false,
   agents: [],
   activeAgentId: null,
-  terminalRefs: new Map(),
   backendAvailable: false,
   autonomyEnabled: false,
   autonomyStatus: null,
@@ -129,28 +121,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     showSidebar: settings.showSidebar,
     settings,
   }),
-
-  registerTerminal: (agentName, terminal, projectId) => {
-    const key = projectId !== undefined ? `${projectId}:${agentName}` : agentName;
-    const refs = new Map(get().terminalRefs);
-    refs.set(key, terminal);
-    set({ terminalRefs: refs });
-  },
-
-  unregisterTerminal: (agentName, projectId) => {
-    const key = projectId !== undefined ? `${projectId}:${agentName}` : agentName;
-    const refs = new Map(get().terminalRefs);
-    refs.delete(key);
-    set({ terminalRefs: refs });
-  },
-
-  injectMessage: (agentName, message, projectId) => {
-    const key = projectId !== undefined ? `${projectId}:${agentName}` : agentName;
-    const terminal = get().terminalRefs.get(key);
-    if (terminal) {
-      terminal.write(message);
-    }
-  },
 
   setBackendAvailable: (available) => set({ backendAvailable: available }),
   setAutonomyEnabled: (enabled) => set({ autonomyEnabled: enabled }),

@@ -5,6 +5,7 @@ import { act } from 'react';
 
 import { UnifiedTerminal } from './UnifiedTerminal';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useAppStore } from '../../stores/appStore';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -89,6 +90,45 @@ describe('UnifiedTerminal', () => {
     expect(container.textContent).toContain('hello');
     expect(container.textContent).toContain('again');
     expect(container.textContent).not.toContain('world');
+    cleanup(root, container);
+  });
+
+  it('renders live thinking as a single faded block', () => {
+    useAppStore.setState({ settings: { showThinking: true } as any });
+    useAgentOutputStore.setState({
+      lines: [
+        { agent: 'NextPert', terminal_id: 't1', line: 'Thinking...', thinking: 'step one', thinkingLive: true, ts: new Date().toISOString() },
+      ],
+    });
+
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+    expect(container.querySelector('[data-testid="thinking-live"]')).not.toBeNull();
+    expect(container.textContent).toContain('Thinking...');
+    cleanup(root, container);
+  });
+
+  it('updates the live thinking block in place rather than appending a new line', () => {
+    useAppStore.setState({ settings: { showThinking: true } as any });
+    const t1 = new Date().toISOString();
+    useAgentOutputStore.setState({
+      lines: [
+        { agent: 'NextPert', terminal_id: 't1', line: 'Thinking...', thinking: 'step one', thinkingLive: true, ts: t1 },
+      ],
+    });
+
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+
+    act(() => {
+      useAgentOutputStore.setState({
+        lines: [
+          { agent: 'NextPert', terminal_id: 't1', line: 'Analyzing...', thinking: 'step one\nstep two', thinkingLive: true, ts: new Date().toISOString() },
+        ],
+      });
+    });
+
+    const liveBlocks = container.querySelectorAll('[data-testid="thinking-live"]');
+    expect(liveBlocks.length).toBe(1);
+    expect(container.textContent).toContain('Analyzing...');
     cleanup(root, container);
   });
 
@@ -180,5 +220,108 @@ describe('UnifiedTerminal', () => {
     expect(rows).toBeGreaterThanOrEqual(4);
 
     cleanup(root, container);
+  });
+
+  describe('composer input', () => {
+    it('renders the Vercel-style composer input', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      expect(input).not.toBeNull();
+      cleanup(root, container);
+    });
+
+    it('disables the composer when there is no terminal session', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      expect(input.disabled).toBe(true);
+      cleanup(root, container);
+    });
+
+    it('sends the typed line + newline on Enter', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'npm test';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', 'npm test\r');
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('sends Escape to the PTY from the composer', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', '\u001b');
+      cleanup(root, container);
+    });
+
+    it('sends Tab to the PTY from the composer', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', '\t');
+      cleanup(root, container);
+    });
+
+    it('sends SIGINT from the composer when Ctrl+C is pressed with no selection', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'partial command';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', '\u0003');
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('pastes clipboard text into the composer when Ctrl+V is pressed', async () => {
+      mockReadClipboardText.mockResolvedValue('pasted content');
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true }));
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(mockReadClipboardText).toHaveBeenCalled();
+      expect(input.value).toBe('pasted content');
+      cleanup(root, container);
+    });
+
+    it('sends the input line when the send button is clicked', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const sendBtn = container.querySelector('[data-testid="terminal-send"]') as HTMLButtonElement;
+
+      act(() => {
+        input.value = 'build now';
+        sendBtn.click();
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', 'build now\r');
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
   });
 });

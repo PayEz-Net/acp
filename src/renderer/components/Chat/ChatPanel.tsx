@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { useAppStore } from '../../stores/appStore';
-import { X, Send, Plus, MessageSquare } from 'lucide-react';
+import { X, Plus, MessageSquare } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 interface ChatPanelProps {
@@ -10,9 +10,9 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
-  const { conversations, selectedConversation, messages, loading, fetchConversations, selectConversation, sendMessage, startConversation } = useChatStore();
+  const { conversations, selectedConversation, messages, loading, fetchConversations, selectConversation, startConversation } = useChatStore();
   const { backendAvailable, agents } = useAppStore();
-  const [input, setInput] = useState('');
+
   const [showNewChat, setShowNewChat] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -27,13 +27,6 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   }, [messages]);
 
   if (!isOpen) return null;
-
-  const handleSend = async () => {
-    if (!input.trim() || !selectedConversation) return;
-    const from = agents[0]?.name || 'Unknown';
-    await sendMessage(selectedConversation.id, from, input.trim());
-    setInput('');
-  };
 
   const handleNewChat = async (participantName: string) => {
     const myName = agents[0]?.name || 'Unknown';
@@ -128,22 +121,6 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* Compose */}
-                <div className="p-2 border-t border-slate-800">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                      placeholder="Type a message..."
-                      className="flex-1 px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-sm text-white placeholder-slate-500 focus:outline-none focus:border-vibe-500"
-                    />
-                    <button onClick={handleSend} className="p-1.5 bg-blue-600 text-white rounded hover:bg-blue-500" disabled={!input.trim()}>
-                      <Send className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
               </>
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-slate-500">

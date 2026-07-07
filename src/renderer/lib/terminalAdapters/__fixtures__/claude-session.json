@@ -1,0 +1,42 @@
+{
+  "provider": "claude",
+  "description": "Claude Code plain-text session after upstream ANSI stripping. Covers spinner frames, helper text, and blank-line collapse.",
+  "cases": [
+    {
+      "input": "+--------------------------------------+",
+      "expected": "+--------------------------------------+"
+    },
+    {
+      "input": "│  Claude Code v0.25.1                  │",
+      "expected": "│  Claude Code v0.25.1                  │"
+    },
+    {
+      "input": "⠋ Reading files...",
+      "expected": "Reading files..."
+    },
+    {
+      "input": "⠙ Reading files...",
+      "expected": "Reading files..."
+    },
+    {
+      "input": "⠹ Reading files...",
+      "expected": "Reading files..."
+    },
+    {
+      "input": "✔ Read 12 files",
+      "expected": "✔ Read 12 files"
+    },
+    {
+      "input": "  Thinking about the best approach...",
+      "expected": "  Thinking about the best approach..."
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "I'll update the component now.",
+      "expected": "I'll update the component now."
+    }
+  ]
+}

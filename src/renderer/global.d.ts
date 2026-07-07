@@ -15,7 +15,7 @@ declare global {
       listTerminals: () => Promise<Array<{ id: string; agentName: string; projectId?: number; provider: 'claude' | 'kimi' | 'codex' }>>;
       onTerminalData: (callback: (data: TerminalData) => void) => () => void;
       onAgentSpawned: (callback: (data: { agentName: string; terminalId: string }) => void) => () => void;
-      onTerminalExit: (callback: (data: { terminalId: string; code: number }) => void) => () => void;
+      onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void) => () => void;
       // Main → renderer: a spawn failed with a typed cause (WORKDIR_INVALID).
       // The orchestrator path has no renderer fetch to catch the throw, so this
       // carries it to the shared WorkdirCorrection surface (SPEC-workdir §3.4).
@@ -60,6 +60,7 @@ declare global {
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
+      getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
 
