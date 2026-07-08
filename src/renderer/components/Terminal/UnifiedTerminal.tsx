@@ -678,7 +678,13 @@ export function UnifiedTerminal({
           tabIndex={0}
         >
           {isAcpMode ? (
-            <AcpTranscript turns={acpSession?.turns ?? []} activeTurnId={acpSession?.activeTurnId ?? null} />
+            <AcpTranscript
+              turns={acpSession?.turns ?? []}
+              activeTurnId={acpSession?.activeTurnId ?? null}
+              agent={agentName}
+              sessionId={acpSession?.sessionId}
+              pendingPermission={acpSession?.pendingPermission}
+            />
           ) : (
             <>
               {filteredLines.length === 0 && !terminalId && (

@@ -1,5 +1,6 @@
 import { AgentState } from '@shared/types';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 
 export type StatusPill = {
   label: string;
@@ -23,6 +24,21 @@ export function getStatusPill(status: AgentState['status']): StatusPill {
       return { label: 'Error', color: 'bg-acp-status-error' };
     default:
       return { label: status, color: 'bg-acp-status-offline' };
+  }
+}
+
+function getAcpStatusPill(status?: string): StatusPill {
+  switch (status) {
+    case 'thinking':
+      return { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true };
+    case 'tool':
+      return { label: 'Tool…', color: 'bg-acp-status-busy', animate: true };
+    case 'answering':
+      return { label: 'Answering…', color: 'bg-acp-accent', animate: true };
+    case 'error':
+      return { label: 'Error', color: 'bg-acp-status-error' };
+    default:
+      return { label: 'Busy', color: 'bg-acp-status-busy', animate: true };
   }
 }
 
@@ -64,15 +80,27 @@ export function TerminalFooter({
   isThinkingLive?: boolean;
 }) {
   const status = useAgentStatusStore((s) => s.statuses[agent.name]);
-  const statusPill = isThinkingLive
-    ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
-    : getStatusPill(agent.status);
+  const acpSession = useAcpSessionStore((s) => s.sessions.get(agent.name));
+  const isAcpMode = acpSession?.runtimeMode === 'acp';
+
+  const activeTurn = isAcpMode
+    ? acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId)
+    : undefined;
+  const statusPill = isAcpMode
+    ? getAcpStatusPill(activeTurn?.status)
+    : isThinkingLive
+      ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
+      : getStatusPill(agent.status);
 
   // The provider prop is the single source of truth (agent.provider with the
   // team-runtime fallback already applied by the caller). Do not let the status
   // store override it — that creates dueling provider badges.
   const effectiveProvider = provider;
-  const effectiveModel = status?.model;
+  const effectiveModel = isAcpMode
+    ? acpSession?.agentInfo?.version
+      ? `${acpSession.agentInfo.name} ${acpSession.agentInfo.version}`
+      : acpSession?.agentInfo?.name
+    : status?.model;
   const effectiveCwd = status?.cwd ?? repoPath;
   const effectiveContext = status?.contextUsage ?? contextUsage;
   const effectiveTokenUsed = status?.tokenUsed;

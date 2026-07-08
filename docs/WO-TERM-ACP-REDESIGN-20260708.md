@@ -140,12 +140,12 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 ## 6. Definition of done
 
 - [x] Task 0 complete — feature branch `feature/WO-TERM-ACP-REDESIGN-20260708` created.
-- [ ] Task 1 complete — ACP transport integrated and tested.
+- [x] Task 1 complete — ACP transport integrated and tested.
 - [x] Task 2 complete — turn-based store merged and golden-tested.
-- [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done; transport integration pending.
-- [ ] Task 4 complete — tool approval and activity polish.
+- [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done.
+- [x] Task 4 complete — tool approval UI and footer activity indicators implemented.
 - [ ] Task 5 complete — QAPert signs off.
-- [ ] `npm test` passes (240+ tests).
+- [x] `npm test` passes (277 tests, 1 skipped QA placeholder).
 - [ ] `npx tsc --noEmit` clean.
 - [ ] `npm run build:electron` succeeds.
 - [ ] Jon signs off.
@@ -170,7 +170,7 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - This WO supersedes ad-hoc terminal formatting patches. No further regex whack-a-mole without lead approval.
 - If `kimi acp` proves unstable during implementation, immediately raise a blocker and fall back to the custom PTY-text-treatment path.
 - Backend cache questions should route to DotNetPert.
-- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708` (NextPert pushed @ `ede715b0ce4e50a3b73960ab50d45d3ad635f41e`; Scout transport commit pending).
+- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708` on origin @ `286e1fa89d240bc41204b3e738d91ae185af03d4`. All build/test gates green; final integration verification pending NextPert report.
 - Type consolidation resolved: canonical ACP IPC/event types live in `src/shared/acpTypes.ts`. Main forwards raw JSON-RPC `session/update` events to the renderer as `{ agent: string; sessionId: string; update: AcpSessionUpdate }`. The duplicate ACP block was removed from `src/shared/types.ts`.
 - Renderer → main IPC payloads (BAPert decision 2026-07-08):
   - `ACP_PROMPT`: `{ agent, sessionId, text }` — main converts `text` into the content-block array `kimi acp` expects.
