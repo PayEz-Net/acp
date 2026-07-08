@@ -208,6 +208,59 @@ describe('AcpRuntimeManager', () => {
     expect(events.some((e) => e.update.sessionUpdate === 'agent_message_chunk')).toBe(true);
   });
 
+  it('filters streaming metadata artifacts from content chunks', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-artifacts' });
+    await manager.start();
+
+    getProcess().emit('notification', 'session/update', {
+      sessionId: 'sess-artifacts',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: "Before\n13 tokens :\n321:46\n:58\n70':\n1s · 82 tokens:96\n106 tokens: : 18\n31\n42\n30394\nAfter",
+          },
+        },
+      },
+    });
+
+    const message = events.find((e) => e.update.sessionUpdate === 'agent_message_chunk');
+    expect(message).toBeDefined();
+    const text = ((message?.update as Record<string, unknown>)?.content as Record<string, unknown> | undefined)?.content as
+      | Record<string, unknown>
+      | undefined;
+    expect(text?.text).toBe('Before\nAfter');
+  });
+
+  it('filters inline token counter fragments without stripping legitimate numbers', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-inline' });
+    await manager.start();
+
+    getProcess().emit('notification', 'session/update', {
+      sessionId: 'sess-inline',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Run 3+ back-and-forth prompts in 2026. 14 tokens : here. Version 1.2.3 is OK.',
+          },
+        },
+      },
+    });
+
+    const message = events.find((e) => e.update.sessionUpdate === 'agent_message_chunk');
+    const text = ((message?.update as Record<string, unknown>)?.content as Record<string, unknown> | undefined)?.content as
+      | Record<string, unknown>
+      | undefined;
+    expect(text?.text).toBe('Run 3+ back-and-forth prompts in 2026. here. Version 1.2.3 is OK.');
+  });
+
   it('sanitizes ANSI/backspace/CR sequences inside nested content blocks', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-9' });
@@ -233,6 +286,58 @@ describe('AcpRuntimeManager', () => {
       | Record<string, unknown>
       | undefined;
     expect(text?.text).toBe('applied\nsturn\n slipping');
+  });
+
+  it('preserves standalone numbers when no status artifacts are present', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-standalone' });
+    await manager.start();
+
+    getProcess().emit('notification', 'session/update', {
+      sessionId: 'sess-standalone',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'The answer is 42.\nA small count is 123.\nA year is 2026.\nVersion 1.2.3 works.',
+          },
+        },
+      },
+    });
+
+    const message = events.find((e) => e.update.sessionUpdate === 'agent_message_chunk');
+    const text = ((message?.update as Record<string, unknown>)?.content as Record<string, unknown> | undefined)?.content as
+      | Record<string, unknown>
+      | undefined;
+    expect(text?.text).toBe('The answer is 42.\nA small count is 123.\nA year is 2026.\nVersion 1.2.3 works.');
+  });
+
+  it('removes clustered standalone numbers only alongside other status artifacts', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-clustered' });
+    await manager.start();
+
+    getProcess().emit('notification', 'session/update', {
+      sessionId: 'sess-clustered',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Before\n321:46\n31\n42\n30394\nAfter',
+          },
+        },
+      },
+    });
+
+    const message = events.find((e) => e.update.sessionUpdate === 'agent_message_chunk');
+    const text = ((message?.update as Record<string, unknown>)?.content as Record<string, unknown> | undefined)?.content as
+      | Record<string, unknown>
+      | undefined;
+    expect(text?.text).toBe('Before\nAfter');
   });
 
   it('emits error when initialization fails', async () => {

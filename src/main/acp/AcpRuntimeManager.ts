@@ -10,44 +10,8 @@ import {
 } from '../../shared/acpTypes';
 import type { TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
+import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
-
-// Robust ANSI/control-character/TUI cleanup. The Kimi CLI can leak SGR/cursor
-// fragments, backspace sequences, and stray carriage returns into content blocks
-// (especially tool stdout). Stripping/normalizing them here keeps the renderer
-// from painting trash characters, mid-word fractures, or truncated lines.
-const ANSI_OR_CONTROL =
-  /\u001b\[[\d;]*[A-Za-z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[\d;]*$|\u001b$|[\x00-\x07\x0B-\x0C\x0E-\x1F\x7F]/g;
-
-function stripAnsiAndControls(text: string): string {
-  return text.replace(ANSI_OR_CONTROL, '');
-}
-
-function applyBackspaces(text: string): string {
-  // Process terminal-style backspace characters so "ab\b\bc" becomes "c".
-  const chars: string[] = [];
-  for (const ch of text) {
-    if (ch === '\b') {
-      chars.pop();
-    } else {
-      chars.push(ch);
-    }
-  }
-  return chars.join('');
-}
-
-function normalizeLineEndings(text: string): string {
-  // Convert CRLF to LF and drop lone CRs so rendered blocks don't double-space
-  // or contain carriage-return artifacts.
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '');
-}
-
-function sanitizeContentText(text: string): string {
-  // Order matters: process backspaces on the raw text first so they remove the
-  // characters the terminal would have erased, then strip any remaining ANSI /
-  // control characters and normalize line endings.
-  return normalizeLineEndings(stripAnsiAndControls(applyBackspaces(text)));
-}
 
 export interface AcpRuntimeOptions {
   agentName: string;
@@ -341,7 +305,7 @@ function extractContent(content: unknown): AcpContentBlock | null {
   ) {
     const inner = (content as Record<string, unknown>).content as Record<string, unknown>;
     if (inner.type === 'text') {
-      return { type: 'content', content: { type: 'text', text: sanitizeContentText(String(inner.text ?? '')) } };
+      return { type: 'content', content: { type: 'text', text: sanitizeAcpDisplayText(String(inner.text ?? '')) } };
     }
     if (inner.type === 'image') {
       return {
@@ -358,14 +322,14 @@ function extractContent(content: unknown): AcpContentBlock | null {
 
   // Plain string fallback (legacy or simplified transport).
   if (typeof content === 'string') {
-    return { type: 'content', content: { type: 'text', text: sanitizeContentText(content) } };
+    return { type: 'content', content: { type: 'text', text: sanitizeAcpDisplayText(content) } };
   }
 
   // Flat text object fallback.
   if (typeof content === 'object' && (content as Record<string, unknown>).text !== undefined) {
     return {
       type: 'content',
-      content: { type: 'text', text: sanitizeContentText(String((content as Record<string, unknown>).text)) },
+      content: { type: 'text', text: sanitizeAcpDisplayText(String((content as Record<string, unknown>).text)) },
     };
   }
 

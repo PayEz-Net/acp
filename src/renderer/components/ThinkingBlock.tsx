@@ -15,9 +15,11 @@ interface ThinkingBlockProps {
   defaultExpanded?: boolean;
   /** When true, render the collapsed/expanded content as Markdown. */
   markdown?: boolean;
+  /** Number of non-empty lines to show in the collapsed preview. */
+  previewLines?: number;
 }
 
-const PREVIEW_LINES = 2;
+const DEFAULT_PREVIEW_LINES = 2;
 
 export function ThinkingBlock({
   label = 'Thinking...',
@@ -26,6 +28,7 @@ export function ThinkingBlock({
   compact,
   defaultExpanded = false,
   markdown,
+  previewLines = DEFAULT_PREVIEW_LINES,
 }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
@@ -47,8 +50,9 @@ export function ThinkingBlock({
 
   const allLines = content.split('\n');
   const nonEmptyLines = allLines.filter((l) => l.trim().length > 0);
-  const preview = nonEmptyLines.slice(0, PREVIEW_LINES).join('\n');
-  const hiddenCount = Math.max(0, nonEmptyLines.length - PREVIEW_LINES);
+  const effectivePreviewLines = Math.max(0, previewLines);
+  const preview = nonEmptyLines.slice(0, effectivePreviewLines).join('\n');
+  const hiddenCount = Math.max(0, nonEmptyLines.length - effectivePreviewLines);
 
   return (
     <div className="border-l-2 border-slate-700 pl-2 my-1" data-testid="thinking-block">
@@ -69,7 +73,7 @@ export function ThinkingBlock({
           <span className="text-slate-600 ml-1">({hiddenCount} more lines)</span>
         )}
       </button>
-      {content && content.trim() !== '' && (
+      {content && content.trim() !== '' && (expanded || effectivePreviewLines > 0) && (
         <div
           className={`mt-1 bg-slate-800/40 rounded ${
             compact ? 'text-[11px]' : 'text-xs'

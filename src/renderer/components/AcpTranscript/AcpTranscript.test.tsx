@@ -202,14 +202,17 @@ describe('AssistantTurn', () => {
     document.body.innerHTML = '';
   });
 
-  it('renders thinking block and content', () => {
+  it('renders thinking toggle and answer without duplicating thinking preview', () => {
     const turn = makeTurn({
       thinking: 'I should help.',
       contentText: 'Here is the answer.',
     });
     const { container, root } = render(<AssistantTurn turn={turn} />);
-    expect(container.textContent).toContain('I should help.');
+    expect(container.querySelector('[data-testid="thinking-block"]')).not.toBeNull();
     expect(container.textContent).toContain('Here is the answer.');
+    // When an answer exists, the thinking block is collapsed with no preview so
+    // reasoning does not duplicate the answer prose in the transcript.
+    expect(container.textContent).not.toContain('I should help.');
     cleanup(root, container);
   });
 
@@ -221,12 +224,23 @@ describe('AssistantTurn', () => {
     cleanup(root, container);
   });
 
-  it('renders thinking as main answer when content is empty', () => {
+  it('renders assistant prose with break-words and min-w-0 to avoid mid-word fractures', () => {
+    const turn = makeTurn({ contentText: 'Here is the answer.' });
+    const { container, root } = render(<AssistantTurn turn={turn} />);
+    const prose = container.querySelector('.prose');
+    expect(prose).not.toBeNull();
+    expect(prose?.classList.contains('break-words')).toBe(true);
+    expect(prose?.classList.contains('min-w-0')).toBe(true);
+    cleanup(root, container);
+  });
+
+  it('renders thinking as an expanded block instead of main answer when content is empty', () => {
     const turn = makeTurn({
       thinking: 'I should help.',
       contentText: '',
     });
     const { container, root } = render(<AssistantTurn turn={turn} />);
+    expect(container.querySelector('[data-testid="thinking-block"]')).not.toBeNull();
     expect(container.textContent).toContain('I should help.');
     cleanup(root, container);
   });

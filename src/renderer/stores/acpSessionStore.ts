@@ -42,6 +42,15 @@ function isBlankTextBlock(block: AcpContentBlock): boolean {
   );
 }
 
+function appendTextDedupe(existing: string, delta: string): string {
+  if (!existing) return delta;
+  if (!delta) return existing;
+  // Cumulative/overlapping chunk handling for plain-string streams.
+  if (delta.startsWith(existing)) return delta;
+  if (existing.endsWith(delta)) return existing;
+  return existing + delta;
+}
+
 function mergeContentBlocks(existing: AcpContentBlock[], delta: AcpContentBlock[]): AcpContentBlock[] {
   if (existing.length === 0) return delta.slice();
   const last = existing[existing.length - 1];
@@ -52,9 +61,20 @@ function mergeContentBlocks(existing: AcpContentBlock[], delta: AcpContentBlock[
     last.content.type === 'text' &&
     first.content.type === 'text'
   ) {
+    const prev = last.content.text;
+    const next = first.content.text;
+    // Some ACP providers stream cumulative text (each chunk restarts from the
+    // beginning) or overlapping fragments. Detect and de-duplicate so the
+    // rendered answer never repeats itself.
+    if (next.startsWith(prev)) {
+      return [{ type: 'content', content: { type: 'text', text: next } }, ...delta.slice(1)];
+    }
+    if (prev.endsWith(next)) {
+      return [...existing, ...delta.slice(1)];
+    }
     return [
       ...existing.slice(0, -1),
-      { type: 'content', content: { type: 'text', text: last.content.text + first.content.text } },
+      { type: 'content', content: { type: 'text', text: prev + next } },
       ...delta.slice(1),
     ];
   }
@@ -163,7 +183,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
       return updateActiveTurn(session, (turn) => ({
         ...turn,
         status: 'thinking',
-        thinking: collapseRenderedWhitespace(turn.thinking + thoughtText),
+        thinking: collapseRenderedWhitespace(appendTextDedupe(turn.thinking, thoughtText)),
       }));
     }
 
