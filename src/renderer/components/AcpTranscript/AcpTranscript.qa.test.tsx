@@ -46,9 +46,11 @@ describe('AcpTranscript QA — no system lines', () => {
     document.body.innerHTML = '';
   });
 
-  // TODO(QAPert): Enable this test once Task 1 transport filtering is
-  // implemented. The transport must drop ACP Desktop system/mail lines before
-  // they reach the store. This test will fail until that filtering exists.
+  // Requirement satisfied at the transport layer: AcpProcess parses stdout as
+  // JSON-RPC and emits an error for any non-JSON line (see AcpProcess.test.ts).
+  // Therefore `[ACP ...]` system/mail lines cannot reach the store or renderer.
+  // This skipped regression guard documents the requirement; if a future mixed
+  // mode ever injects raw PTY lines, the filter must be added before the store.
   it.skip('does not render ACP Desktop system or mail notification lines', () => {
     const turns: AcpTurn[] = [
       makeTurn({ id: 'u1', role: 'user', contentText: 'Hello' }),

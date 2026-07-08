@@ -130,7 +130,13 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('hello');
 
     expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({ method: 'session/prompt' }),
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-3',
+          prompt: [{ type: 'text', text: 'hello' }],
+        }),
+      }),
     );
   });
 

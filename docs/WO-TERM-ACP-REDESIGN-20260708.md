@@ -1,7 +1,7 @@
 # Work Order: Terminal Kimi Format — ACP-First Redesign
 
 **WO ID:** WO-TERM-ACP-REDESIGN-20260708  
-**Status:** Open — awaiting owner acceptance  
+**Status:** Open — QAPert QA accepted; awaiting stakeholder (Jon) sign-off  
 **Priority:** High  
 **Owner / Lead:** BAPert  
 **Implementers:** NextPert (primary), NextPert-Scout (support)  
@@ -151,8 +151,8 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - [x] Task 2 complete — turn-based store merged and golden-tested.
 - [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done.
 - [x] Task 4 complete — tool approval UI, footer indicators, deterministic user turns, input history, and chat/terminal visual polish.
-- [ ] Task 5 complete — QAPert signs off.
-- [x] `npm test` passes (297 tests, 1 skipped QA placeholder).
+- [x] Task 5 complete — QAPert signs off.
+- [x] `npm test` passes (299 tests, 1 skipped QA placeholder).
 - [x] `npx tsc --noEmit` clean.
 - [x] `npx tsc --noEmit -p tsconfig.main.json` clean.
 - [x] `npm run build:electron` succeeds.
@@ -168,7 +168,7 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 | Implementer — transport | NextPert-Scout | ✅ | 2026-07-08 |
 | Implementer — store/renderer | NextPert | ✅ (branch skeleton up) | 2026-07-08 |
 | Backend consultant | DotNetPert | ✅ | 2026-07-08 |
-| QA | QAPert | ✅ (conditional) | 2026-07-08 |
+| QA | QAPert | ✅ Accepted | 2026-07-08 |
 | Stakeholder | Jon | ⬜ | |
 
 ---

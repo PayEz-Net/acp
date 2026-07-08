@@ -86,6 +86,7 @@ export class AcpRuntimeManager extends EventEmitter {
       command,
       args,
       cwd: this.options.workDir,
+      env: { NO_COLOR: '1', FORCE_COLOR: '0' },
     });
 
     this.process.on('notification', (method: string, params: unknown, id?: number | string) => {
@@ -114,9 +115,13 @@ export class AcpRuntimeManager extends EventEmitter {
       const initResult = (await this.process.request('initialize', {
         protocolVersion: 1,
         capabilities: this.provider.defaultCapabilities,
+        clientInfo: { name: 'acp-desktop', version: '1.0.0' },
       })) as Record<string, unknown>;
 
-      const sessionResult = (await this.process.request('session/new', { mcpServers: [] })) as Record<string, unknown>;
+      const sessionResult = (await this.process.request('session/new', {
+        mcpServers: [],
+        cwd: this.options.workDir,
+      })) as Record<string, unknown>;
 
       this.sessionId = (sessionResult.sessionId as string) ?? null;
       this.initialized = true;
@@ -148,7 +153,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.process
       .request('session/prompt', {
         sessionId: this.sessionId,
-        contentBlocks: [{ type: 'text', text }],
+        prompt: [{ type: 'text', text }],
       })
       .catch((err) => {
         this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });

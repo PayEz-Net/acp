@@ -85,6 +85,23 @@ describe('AcpProcess', () => {
     expect(listener).toHaveBeenCalledWith('something went wrong\n');
   });
 
+  it('emits an error for non-JSON stdout lines instead of forwarding them', () => {
+    const proc = new AcpProcess({ command: 'kimi', args: ['acp'] });
+    const notificationListener = vi.fn();
+    const errorListener = vi.fn();
+    proc.on('notification', notificationListener);
+    proc.on('error', errorListener);
+    proc.start();
+
+    child.stdout.emit('data', '[ACP system] spawn complete\n');
+    child.stdout.emit('data', '[ACP mail] New message from BAPert\n');
+
+    expect(notificationListener).not.toHaveBeenCalled();
+    expect(errorListener).toHaveBeenCalledTimes(2);
+    expect(errorListener.mock.calls[0][0].message).toContain('Invalid JSON from ACP stdout');
+    expect(errorListener.mock.calls[1][0].message).toContain('Invalid JSON from ACP stdout');
+  });
+
   it('rejects pending requests on process error', async () => {
     const proc = new AcpProcess({ command: 'kimi', args: ['acp'] });
     proc.on('error', () => {}); // swallow the re-emitted error
