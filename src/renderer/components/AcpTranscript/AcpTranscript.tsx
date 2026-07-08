@@ -57,7 +57,7 @@ export function AcpTranscript({
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto p-2 font-terminal" data-testid="acp-transcript">
+    <div className="flex-1 min-h-0 min-w-0 overflow-y-auto p-2 font-terminal" data-testid="acp-transcript">
       {turns.map((turn) =>
         turn.role === 'user' ? (
           <UserTurn key={turn.id} turn={turn} />

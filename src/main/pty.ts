@@ -117,6 +117,37 @@ function getAcpRuntimeByAgent(agentName: string): AcpRuntimeManager | undefined 
   return undefined;
 }
 
+export interface AgentSessionInfo {
+  id: string;
+  agentName: string;
+  projectId?: number;
+  provider: AgentRuntime;
+  kind: 'pty' | 'acp';
+}
+
+/**
+ * Find any live session for an agent, checking both node-pty terminals and
+ * structured ACP runtimes. This prevents duplicate spawns when an agent is
+ * already running in ACP mode but has no PTY entry.
+ */
+export function getAgentSessionByAgent(agentName: string, projectId?: number): AgentSessionInfo | undefined {
+  for (const t of terminals.values()) {
+    if (t.agentName === agentName) {
+      if (projectId == null || t.projectId === projectId) {
+        return { id: t.id, agentName: t.agentName, projectId: t.projectId, provider: t.provider, kind: 'pty' };
+      }
+    }
+  }
+  for (const [id, runtime] of acpRuntimes.entries()) {
+    if (runtime.getAgentName() === agentName) {
+      if (projectId == null || runtime.getProjectId() === projectId) {
+        return { id, agentName: runtime.getAgentName(), projectId: runtime.getProjectId(), provider: runtime.getProvider(), kind: 'acp' };
+      }
+    }
+  }
+  return undefined;
+}
+
 // ESC [ ? 2 0 0 4 h  — DECSET, enable bracketed paste
 const BRACKETED_PASTE_ON = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x34, 0x68]);
 // ESC [ ? 2 0 0 4 l  — DECRST, disable bracketed paste

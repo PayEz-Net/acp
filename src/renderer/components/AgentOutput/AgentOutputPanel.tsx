@@ -4,6 +4,7 @@ import { X, Trash2, Pause, Play, ChevronDown, Terminal } from 'lucide-react';
 import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { CodeChangeCard } from '../Terminal/CodeChangeCard';
 import { providerBadgeClasses, providerLabel, type CodeProvider } from '../../lib/agentProviders';
@@ -25,6 +26,7 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
   const agents = useAppStore((s) => s.agents);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
+  const acpSessions = useAcpSessionStore((s) => s.sessions);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showNewOutput, setShowNewOutput] = useState(false);
@@ -34,15 +36,19 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
   const { filtered, allHiddenByKimi } = useMemo(() => {
     const base = selectedAgent ? lines.filter((l) => l.agent === selectedAgent) : lines;
     // Kimi runs through the ACP transcript in the terminal pane; showing the raw
-    // PTY stream here is just trash characters and redraw noise.
+    // PTY stream here is just trash characters and redraw noise. Hide lines for
+    // any agent that is currently in an active ACP session as well.
     const visible = base.filter((l) => {
       const agent = agents.find((a) => a.name === l.agent);
       const provider = (teamRuntime ?? l.provider ?? agent?.provider) as CodeProvider | undefined;
-      return provider !== 'kimi';
+      if (provider === 'kimi') return false;
+      const acpSession = acpSessions.get(l.agent);
+      if (acpSession?.sessionId || acpSession?.runtimeMode === 'acp') return false;
+      return true;
     });
     const allHiddenByKimi = base.length > 0 && visible.length === 0;
     return { filtered: visible, allHiddenByKimi };
-  }, [lines, selectedAgent, agents, teamRuntime]);
+  }, [lines, selectedAgent, agents, teamRuntime, acpSessions]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,

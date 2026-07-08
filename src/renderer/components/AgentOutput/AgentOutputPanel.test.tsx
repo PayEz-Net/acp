@@ -7,6 +7,7 @@ import { AgentOutputPanel } from './AgentOutputPanel';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -64,6 +65,7 @@ beforeEach(() => {
     activeProject: null,
     currentProjectTeam: [],
   });
+  useAcpSessionStore.setState({ sessions: new Map() });
 });
 
 describe('AgentOutputPanel', () => {
@@ -131,6 +133,26 @@ describe('AgentOutputPanel', () => {
     const { container, root } = render(<AgentOutputPanel isOpen onClose={() => {}} />);
 
     expect(container.textContent).not.toContain('raw PTY trash');
+    expect(container.textContent).toContain('Kimi output is shown in the terminal pane');
+    cleanup(root, container);
+  });
+
+  it('hides lines for agents with an active ACP session even when provider is unset', () => {
+    useAppStore.setState({
+      agents: [{ id: 'a1', name: 'NextPert' } as any],
+    });
+    useAcpSessionStore.setState({
+      sessions: new Map([
+        ['NextPert', { turns: [], activeTurnId: null, runtimeMode: 'acp', sessionId: 's1' } as any],
+      ]),
+    });
+    useAgentOutputStore.setState({
+      lines: [{ id: 'np-pty-1', agent: 'NextPert', line: 'raw PTY/TUI garbage', ts: new Date().toISOString() }],
+    });
+
+    const { container, root } = render(<AgentOutputPanel isOpen onClose={() => {}} />);
+
+    expect(container.textContent).not.toContain('raw PTY/TUI garbage');
     expect(container.textContent).toContain('Kimi output is shown in the terminal pane');
     cleanup(root, container);
   });

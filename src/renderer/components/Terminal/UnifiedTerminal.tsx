@@ -127,9 +127,19 @@ export function UnifiedTerminal({
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agentName));
-  const isAcpMode = effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp';
+  // ACP transcript is authoritative once the session has been initialized
+  // (sessionId assigned by the runtime). Until then, fall back to the PTY/bridge
+  // surface so the pane never shows a stale or mixed stream.
+  const isAcpMode = effectiveProvider === 'kimi' && !!acpSession?.sessionId;
   const sessionKey = isAcpMode ? (acpSession?.sessionId ?? '') : (terminalId ?? '');
   const inputHistory = useInputHistory(agentName, sessionKey || undefined);
+
+  const acpActiveTurn = isAcpMode
+    ? (acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId) ?? null)
+    : null;
+  const acpIsThinkingLive = acpActiveTurn?.status === 'thinking';
+  const footerLineCount = isAcpMode ? (acpSession?.turns.length ?? 0) : lineCount;
+  const footerThinkingCount = isAcpMode ? 0 : thinkingCount;
 
   const computeDimensions = useCallback(() => {
     const container = containerRef.current;
@@ -273,10 +283,11 @@ export function UnifiedTerminal({
   }, [isFocused]);
 
   // Notify the parent when live-thinking state changes so the header status
-  // pill can stay in sync with the footer.
+  // pill can stay in sync with the footer. In ACP mode the authority is the
+  // active turn status, not the PTY line stream.
   useEffect(() => {
-    onThinkingLiveChange?.(isThinkingLive);
-  }, [isThinkingLive, onThinkingLiveChange]);
+    onThinkingLiveChange?.(isAcpMode ? acpIsThinkingLive : isThinkingLive);
+  }, [isAcpMode, acpIsThinkingLive, isThinkingLive, onThinkingLiveChange]);
 
   const getSelectionText = useCallback((): string => {
     const selection = window.getSelection();
@@ -695,7 +706,7 @@ export function UnifiedTerminal({
           onContextMenu={handleContextMenu}
           onKeyDown={handleKeyDown}
           onPaste={handleTerminalPaste}
-          className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-terminal ${
+          className={`h-full w-full overflow-y-auto ${isAcpMode ? 'overflow-x-hidden' : 'overflow-x-auto'} outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-terminal ${
             compact ? 'text-[11px]' : 'text-[13px]'
           } p-2`}
           role="log"
@@ -773,10 +784,10 @@ export function UnifiedTerminal({
           agent={agent}
           provider={effectiveProvider}
           repoPath={repoPath}
-          lineCount={lineCount}
-          thinkingCount={thinkingCount}
+          lineCount={footerLineCount}
+          thinkingCount={footerThinkingCount}
           contextUsage={contextUsage}
-          isThinkingLive={isThinkingLive}
+          isThinkingLive={isAcpMode ? acpIsThinkingLive : isThinkingLive}
         />
       )}
 

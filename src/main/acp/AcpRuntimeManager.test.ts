@@ -208,6 +208,33 @@ describe('AcpRuntimeManager', () => {
     expect(events.some((e) => e.update.sessionUpdate === 'agent_message_chunk')).toBe(true);
   });
 
+  it('sanitizes ANSI/backspace/CR sequences inside nested content blocks', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-9' });
+    await manager.start();
+
+    getProcess().emit('notification', 'session/update', {
+      sessionId: 'sess-9',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: '\u001b[32mapplied\u001b[0m\r\nsame\b\b\bturn\n\u001b[1K slipping',
+          },
+        },
+      },
+    });
+
+    const message = events.find((e) => e.update.sessionUpdate === 'agent_message_chunk');
+    expect(message).toBeDefined();
+    const text = ((message?.update as Record<string, unknown>)?.content as Record<string, unknown> | undefined)?.content as
+      | Record<string, unknown>
+      | undefined;
+    expect(text?.text).toBe('applied\nsturn\n slipping');
+  });
+
   it('emits error when initialization fails', async () => {
     mockState.setResponse('initialize', new Error('initialize failed'));
 

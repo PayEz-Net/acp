@@ -19,7 +19,7 @@
  */
 
 import * as fs from 'fs';
-import { spawnAgent, killTerminal, getTerminalByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed } from './pty';
+import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed } from './pty';
 import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
@@ -263,12 +263,12 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
   const records: SpawnedAgentRecord[] = [];
 
   for (const member of team) {
-    // Skip if a PTY for this agent name already exists IN THIS PROJECT.
-    // The dedup guard is now scoped by (projectId, agentName) so two
+    // Skip if this agent already has a live session (PTY or ACP) in this
+    // project. The dedup guard is scoped by (projectId, agentName) so two
     // projects can each have their own BAPert without collision.
-    const existing = getTerminalByAgent(member.agent_name, projectId);
+    const existing = getAgentSessionByAgent(member.agent_name, projectId);
     if (existing) {
-      console.log(`[SpawnOrch] ${member.agent_name} already has PTY ${existing.id} in project=${projectId}; skipping orchestrator spawn`);
+      console.log(`[SpawnOrch] ${member.agent_name} already has ${existing.kind.toUpperCase()} ${existing.id} in project=${projectId}; skipping orchestrator spawn`);
       continue;
     }
 

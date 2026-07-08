@@ -7,7 +7,7 @@
  */
 
 import http from 'http';
-import { spawnAgent, killTerminal, resizeTerminal, getTerminalByAgent, getActiveTerminals, setOnPtyExit, WorkDirError, RuntimeNotSetError } from './pty';
+import { spawnAgent, killTerminal, resizeTerminal, getAgentSessionByAgent, getActiveTerminals, setOnPtyExit, WorkDirError, RuntimeNotSetError } from './pty';
 import { getLocalSecret } from './api-server';
 import { getSettings } from './store';
 
@@ -146,8 +146,8 @@ export async function startLifecycleServer(): Promise<number | null> {
           sendJson(res, 400, { error: 'agentName required' });
           return;
         }
-        // Check if agent already has a terminal in this project.
-        const existing = getTerminalByAgent(agentName, projectId);
+        // Check if agent already has a live session (PTY or ACP) in this project.
+        const existing = getAgentSessionByAgent(agentName, projectId);
         if (existing) {
           // Reattach-conform (SPEC-team-runtime §3.2). A live terminal on the
           // WRONG provider must NOT be returned stale — that silent reattach
@@ -208,7 +208,7 @@ export async function startLifecycleServer(): Promise<number | null> {
         } else if (agentName) {
           // Kill by agentName — scope to project if provided, otherwise global fallback
           const killProjectId = typeof body.projectId === 'number' ? body.projectId : undefined;
-          const t = getTerminalByAgent(agentName, killProjectId);
+          const t = getAgentSessionByAgent(agentName, killProjectId);
           if (t) {
             killTerminal(t.id);
             sendJson(res, 200, { status: 'killed', terminalId: t.id });

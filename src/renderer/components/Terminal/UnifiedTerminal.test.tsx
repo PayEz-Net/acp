@@ -1013,6 +1013,113 @@ describe('UnifiedTerminal', () => {
       expect(input.value).toBe('');
       cleanup(root, container);
     });
+
+    it('does not write to the PTY when sending input in ACP mode (echo suppression)', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).not.toHaveBeenCalled();
+      cleanup(root, container);
+    });
+
+    it('does not render agent output store lines once the ACP session is initialized', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAgentOutputStore.setState({
+        lines: [
+          { id: 'l1', agent: 'NextPert', terminal_id: 't1', line: 'raw PTY line', ts: new Date().toISOString() },
+        ],
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      expect(container.querySelector('[data-testid="acp-transcript"]')).not.toBeNull();
+      expect(container.textContent).not.toContain('raw PTY line');
+      cleanup(root, container);
+    });
+
+    it('falls back to the PTY surface while the ACP session is not initialized', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAgentOutputStore.setState({
+        lines: [
+          { id: 'l1', agent: 'NextPert', terminal_id: 't1', line: 'raw PTY line', ts: new Date().toISOString() },
+        ],
+      });
+      // Session exists but has no sessionId yet -> not initialized.
+      useAcpSessionStore.setState({
+        sessions: new Map([['NextPert', { turns: [], activeTurnId: null, runtimeMode: 'acp' }]]),
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      expect(container.querySelector('[data-testid="acp-transcript"]')).toBeNull();
+      expect(container.textContent).toContain('raw PTY line');
+      cleanup(root, container);
+    });
   });
 
   it('injects a deterministic user-source line when sending input in PTY mode', () => {

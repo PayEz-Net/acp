@@ -12,14 +12,41 @@ import type { TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
 
-// Minimal ANSI/control-character cleanup. The Kimi CLI can leak SGR/cursor
-// fragments into content blocks during TUI redraws; stripping them here keeps
-// the renderer from painting trash characters into the transcript.
+// Robust ANSI/control-character/TUI cleanup. The Kimi CLI can leak SGR/cursor
+// fragments, backspace sequences, and stray carriage returns into content blocks
+// (especially tool stdout). Stripping/normalizing them here keeps the renderer
+// from painting trash characters, mid-word fractures, or truncated lines.
 const ANSI_OR_CONTROL =
-  /\u001b\[[\d;]*[A-Za-z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[\d;]*$|\u001b$|[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g;
+  /\u001b\[[\d;]*[A-Za-z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[\d;]*$|\u001b$|[\x00-\x07\x0B-\x0C\x0E-\x1F\x7F]/g;
+
+function stripAnsiAndControls(text: string): string {
+  return text.replace(ANSI_OR_CONTROL, '');
+}
+
+function applyBackspaces(text: string): string {
+  // Process terminal-style backspace characters so "ab\b\bc" becomes "c".
+  const chars: string[] = [];
+  for (const ch of text) {
+    if (ch === '\b') {
+      chars.pop();
+    } else {
+      chars.push(ch);
+    }
+  }
+  return chars.join('');
+}
+
+function normalizeLineEndings(text: string): string {
+  // Convert CRLF to LF and drop lone CRs so rendered blocks don't double-space
+  // or contain carriage-return artifacts.
+  return text.replace(/\r\n/g, '\n').replace(/\r/g, '');
+}
 
 function sanitizeContentText(text: string): string {
-  return text.replace(ANSI_OR_CONTROL, '');
+  // Order matters: process backspaces on the raw text first so they remove the
+  // characters the terminal would have erased, then strip any remaining ANSI /
+  // control characters and normalize line endings.
+  return normalizeLineEndings(stripAnsiAndControls(applyBackspaces(text)));
 }
 
 export interface AcpRuntimeOptions {
@@ -86,7 +113,10 @@ export class AcpRuntimeManager extends EventEmitter {
       command,
       args,
       cwd: this.options.workDir,
-      env: { NO_COLOR: '1', FORCE_COLOR: '0' },
+      // Force a non-interactive, colorless stdio environment. NO_COLOR /
+      // FORCE_COLOR strip ANSI escapes; TERM=dumb + CI=true prevent the CLI
+      // from attempting a TUI redraw on a pipe.
+      env: { NO_COLOR: '1', FORCE_COLOR: '0', TERM: 'dumb', CI: 'true' },
     });
 
     this.process.on('notification', (method: string, params: unknown, id?: number | string) => {
@@ -311,7 +341,7 @@ function extractContent(content: unknown): AcpContentBlock | null {
   ) {
     const inner = (content as Record<string, unknown>).content as Record<string, unknown>;
     if (inner.type === 'text') {
-      return { type: 'content', content: { type: 'text', text: String(inner.text ?? '') } };
+      return { type: 'content', content: { type: 'text', text: sanitizeContentText(String(inner.text ?? '')) } };
     }
     if (inner.type === 'image') {
       return {

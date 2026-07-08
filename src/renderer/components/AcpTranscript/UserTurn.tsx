@@ -7,7 +7,7 @@ interface UserTurnProps {
 export function UserTurn({ turn }: UserTurnProps) {
   return (
     <div
-      className="flex flex-col py-0.5 rounded px-1 -mx-1 items-end hover:bg-slate-800/30"
+      className="flex flex-col py-0.5 rounded px-1 items-end hover:bg-slate-800/30"
       data-testid="user-turn"
     >
       <div className="flex items-start gap-2 max-w-[90%] justify-end">
