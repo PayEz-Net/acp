@@ -5,6 +5,7 @@ import { act } from 'react';
 
 import { TerminalPane } from './TerminalPane';
 import { useAppStore } from '../../stores/appStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
 
@@ -31,6 +32,7 @@ beforeEach(() => {
     backendAvailable: true,
   });
   useAgentOutputStore.setState({ lines: [] });
+  useProjectStore.setState({ activeProject: null, currentProjectTeam: [] });
   terminalStreamNormalizer.clear();
 });
 
@@ -71,6 +73,33 @@ function makeAgent(overrides: Partial<ReturnType<typeof useAppStore.getState>['a
 }
 
 describe('TerminalPane', () => {
+  it('shows the team runtime in the header provider badge, ignoring stale agent.provider', () => {
+    useProjectStore.setState({
+      activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+    });
+    useAppStore.setState({
+      agents: [
+        {
+          id: '1',
+          name: 'NextPert',
+          displayName: 'NextPert',
+          workDir: '',
+          status: 'offline',
+          color: '#10b981',
+          position: 'top-left',
+          autoStart: false,
+          provider: 'claude',
+        } as any,
+      ],
+    });
+
+    const agent = makeAgent({ provider: 'claude' });
+    const { container, root } = render(<TerminalPane agent={agent} isFocused={false} onFocus={() => {}} compact />);
+    expect(container.textContent).toContain('kimi');
+    expect(container.textContent).not.toContain('claude');
+    cleanup(root, container);
+  });
+
   it('renders agent display name and offline status', () => {
     const agent = makeAgent();
     const { container, root } = render(
@@ -114,7 +143,7 @@ describe('TerminalPane', () => {
     const agent = makeAgent({ status: 'ready', terminalId: 't-456' });
     useAppStore.setState({ agents: [agent] });
     useAgentOutputStore.setState({
-      lines: [{ agent: 'NextPert', terminal_id: 't-456', line: 'old output', ts: new Date().toISOString() }],
+      lines: [{ id: 'nextpert-1', agent: 'NextPert', terminal_id: 't-456', line: 'old output', ts: new Date().toISOString() }],
     });
 
     vi.mocked(globalThis.fetch).mockResolvedValueOnce({ ok: true, json: async () => ({}) } as Response);

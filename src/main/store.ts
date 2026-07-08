@@ -111,6 +111,21 @@ export function getSettings(): AppSettings {
       }
     }
 
+    // v6→v7 migration — image paste in terminal composer. Existing installs
+    // should opt-in by default; instant-send stays off unless explicitly enabled.
+    if (storedVersion < 7) {
+      const storedEnable = store.get('enableTerminalImagePaste' as keyof AppSettings) as boolean | undefined;
+      if (storedEnable === undefined) {
+        store.set('enableTerminalImagePaste' as keyof AppSettings, DEFAULT_SETTINGS.enableTerminalImagePaste);
+        console.log('[Store] v6→v7 migration set enableTerminalImagePaste=true');
+      }
+      const storedInstant = store.get('instantSendPastedImages' as keyof AppSettings) as boolean | undefined;
+      if (storedInstant === undefined) {
+        store.set('instantSendPastedImages' as keyof AppSettings, DEFAULT_SETTINGS.instantSendPastedImages);
+        console.log('[Store] v6→v7 migration set instantSendPastedImages=false');
+      }
+    }
+
     store.set('settingsVersion' as keyof AppSettings, currentVersion);
   }
 
@@ -154,6 +169,10 @@ export function getSettings(): AppSettings {
     // the welcome modal reappeared every launch ("never goes away").
     hasSeenWelcome: (store.get('hasSeenWelcome' as keyof AppSettings) as boolean | undefined)
       ?? DEFAULT_SETTINGS.hasSeenWelcome ?? false,
+    enableTerminalImagePaste: (store.get('enableTerminalImagePaste' as keyof AppSettings) as boolean | undefined)
+      ?? DEFAULT_SETTINGS.enableTerminalImagePaste,
+    instantSendPastedImages: (store.get('instantSendPastedImages' as keyof AppSettings) as boolean | undefined)
+      ?? DEFAULT_SETTINGS.instantSendPastedImages,
   };
 }
 

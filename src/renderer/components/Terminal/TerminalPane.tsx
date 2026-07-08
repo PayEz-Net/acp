@@ -17,7 +17,10 @@ interface TerminalPaneProps {
 }
 
 export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPaneProps) {
-  const { agents, updateAgentStatus, setAgentTerminalId, backendAvailable } = useAppStore();
+  const agents = useAppStore((s) => s.agents);
+  const updateAgentStatus = useAppStore((s) => s.updateAgentStatus);
+  const setAgentTerminalId = useAppStore((s) => s.setAgentTerminalId);
+  const backendAvailable = useAppStore((s) => s.backendAvailable);
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
   const [isThinkingLive, setIsThinkingLive] = useState(false);
 

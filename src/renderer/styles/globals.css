@@ -27,6 +27,7 @@
   --acp-status-idle: #3B82F6;
   --acp-status-error: #EF4444;
   --acp-status-offline: #6B7280;
+  --font-terminal: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Consolas, monospace;
 }
 
 * {

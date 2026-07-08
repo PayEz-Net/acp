@@ -4,6 +4,7 @@ import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useContractorStore, ActiveContractor, ContractorProfile, ContractMailMessage } from '../../stores/contractorStore';
 import { useAppStore } from '../../stores/appStore';
 import { useAuthStore, AuthFlowState } from '../../stores/authStore';
+import { OverlayPanel } from '../Layout/OverlayPanel';
 
 interface ContractorPanelProps {
   isOpen: boolean;
@@ -29,7 +30,7 @@ export function ContractorPanel({ isOpen, onClose }: ContractorPanelProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="w-80 bg-slate-900 border-l border-slate-700 flex flex-col h-full overflow-hidden">
+    <OverlayPanel isOpen={isOpen} onClose={onClose} width="w-80" className="bg-slate-900 border-slate-700">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
         <div className="flex items-center gap-2">
@@ -87,7 +88,7 @@ export function ContractorPanel({ isOpen, onClose }: ContractorPanelProps) {
           onSelect={setSelectedContractor}
         />
       )}
-    </div>
+    </OverlayPanel>
   );
 }
 

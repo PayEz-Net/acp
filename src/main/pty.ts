@@ -6,9 +6,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as http from 'http';
-import { IPC_CHANNELS, type SpawnFailedPayload } from '../shared/types';
+import { IPC_CHANNELS, type SpawnFailedPayload, type TerminalProvider } from '../shared/types';
 import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
+import { buildImageInputCommand } from './lib/terminalInputAdapters';
+import { writePastedImages, cleanupOldPastedImages, ImagePasteError } from './lib/imagePaste';
 
 interface ManagedPty {
   id: string;
@@ -21,7 +23,7 @@ interface ManagedPty {
   // can compare a live terminal's provider against the requested team
   // runtime and restart-to-conform instead of returning a stale one. This
   // is the field that catches "agent is up, but on the wrong CLI."
-  provider: AgentRuntime;
+  provider: TerminalProvider;
   pty: pty.IPty;
   // Whether Claude Code has enabled bracketed paste mode via ESC[?2004h
   // on this PTY's output stream. Kept as a diagnostic only — we no
@@ -53,7 +55,7 @@ interface ManagedPty {
   writeDraining: boolean;
 }
 
-export type AgentRuntime = 'claude' | 'kimi' | 'codex';
+export type AgentRuntime = TerminalProvider;
 
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'max';
 
@@ -382,6 +384,39 @@ function cleanupBootPromptTmpFile(filepath: string | null): void {
 }
 
 /**
+ * Send a user message with attached images to the active PTY.
+ * Main writes each image to a temp PNG, builds the provider-specific input,
+ * and queues it through the existing paced PTY writer.
+ */
+export async function sendTerminalWithImages(
+  terminalId: string,
+  text: string,
+  images: Array<{ id: string; data: ArrayBuffer }>,
+): Promise<{ success: boolean; error?: string }> {
+  const terminal = terminals.get(terminalId);
+  if (!terminal) {
+    return { success: false, error: 'Terminal not found.' };
+  }
+
+  const supported: TerminalProvider[] = ['claude', 'kimi', 'codex'];
+  if (!supported.includes(terminal.provider)) {
+    return { success: false, error: `Provider ${terminal.provider} does not support image input.` };
+  }
+
+  try {
+    const paths = await writePastedImages(terminal.agentName, images);
+    const command = buildImageInputCommand(terminal.provider, paths, text);
+    queuePtyWrite(terminal, command);
+    return { success: true };
+  } catch (err) {
+    const code = err instanceof ImagePasteError ? err.code : 'TEMP_WRITE_FAILED';
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[PTY] sendTerminalWithImages failed for ${terminalId}:`, err);
+    return { success: false, error: code };
+  }
+}
+
+/**
  * Spawn a PTY for an agent. Returns the terminal UUID.
  * Called by IPC (renderer) or HTTP (lifecycle-server from acp-api) or
  * spawn-orchestrator (Wave C, when lifecycle flips to RUNNING).
@@ -523,6 +558,10 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
 
   console.log(`[PTY] Spawning ${agentName} shell=${shell} cwd=${resolvedWorkDir}`);
 
+  // Best-effort cleanup of stale pasted-image temp files whenever a new
+  // terminal session starts. Only files older than 24 h are removed.
+  cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
+
   const ptyProcess = pty.spawn(shell, [], {
     name: 'xterm-256color',
     cols: 120,
@@ -596,6 +635,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
     cleanupBootPromptTmpFile(managed.mcpConfigTmpPath);
+    // Clean up pasted-image temp files older than 24h on terminal exit.
+    cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
     terminals.delete(id);
     // Report to acp-api via callback
     if (onPtyExit) {

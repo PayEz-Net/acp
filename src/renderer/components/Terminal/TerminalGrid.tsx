@@ -7,7 +7,10 @@ interface TerminalGridProps {
 }
 
 export function TerminalGrid({ agents }: TerminalGridProps) {
-  const { layout, focusAgent, activeAgentId, setActiveAgent } = useAppStore();
+  const layout = useAppStore((s) => s.layout);
+  const focusAgent = useAppStore((s) => s.focusAgent);
+  const activeAgentId = useAppStore((s) => s.activeAgentId);
+  const setActiveAgent = useAppStore((s) => s.setActiveAgent);
 
   // Sort agents by position for grid layout
   const sortedAgents = [...agents].sort((a, b) => {
@@ -23,7 +26,7 @@ export function TerminalGrid({ agents }: TerminalGridProps) {
   if (layout === 'focus-left' || layout === 'focus-right') {
     return (
       <div className={`h-full flex gap-2 ${layout === 'focus-right' ? 'flex-row-reverse' : ''}`}>
-        {/* Focus pane G�� h-full ensures terminal-pane's h-full resolves correctly */}
+        {/* Focus pane — h-full ensures terminal-pane's h-full resolves correctly */}
         <div className="flex-1 min-w-0 h-full max-w-full overflow-hidden min-h-0">
           {focusedAgent && (
             <TerminalPane

@@ -2,9 +2,12 @@ import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAgentOutputStore } from '../stores/agentOutputStore';
-import { terminalStreamNormalizer } from '../lib/terminalStream';
+import { terminalStreamNormalizer, type StreamLine } from '../lib/terminalStream';
+import { perfMark, perfMeasure } from '../lib/perf';
 
 export type VsqlCacheConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+
+const BATCH_WINDOW_MS = 50;
 
 export function useVsqlCacheSse(): {
   connectionState: React.MutableRefObject<VsqlCacheConnectionState>;
@@ -12,6 +15,8 @@ export function useVsqlCacheSse(): {
   const abortRef = useRef<AbortController | null>(null);
   const connectionStateRef = useRef<VsqlCacheConnectionState>('disconnected');
   const lastTsRef = useRef<string | null>(null);
+  const batchRef = useRef<StreamLine[]>([]);
+  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const backendAvailable = useAppStore((s) => s.backendAvailable);
   const projectId = useProjectStore((s) => s.activeProject?.id);
@@ -24,7 +29,31 @@ export function useVsqlCacheSse(): {
       connectionStateRef.current = s;
     };
 
+    const flushBatch = () => {
+      if (batchTimerRef.current) {
+        clearTimeout(batchTimerRef.current);
+        batchTimerRef.current = null;
+      }
+      const batch = batchRef.current;
+      if (batch.length === 0) return;
+      batchRef.current = [];
+      const start = perfMark('vsql-batch-flush', { count: batch.length });
+      useAgentOutputStore.getState().addLines(batch);
+      perfMeasure('vsql-batch-flush', start, { count: batch.length });
+    };
+
+    const scheduleFlush = () => {
+      if (batchTimerRef.current) return;
+      batchTimerRef.current = setTimeout(flushBatch, BATCH_WINDOW_MS);
+    };
+
+    const enqueue = (line: StreamLine) => {
+      batchRef.current.push(line);
+      scheduleFlush();
+    };
+
     if (!backendAvailable) {
+      flushBatch();
       setConn('disconnected');
       return;
     }
@@ -160,10 +189,10 @@ export function useVsqlCacheSse(): {
                 const normalized = streamNormalizer.process(line);
                 const deferred = streamNormalizer.drain();
                 if (normalized) {
-                  useAgentOutputStore.getState().addLine(normalized);
+                  enqueue(normalized);
                 }
                 if (deferred) {
-                  useAgentOutputStore.getState().addLine(deferred);
+                  enqueue(deferred);
                 }
                 if (line.ts && typeof line.ts === 'string') {
                   lastTsRef.current = line.ts;
@@ -177,12 +206,14 @@ export function useVsqlCacheSse(): {
 
         if (!disposed) {
           console.log('[VsqlCacheSse] Stream ended, reconnecting...');
+          flushBatch();
           setConn('reconnecting');
           abortRef.current = new AbortController();
           setTimeout(connect, 2000);
         }
       } catch (err) {
         if (disposed) return;
+        flushBatch();
         retryCount++;
         setConn('reconnecting');
         abortRef.current = new AbortController();
@@ -199,6 +230,7 @@ export function useVsqlCacheSse(): {
     return () => {
       console.log('[VsqlCacheSse] Disconnecting');
       disposed = true;
+      flushBatch();
       abortRef.current?.abort();
       abortRef.current = null;
       setConn('disconnected');

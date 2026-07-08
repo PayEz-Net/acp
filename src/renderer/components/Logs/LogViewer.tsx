@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { X, Pause, Play } from 'lucide-react';
+import { OverlayPanel } from '../Layout/OverlayPanel';
 
 interface LogViewerProps {
   isOpen: boolean;
@@ -47,7 +48,7 @@ export function LogViewer({ isOpen, onClose }: LogViewerProps) {
   });
 
   return (
-    <div className="w-96 bg-acp-surface border-l border-acp-border flex flex-col h-full overflow-hidden">
+    <OverlayPanel isOpen={isOpen} onClose={onClose} width="w-96">
       <div className="flex items-center justify-between px-4 py-3 border-b border-acp-border">
         <span className="text-sm font-semibold text-acp-text-primary">API Logs</span>
         <div className="flex items-center gap-2">
@@ -92,6 +93,6 @@ export function LogViewer({ isOpen, onClose }: LogViewerProps) {
       <div className="px-3 py-2 border-t border-acp-border text-xs text-acp-text-muted">
         {filtered.length} lines {paused && '(paused)'}
       </div>
-    </div>
+    </OverlayPanel>
   );
 }

@@ -1,0 +1,171 @@
+# Work Order: Terminal Kimi Format — ACP-First Redesign
+
+**WO ID:** WO-TERM-ACP-REDESIGN-20260708  
+**Status:** Open — awaiting owner acceptance  
+**Priority:** High  
+**Owner / Lead:** BAPert  
+**Implementers:** NextPert (primary), NextPert-Scout (support)  
+**QA:** QAPert  
+**Stakeholder:** Jon  
+**Backend consultant (as needed):** DotNetPert
+
+---
+
+## 1. Objective
+
+Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven terminal experience for Kimi that matches the native `kimi-code` CLI. Use `kimi acp` (Agent Client Protocol over stdio) as the primary transport and render assistant text, thinking blocks, tool calls, and plans as semantic components.
+
+---
+
+## 2. References
+
+- Approved plan: `docs/TERMINAL_KIMI_FORMAT_PLAN.md`
+- Approved plan file: `C:\Users\jon-local\.kimi\plans\wonder-man-phantom-stranger-fire.md`
+- Phase 0 spike fixture: `E:\repos\acp-desktop\.tmp\kimi-acp-spike-output.json`
+- Previous PRD: `docs/TERMINAL_PROVIDER_UNIFICATION_PRD.md`
+- Native reference: `E:\repos\kimi-code`
+
+---
+
+## 3. Scope
+
+### In scope
+
+- Kimi-only ACP runtime and renderer.
+- Minimal PTY fallback stub for Claude/Codex.
+- Tool approval handling for Kimi ACP sessions.
+- Visual polish to match native Kimi conventions.
+
+### Out of scope
+
+- Claude/Codex ACP modes (future WO).
+- Removing xterm.js (deferred until all providers are on ACP).
+- Backend cache/vsql-cache changes unless explicitly required by fallback.
+
+---
+
+## 4. Task breakdown and owners
+
+### Task 0 — Stabilize working tree
+**Owner:** NextPert  
+**Acceptance:** Current terminal-formatting changes are committed or stashed; a feature branch exists for this WO.
+
+### Task 1 — ACP transport (main process)
+**Owner:** NextPert-Scout  
+**Files:**
+- `src/main/acp/AcpProcess.ts`
+- `src/main/acp/AcpRuntimeManager.ts`
+- `src/main/acp/providerConfigs.ts`
+- `src/main/pty.ts`
+- `src/main/preload.ts`
+
+**Requirements:**
+- Spawn `kimi acp` with stdio pipes.
+- Send `initialize`, `initialized`, `session/new`, `session/prompt`, `session/cancel`.
+- Forward `session/update` notifications to renderer via new `ACP_EVENT` IPC channel.
+- Accept `ACP_PROMPT`, `ACP_CANCEL`, `ACP_SET_MODE`, `ACP_KILL` from renderer.
+- Handle `session/request_permission` requests by auto-approving under yolo settings or surfacing UI.
+- Advertise minimal client capabilities so Kimi uses its own internal tools.
+- Keep PTY fallback path intact for non-ACP agents.
+
+**Acceptance:** A standalone integration test can spawn `kimi acp`, send a prompt, and receive `agent_thought_chunk` / `tool_call` / `end_turn` events.
+
+### Task 2 — Turn-based state store
+**Owner:** NextPert  
+**File:** `src/renderer/stores/acpSessionStore.ts`
+
+**Requirements:**
+- Store per-agent session state as a list of turns, not lines.
+- Merge streaming `agent_thought_chunk` into the current turn’s thinking.
+- Merge streaming `agent_message_chunk` into the current turn’s content.
+- Add/update `tool_call` / `tool_call_update` entries.
+- Track turn status (`thinking`, `tool`, `answering`, `done`, `error`).
+- Finalize turn when `session/prompt` response arrives.
+
+**Acceptance:** Golden tests using the spike fixture produce the expected final turn state.
+
+### Task 3 — Semantic renderer components
+**Owner:** NextPert  
+**Files:** `src/renderer/components/AcpTranscript/*.tsx`
+
+**Components:**
+- `AcpTranscript` — scroll container with tail-follow and "new output" pill.
+- `AssistantTurn` — Markdown prose with `react-markdown`, `remark-gfm`, `rehype-highlight`, Kimi-style `•` bullets and 4-space nested indent.
+- `ThinkingBlock` — collapsible, dim italic, fixed toggle indentation.
+- `ToolCallCard` — Bash/Read/Edit/Agent variants with spinner, status, expandable output/diff.
+- `PlanCard` — plan/todo list rendering.
+- `UserTurn` — user message bubble.
+- `ActivityIndicator` — braille spinner for live thinking/tool activity.
+
+**Requirements:**
+- Feature-flag so only Kimi uses the ACP transcript; Claude/Codex stay on `UnifiedTerminal` fallback.
+- Match native Kimi spacing, indentation, code blocks, diff cards.
+
+**Acceptance:** QAPert compares screenshots to native `kimi-code` CLI and the known regression screenshots.
+
+### Task 4 — Tool approval polish
+**Owner:** NextPert-Scout  
+**Files:** `src/main/acp/AcpRuntimeManager.ts`, renderer approval UI
+
+**Requirements:**
+- Correctly respond to `session/request_permission` with the ACP `selected` outcome shape.
+- Map to ACP Desktop autonomy/permission settings.
+- Add explicit approval UI when auto-approve is off.
+- Add footer activity indicators (model, tokens, status) from ACP events.
+- Bind `Ctrl+C` to `session/cancel` for the active turn.
+
+**Acceptance:** A prompt that triggers a shell command can be approved/rejected and the tool card updates accordingly.
+
+### Task 5 — QA acceptance
+**Owner:** QAPert  
+**Requirements:**
+- Verify no `[ACP ...]` system lines or mail notifications in the ACP transcript.
+- Verify thinking blocks do not fracture.
+- Verify markdown lists, code blocks, diff cards match native Kimi.
+- Verify existing tests pass; new tests cover transport, store, components.
+- Verify `tsc --noEmit` and `vite build` are clean.
+
+**Acceptance:** Sign-off in this WO.
+
+---
+
+## 5. Dependencies
+
+- `kimi` CLI must support `kimi acp` on target environments (validated by Phase 0 spike).
+- ACP Desktop composer input must route to ACP for Kimi and to PTY for others.
+- No new backend cache work expected; DotNetPert is available if that changes.
+
+---
+
+## 6. Definition of done
+
+- [ ] Task 0 complete — feature branch created from clean working tree.
+- [ ] Task 1 complete — ACP transport integrated and tested.
+- [ ] Task 2 complete — turn-based store merged and golden-tested.
+- [ ] Task 3 complete — semantic renderer behind Kimi feature flag.
+- [ ] Task 4 complete — tool approval and activity polish.
+- [ ] Task 5 complete — QAPert signs off.
+- [ ] `npm test` passes (240+ tests).
+- [ ] `npx tsc --noEmit` clean.
+- [ ] `npm run build:electron` succeeds.
+- [ ] Jon signs off.
+
+---
+
+## 7. Sign-off
+
+| Role | Agent | Accepted | Date |
+|---|---|---|---|
+| Lead / Requirements | BAPert | ✅ | 2026-07-08 |
+| Implementer — transport | NextPert-Scout | ⬜ | |
+| Implementer — store/renderer | NextPert | ⬜ | |
+| QA | QAPert | ⬜ | |
+| Stakeholder | Jon | ⬜ | |
+
+---
+
+## 8. Notes
+
+- This WO supersedes ad-hoc terminal formatting patches. No further regex whack-a-mole without lead approval.
+- If `kimi acp` proves unstable during implementation, immediately raise a blocker and fall back to the custom PTY-text-treatment path.
+- Backend cache questions should route to DotNetPert.

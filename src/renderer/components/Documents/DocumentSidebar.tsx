@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { FileText, RefreshCw, X } from 'lucide-react';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useAppStore } from '../../stores/appStore';
+import { OverlayPanel } from '../Layout/OverlayPanel';
 import { DocumentList } from './DocumentList';
 import type { AgentDocument } from '@shared/types';
 
@@ -46,7 +47,7 @@ export function DocumentSidebar({ isOpen, onClose }: DocumentSidebarProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="flex flex-col h-full w-80 bg-slate-900 border-l border-slate-700">
+    <OverlayPanel isOpen={isOpen} onClose={onClose} width="w-80" className="bg-slate-900 border-slate-700">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
         <div className="flex items-center gap-2">
@@ -101,7 +102,7 @@ export function DocumentSidebar({ isOpen, onClose }: DocumentSidebarProps) {
           />
         )}
       </div>
-    </div>
+    </OverlayPanel>
   );
 }
 

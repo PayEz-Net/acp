@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, FileText, LayoutList, ClipboardList, User, FolderOpen, ChevronDown, Zap } from 'lucide-react';
+import { Minus, Square, X, Bot, Grid3X3, Columns, PanelLeft, Mail, Radio, FileText, LayoutList, ClipboardList, User, FolderOpen, ChevronDown, Zap, Settings } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useAuthStore, AuthFlowState } from '../../stores/authStore';
 import { useMailStore } from '../../stores/mailStore';
@@ -30,7 +30,7 @@ export function TitleBar() {
   const { mailboxes } = useMailStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
   // setShowSettings removed — Project Settings (editing) is hidden (WO #47).
-  const { activeProject, setShowPicker } = useProjectStore();
+  const { activeProject, setShowPicker, showSettings, setShowSettings } = useProjectStore();
 
   // Calculate total unread scoped to active project (QAPert L2 landmine fix)
   const totalUnread = (() => {
@@ -230,6 +230,19 @@ export function TitleBar() {
               {totalUnread > 9 ? '9+' : totalUnread}
             </span>
           )}
+        </button>
+
+        {/* Settings toggle */}
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className={`p-2 rounded transition-colors ${
+            showSettings
+              ? 'bg-slate-600 text-white'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+          title="Toggle Settings"
+        >
+          <Settings className="w-4 h-4" />
         </button>
 
         <div className="w-px h-4 bg-slate-700" />

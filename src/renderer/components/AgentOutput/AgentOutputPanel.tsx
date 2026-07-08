@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { X, Trash2, Pause, Play, ChevronDown, Terminal } from 'lucide-react';
-import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { ThinkingBlock } from '../ThinkingBlock';
@@ -12,47 +13,94 @@ interface AgentOutputPanelProps {
   onClose: () => void;
 }
 
-export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
-  const { lines, paused, selectedAgent, setPaused, setSelectedAgent, clear } = useAgentOutputStore();
-  const { agents, settings } = useAppStore();
-  const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
-  const showThinking = settings.showThinking !== false;
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const [showNewOutput, setShowNewOutput] = useState(false);
+const AUTO_SCROLL_THRESHOLD_PX = 40;
 
-  // Auto-scroll to bottom when new lines arrive, unless paused.
+export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
+  const paused = useAgentOutputStore((s) => s.paused);
+  const selectedAgent = useAgentOutputStore((s) => s.selectedAgent);
+  const setPaused = useAgentOutputStore((s) => s.setPaused);
+  const setSelectedAgent = useAgentOutputStore((s) => s.setSelectedAgent);
+  const clear = useAgentOutputStore((s) => s.clear);
+  const lines = useAgentOutputStore((s) => s.lines);
+  const agents = useAppStore((s) => s.agents);
+  const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
+  const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [showNewOutput, setShowNewOutput] = useState(false);
+  const userScrolledRef = useRef(false);
+  const rafScrollRef = useRef<number | null>(null);
+
+  const filtered = useMemo(
+    () => (selectedAgent ? lines.filter((l) => l.agent === selectedAgent) : lines),
+    [lines, selectedAgent],
+  );
+
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 28,
+    measureElement: (el) => el.getBoundingClientRect().height,
+    overscan: 5,
+    getItemKey: (index) => filtered[index]?.id ?? `fallback-${index}`,
+  });
+
+  const totalSize = virtualizer.getTotalSize();
+  const virtualItems = virtualizer.getVirtualItems();
+
+  // Auto-scroll to bottom when new lines arrive, unless paused or user scrolled up.
   useEffect(() => {
     if (!isOpen) return;
     if (paused) {
       setShowNewOutput(true);
       return;
     }
-    const el = scrollRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-    setShowNewOutput(false);
-  }, [lines, isOpen, paused]);
+    if (rafScrollRef.current) cancelAnimationFrame(rafScrollRef.current);
+    rafScrollRef.current = requestAnimationFrame(() => {
+      rafScrollRef.current = null;
+      const el = scrollRef.current;
+      if (!el) return;
+      const nearBottom = userScrolledRef.current
+        ? el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX
+        : true;
+      if (nearBottom) {
+        virtualizer.scrollToIndex(filtered.length - 1, { align: 'end', behavior: 'auto' });
+        setShowNewOutput(false);
+        userScrolledRef.current = false;
+      } else {
+        setShowNewOutput(true);
+      }
+    });
+    return () => {
+      if (rafScrollRef.current) {
+        cancelAnimationFrame(rafScrollRef.current);
+        rafScrollRef.current = null;
+      }
+    };
+  }, [filtered.length, isOpen, paused, virtualizer]);
 
   // Track scroll position to pause/resume automatically.
-  const handleScroll = () => {
+  const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    userScrolledRef.current = true;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
     if (nearBottom && paused) {
       setPaused(false);
       setShowNewOutput(false);
     } else if (!nearBottom && !paused) {
       setPaused(true);
     }
-  };
+  }, [paused, setPaused]);
 
-  const filtered = selectedAgent
-    ? lines.filter((l) => l.agent === selectedAgent)
-    : lines;
+  const agentNames = useMemo(() => Array.from(new Set(lines.map((l) => l.agent))), [lines]);
 
-  const agentNames = Array.from(new Set(lines.map((l) => l.agent)));
+  const resumeFollow = useCallback(() => {
+    setPaused(false);
+    setShowNewOutput(false);
+    userScrolledRef.current = false;
+    virtualizer.scrollToIndex(filtered.length - 1, { align: 'end', behavior: 'auto' });
+  }, [filtered.length, setPaused, virtualizer]);
 
   if (!isOpen) return null;
 
@@ -131,7 +179,7 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-3 space-y-1 text-sm font-mono relative"
+        className="flex-1 overflow-y-auto p-3 text-sm font-mono relative"
       >
         {filtered.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2">
@@ -140,72 +188,102 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
           </div>
         )}
 
-        {filtered.map((line, idx) => {
-          const agent = agents.find((a) => a.name === line.agent);
-          // runtime_choice is the single authority; line.provider/agent.provider may be stale.
-          const provider = (teamRuntime ?? line.provider ?? agent?.provider) as CodeProvider | undefined;
-          // Live thinking placeholders are updated in-place by the store.
-          // Use a stable key so React reconciles the same DOM node instead of
-          // remounting it on every spinner frame.
-          const key = line.thinkingLive
-            ? `${line.agent}-${line.terminal_id ?? 'none'}-thinking`
-            : `${line.ts}-${idx}`;
-          return (
-            <div
-              key={key}
-              className="flex flex-col py-0.5 hover:bg-slate-800/50 rounded px-1 -mx-1"
-            >
-              <div className="flex items-start gap-2">
-                <span
-                  className={`text-[10px] font-semibold uppercase tracking-wide shrink-0 rounded px-1 py-0.5 h-fit ${
-                    provider ? providerBadgeClasses(provider) : 'bg-slate-700 text-slate-300'
-                  }`}
+        {filtered.length > 0 && (
+          <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
+            {virtualItems.map((virtualItem) => {
+              const line = filtered[virtualItem.index];
+              return (
+                <div
+                  key={virtualItem.key}
+                  data-index={virtualItem.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualItem.start}px)`,
+                  }}
                 >
-                  {line.agent}
-                </span>
-                {line.thinkingLive ? (
-                  // Live thinking is shown as a compact inline indicator next to
-                  // the agent badge, matching the terminal-pane footer pill. The
-                  // placeholder line text is not rendered as prose, so it cannot
-                  // wrap or splatter mid-word into the scrollback.
-                  <ThinkingBlock label={line.line || 'Thinking...'} content={line.thinking || ''} live compact />
-                ) : line.codeChange ? (
-                  <div className="flex-1 min-w-0">
-                    <CodeChangeCard codeChange={line.codeChange} compact />
-                  </div>
-                ) : (
-                  <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
-                    {line.line}
-                  </span>
-                )}
-              </div>
-              {showThinking && !line.thinkingLive && line.thinking !== undefined && (
-                <div className="ml-14 mt-1">
-                  <ThinkingBlock label="Thinking" content={line.thinking} compact />
+                  <AgentOutputLineItem line={line} showThinking={showThinking} teamRuntime={teamRuntime} agents={agents} />
                 </div>
-              )}
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* New-output pill */}
       {showNewOutput && paused && (
         <button
-          onClick={() => {
-            setPaused(false);
-            setShowNewOutput(false);
-            const el = scrollRef.current;
-            if (el) {
-              el.scrollTop = el.scrollHeight;
-            }
-          }}
+          onClick={resumeFollow}
           className="absolute bottom-4 right-4 flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg cursor-pointer"
         >
           <ChevronDown className="w-3.5 h-3.5" />
           New output
         </button>
+      )}
+    </div>
+  );
+}
+
+interface AgentOutputLineItemProps {
+  line: AgentOutputLine;
+  showThinking: boolean;
+  teamRuntime: string | null;
+  agents: import('@shared/types').AgentState[];
+}
+
+function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentOutputLineItemProps) {
+  const agent = agents.find((a) => a.name === line.agent);
+  // runtime_choice is the single authority; line.provider/agent.provider may be stale.
+  const provider = (teamRuntime ?? line.provider ?? agent?.provider) as CodeProvider | undefined;
+  const isUser = line.source === 'user';
+  const isInfo = line.source === 'info';
+  return (
+    <div
+      className={`flex flex-col py-0.5 rounded px-1 -mx-1 ${
+        isUser ? 'items-end' : 'items-start'
+      } ${isInfo ? 'opacity-70' : ''} hover:bg-slate-800/50`}
+    >
+      <div className={`flex items-start gap-2 w-full ${isUser ? 'justify-end' : ''}`}>
+        {!isUser && (
+          <span
+            className={`text-[10px] font-semibold uppercase tracking-wide shrink-0 rounded px-1 py-0.5 h-fit ${
+              provider ? providerBadgeClasses(provider) : 'bg-slate-700 text-slate-300'
+            }`}
+          >
+            {line.agent}
+          </span>
+        )}
+        {line.thinkingLive ? (
+          // Live thinking is shown as a compact inline indicator next to
+          // the agent badge, matching the terminal-pane footer pill. The
+          // placeholder line text is not rendered as prose, so it cannot
+          // wrap or splatter mid-word into the scrollback.
+          <ThinkingBlock label={line.line || 'Thinking...'} content={line.thinking || ''} live compact />
+        ) : line.codeChange ? (
+          <div className="flex-1 min-w-0">
+            <CodeChangeCard codeChange={line.codeChange} compact />
+          </div>
+        ) : (
+          <span
+            className={`min-w-0 whitespace-pre-wrap leading-tight rounded px-1.5 py-0.5 overflow-x-auto ${
+              isUser
+                ? 'bg-blue-600/20 text-blue-200'
+                : isInfo
+                  ? 'text-slate-400 italic text-xs'
+                  : 'text-slate-300'
+            }`}
+          >
+            {line.line}
+          </span>
+        )}
+      </div>
+      {showThinking && !line.thinkingLive && line.thinking !== undefined && (
+        <div className={`${isUser ? 'mr-0' : 'ml-14'} mt-1`}>
+          <ThinkingBlock label="Thinking" content={line.thinking} compact />
+        </div>
       )}
     </div>
   );

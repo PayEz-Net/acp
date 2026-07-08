@@ -14,6 +14,8 @@ interface ThinkingBlockProps {
   defaultExpanded?: boolean;
 }
 
+const PREVIEW_LINES = 2;
+
 export function ThinkingBlock({
   label = 'Thinking...',
   content,
@@ -39,6 +41,11 @@ export function ThinkingBlock({
     );
   }
 
+  const allLines = content.split('\n');
+  const nonEmptyLines = allLines.filter((l) => l.trim().length > 0);
+  const preview = nonEmptyLines.slice(0, PREVIEW_LINES).join('\n');
+  const hiddenCount = Math.max(0, nonEmptyLines.length - PREVIEW_LINES);
+
   return (
     <div className="border-l-2 border-slate-700 pl-2 my-1" data-testid="thinking-block">
       <button
@@ -48,16 +55,23 @@ export function ThinkingBlock({
         }`}
         title={expanded ? 'Hide thinking' : 'Show thinking'}
       >
-        {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        {expanded ? (
+          <ChevronDown className="w-3.5 h-3.5" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5" />
+        )}
         <span className="italic">{label}</span>
+        {hiddenCount > 0 && !expanded && (
+          <span className="text-slate-600 ml-1">({hiddenCount} more lines)</span>
+        )}
       </button>
-      {expanded && content && (
+      {content && (
         <pre
-          className={`mt-1 font-mono text-slate-400 italic whitespace-pre-wrap bg-slate-800/40 rounded p-2 ${
+          className={`mt-1 font-terminal text-slate-400 italic whitespace-pre-wrap bg-slate-800/40 rounded p-2 pl-[1.125rem] ${
             compact ? 'text-[11px]' : 'text-xs'
           }`}
         >
-          {content}
+          {expanded ? content : preview}
         </pre>
       )}
     </div>

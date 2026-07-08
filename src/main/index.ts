@@ -1,9 +1,14 @@
+// Load sibling .env before any module reads process.env. This lets the installed
+// app configure secrets (VSQL_CACHE_URL, VIBESQL_CONTAINER_SECRET, etc.) without
+// relying on shell env vars (WO terminal-provider-unification upstream config).
+import './loadEnv';
+
 import { app, BrowserWindow, ipcMain, shell, session, dialog, clipboard } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import net from 'net';
 import { execSync } from 'child_process';
 import path from 'path';
-import { setupPtyHandlers, killAllPty } from './pty';
+import { setupPtyHandlers, killAllPty, sendTerminalWithImages } from './pty';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus } from './acp-api-client';
@@ -15,9 +20,10 @@ import { startSpawnOrchestrator, stopSpawnOrchestrator } from './spawn-orchestra
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
-import { IPC_CHANNELS } from '../shared/types';
+import { IPC_CHANNELS, type TerminalImagePastePayload } from '../shared/types';
 import { colonizeWorkspace } from './colonize';
 import { cloudEndpointsSnapshot } from './env';
+import { buildVsqlCacheAuthHeaders, getVsqlCacheUrl, isVsqlCacheReportingEnabled } from './vsql-cache-client';
 
 // --- Install-time / headless colonization (NSIS customInstall) -------------
 // The installer invokes the just-installed exe headless:
@@ -292,6 +298,19 @@ function setupIpcHandlers() {
   // in main is ungated and always returns the current text.
   ipcMain.handle(IPC_CHANNELS.CLIPBOARD_READ_TEXT, () => clipboard.readText());
 
+  // Trigger the native paste editing command so the context menu can paste
+  // images into the focused composer input exactly like Ctrl+V does.
+  ipcMain.handle(IPC_CHANNELS.TRIGGER_PASTE, () => {
+    mainWindow?.webContents.paste();
+  });
+
+  // Terminal image paste: renderer stages clipboard image bytes; main writes
+  // them to temp PNGs and emits provider-specific PTY input.
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_SEND_WITH_IMAGES, async (_, payload: TerminalImagePastePayload) => {
+    const { terminalId, text, images } = payload;
+    return sendTerminalWithImages(terminalId, text, images);
+  });
+
   // Start OAuth callback server
   if (mainWindow) {
     startOAuthServer(mainWindow);
@@ -337,6 +356,25 @@ function setupIpcHandlers() {
     return getApiLogs();
   });
 
+  // vsql-cache auth/context headers (main-process container secret + user/project context)
+  ipcMain.handle(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, async (_, method: string, path: string) => {
+    if (!isVsqlCacheReportingEnabled()) {
+      // Silently report that vsql-cache is disabled so the renderer can stop
+      // trying to connect instead of retrying and spamming the main-process log.
+      return { disabled: true };
+    }
+
+    try {
+      const headers = await buildVsqlCacheAuthHeaders(method, path);
+      // Include the configured base URL so the renderer honors VSQL_CACHE_URL
+      // instead of using a compiled default (WO terminal-provider-unification).
+      return { url: getVsqlCacheUrl(), ...headers };
+    } catch (e) {
+      console.error('[vsql-cache] auth headers error:', e);
+      return { error: String(e) };
+    }
+  });
+
   // Crash recovery: notify renderer when backend status changes
   setOnBackendStatusChange((available, message) => {
     backendAvailable = available;
@@ -373,6 +411,10 @@ app.whenReady().then(async () => {
   // Startup summary (quiet mode - agents can query logs via API)
   console.log(`[ACP] Platform ready on port ${cbPort || '?'}`);
   console.log(`[ACP] API: ${backendAvailable ? '✓' : '✗'} | Logs: GET /v1/platform/logs`);
+
+  // Clean up pasted-image temp files older than 24h on every boot.
+  const { cleanupOldPastedImages } = await import('./lib/imagePaste');
+  cleanupOldPastedImages().catch((err) => console.warn('[ACP] Pasted-image cleanup failed:', err));
 
   // Wave C lifecycle poller — runs once backend is confirmed up,
   // talks to acp-api which proxies to cloud. Emits project-changed /

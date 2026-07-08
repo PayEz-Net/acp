@@ -5,17 +5,36 @@
  * adapter applied, blanks and spinner frames collapsed) and renders it as a
  * scrollable line log. A single Vercel-style composer at the bottom of the pane
  * is the primary chat/input control.
+ *
+ * Performance notes:
+ * - The visible line list is virtualized with @tanstack/react-virtual and
+ *   dynamic row-height measurement so a 1,000-line scrollback only creates DOM
+ *   nodes for the viewport plus overscan.
+ * - Footer metadata (line count, thinking count, live-thinking state) is
+ *   computed from a debounced snapshot so bursts of PTY output do not recompute
+ *   derived state every frame.
+ * - Auto-scroll uses requestAnimationFrame and only fires when the user is
+ *   already near the bottom.
+ * - Plain-text paste uses the browser's native `paste` event to avoid a
+ *   blocking main-process clipboard round-trip.
  */
 
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { ChevronDown, Send } from 'lucide-react';
-import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useEffect, useRef, useState, useCallback, useMemo, useId } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+
+import { ChevronDown, Send, X } from 'lucide-react';
+import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOutputStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { TerminalFooter } from './TerminalFooter';
 import { CodeChangeCard } from './CodeChangeCard';
+import { terminalStreamNormalizer } from '../../lib/terminalStream';
+import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImages';
+import { CODE_PROVIDERS } from '../../lib/agentProviders';
+import { perfMark, perfMeasure } from '../../lib/perf';
+import { trackEvent } from '../../lib/telemetry';
 
 export interface UnifiedTerminalProps {
   /** Agent whose output stream to render. */
@@ -38,6 +57,8 @@ export const MIN_COLS = 10;
 export const MIN_ROWS = 4;
 
 const SAMPLE_CHARS = 'MMMMMMMMMM';
+const AUTO_SCROLL_THRESHOLD_PX = 40;
+const FOOTER_DEBOUNCE_MS = 100;
 
 export function UnifiedTerminal({
   agentName: agentNameProp,
@@ -50,50 +71,81 @@ export function UnifiedTerminal({
 }: UnifiedTerminalProps) {
   const agent = agentProp ?? null;
   const agentName = agent?.name ?? agentNameProp ?? '';
-  const lines = useAgentOutputStore((s) => s.lines);
+  // Narrow selector: only subscribe to lines for this agent.
+  const allLines = useAgentOutputStore((s) => s.lines);
+  const filteredLines = useMemo(
+    () => allLines.filter((l) => l.agent === agentName),
+    [allLines, agentName],
+  );
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
-  const filteredLines = useMemo(() => lines.filter((l) => l.agent === agentName), [lines, agentName]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const terminalIdRef = useRef(terminalId);
+  const userScrolledRef = useRef(false);
+  const rafScrollRef = useRef<number | null>(null);
   terminalIdRef.current = terminalId;
 
   const [paused, setPaused] = useState(false);
   const [showNewOutput, setShowNewOutput] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [pendingInstantSend, setPendingInstantSend] = useState(false);
+  const errorId = useId();
 
-  // Per-session output stats for the footer.
-  const lineCount = filteredLines.length;
-  const thinkingCount = filteredLines.filter((l) => l.thinking && !l.thinkingLive).length;
-  const isThinkingLive = filteredLines.length > 0 && !!filteredLines[filteredLines.length - 1].thinkingLive;
+  // Debounced footer metadata so PTY bursts don't recompute stats every frame.
+  // Initialize synchronously from the current lines so first render is correct.
+  const computeStats = useCallback((lines: AgentOutputLine[]) => {
+    const lineCount = lines.length;
+    const thinkingCount = lines.filter((l) => l.thinking && !l.thinkingLive).length;
+    const isThinkingLive = lines.length > 0 && !!lines[lines.length - 1].thinkingLive;
+    return { lineCount, thinkingCount, isThinkingLive };
+  }, []);
+
+  const [debouncedStats, setDebouncedStats] = useState(() => computeStats(filteredLines));
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedStats(computeStats(filteredLines));
+    }, FOOTER_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [filteredLines, computeStats]);
+
+  const { lineCount, thinkingCount, isThinkingLive } = debouncedStats;
   const activeProject = useProjectStore((s) => s.activeProject);
   const repoPath = activeProject?.repo_path ?? '';
   // runtime_choice is the single authority for the team runtime; agent.provider
   // may be stale from the legacy agentProvider field.
   const effectiveProvider = activeProject?.runtime_choice ?? agent?.provider ?? null;
+  const instantSendPastedImages = useAppStore((s) => s.settings.instantSendPastedImages) === true;
+  const enableTerminalImagePaste = useAppStore((s) => s.settings.enableTerminalImagePaste) !== false;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
 
   const computeDimensions = useCallback(() => {
     const container = containerRef.current;
     const measure = measureRef.current;
-    if (!container || !measure) return { cols: MIN_COLS, rows: MIN_ROWS };
+    const scroll = scrollRef.current;
+    if (!container || !measure || !scroll) return { cols: MIN_COLS, rows: MIN_ROWS };
 
     const rect = measure.getBoundingClientRect();
     const charWidth = rect.width / SAMPLE_CHARS.length;
     const lineHeight = rect.height;
     if (charWidth <= 0 || lineHeight <= 0) return { cols: MIN_COLS, rows: MIN_ROWS };
 
-    const style = window.getComputedStyle(container);
+    // Measure the scroll surface (the actual text box), not the outer host.
+    // clientWidth includes padding but excludes the scrollbar; subtract the
+    // padding to get the content box the PTY should format for. This keeps the
+    // reported cols/rows in sync with where the DOM will wrap, avoiding the
+    // "resize is hard" mismatch where the CLI emitted more cols than fit.
+    const style = window.getComputedStyle(scroll);
     const paddingHor = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
     const paddingVer = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
 
-    const availableWidth = Math.max(0, container.clientWidth - paddingHor);
-    const availableHeight = Math.max(0, container.clientHeight - paddingVer);
+    const availableWidth = Math.max(0, scroll.clientWidth - paddingHor);
+    const availableHeight = Math.max(0, scroll.clientHeight - paddingVer);
 
     const cols = Math.max(MIN_COLS, Math.floor(availableWidth / charWidth));
     const rows = Math.max(MIN_ROWS, Math.floor(availableHeight / lineHeight));
@@ -144,24 +196,60 @@ export function UnifiedTerminal({
     }
   }, [terminalId, reportDimensions]);
 
-  // Auto-scroll to bottom when new lines arrive, unless paused.
+  // Virtualize the line list. Dynamic row heights handle wrapped lines.
+  const virtualizer = useVirtualizer({
+    count: filteredLines.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 24,
+    measureElement: (el) => el.getBoundingClientRect().height,
+    overscan: 5,
+    getItemKey: (index) => filteredLines[index]?.id ?? `fallback-${index}`,
+  });
+
+  const totalSize = virtualizer.getTotalSize();
+  const virtualItems = virtualizer.getVirtualItems();
+
+  // Determine whether the user is currently near the bottom.
+  const isNearBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
+  }, []);
+
+  // Auto-scroll to bottom when new lines arrive, unless paused or user scrolled up.
   useEffect(() => {
     if (paused) {
       setShowNewOutput(true);
       return;
     }
-    const el = scrollRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-    setShowNewOutput(false);
-  }, [filteredLines, paused]);
+    if (rafScrollRef.current) cancelAnimationFrame(rafScrollRef.current);
+    rafScrollRef.current = requestAnimationFrame(() => {
+      rafScrollRef.current = null;
+      const el = scrollRef.current;
+      if (!el) return;
+      const nearBottom = userScrolledRef.current ? isNearBottom() : true;
+      if (nearBottom) {
+        virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
+        setShowNewOutput(false);
+        userScrolledRef.current = false;
+      } else {
+        setShowNewOutput(true);
+      }
+    });
+    return () => {
+      if (rafScrollRef.current) {
+        cancelAnimationFrame(rafScrollRef.current);
+        rafScrollRef.current = null;
+      }
+    };
+  }, [filteredLines.length, paused, virtualizer, isNearBottom]);
 
   // Track scroll position to pause/resume automatically.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    userScrolledRef.current = true;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
     if (nearBottom && paused) {
       setPaused(false);
       setShowNewOutput(false);
@@ -196,36 +284,68 @@ export function UnifiedTerminal({
     }
   }, [getSelectionText]);
 
-  const handlePaste = useCallback(async () => {
+  const writePastedText = useCallback(async (text: string) => {
+    const tid = terminalIdRef.current;
+    if (!tid || !text) return;
+    const start = perfMark('terminal-paste');
+    window.electronAPI.writeTerminal(tid, text);
+    perfMeasure('terminal-paste', start, { length: text.length });
+  }, []);
+
+  // Native paste path for the terminal surface — avoids the main-process
+  // clipboard round-trip on the critical input path.
+  const handleTerminalPaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const tid = terminalIdRef.current;
+      if (!tid) return;
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (text) {
+        e.preventDefault();
+        writePastedText(text);
+      }
+    },
+    [writePastedText],
+  );
+
+  // Fallback paste path used by the context-menu handler.
+  const handlePasteFallback = useCallback(async () => {
     const tid = terminalIdRef.current;
     if (!tid) return;
     try {
       const text = await window.electronAPI.readClipboardText();
       if (text) {
-        window.electronAPI.writeTerminal(tid, text);
+        writePastedText(text);
       }
     } catch (err) {
-      console.warn(`[UnifiedTerminal ${agentName}] paste failed:`, err);
+      console.warn(`[UnifiedTerminal ${agentName}] paste fallback failed:`, err);
     }
-  }, [agentName]);
+  }, [agentName, writePastedText]);
 
-  const insertClipboardIntoInput = useCallback(async (input: HTMLInputElement) => {
+  const handleContextMenuPaste = useCallback(async () => {
+    // Prefer the native paste path so images from the clipboard land in the
+    // composer input and are staged exactly like Ctrl+V. Focus the input first
+    // so webContents.paste() targets it.
+    inputRef.current?.focus();
     try {
-      const text = await window.electronAPI.readClipboardText();
-      if (!text) return;
-      const start = input.selectionStart ?? input.value.length;
-      const end = input.selectionEnd ?? input.value.length;
-      const newValue = input.value.slice(0, start) + text + input.value.slice(end);
-      input.value = newValue;
-      const newCursor = start + text.length;
-      requestAnimationFrame(() => {
-        input.setSelectionRange(newCursor, newCursor);
-        input.focus();
-      });
+      await window.electronAPI.triggerPaste();
     } catch (err) {
-      console.warn(`[UnifiedTerminal ${agentName}] input paste failed:`, err);
+      console.warn(`[UnifiedTerminal ${agentName}] context-menu paste failed:`, err);
+      // Fallback for plain text: read the OS clipboard and write it to the PTY.
+      await handlePasteFallback();
     }
-  }, [agentName]);
+  }, [agentName, handlePasteFallback]);
+
+  const insertTextAtCursor = useCallback((input: HTMLInputElement, text: string) => {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    const newValue = input.value.slice(0, start) + text + input.value.slice(end);
+    input.value = newValue;
+    const newCursor = start + text.length;
+    requestAnimationFrame(() => {
+      input.setSelectionRange(newCursor, newCursor);
+      input.focus();
+    });
+  }, []);
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -236,7 +356,7 @@ export function UnifiedTerminal({
         items.push({ label: 'Copy', action: handleCopy });
       }
       if (terminalIdRef.current) {
-        items.push({ label: 'Paste', action: handlePaste });
+        items.push({ label: 'Paste', action: handleContextMenuPaste });
       }
       if (items.length === 0) return;
 
@@ -262,7 +382,7 @@ export function UnifiedTerminal({
         }, { once: true });
       });
     },
-    [handleCopy, handlePaste, getSelectionText],
+    [handleCopy, handleContextMenuPaste, getSelectionText],
   );
 
   const handleKeyDown = useCallback(
@@ -283,12 +403,7 @@ export function UnifiedTerminal({
         return;
       }
 
-      // Ctrl+V: paste from clipboard.
-      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        handlePaste();
-        return;
-      }
+      // Ctrl+V is now handled by the native paste event on the scroll surface.
 
       // Forward a few useful control sequences.
       if (e.key.length > 1) {
@@ -314,18 +429,78 @@ export function UnifiedTerminal({
         window.electronAPI.writeTerminal(tid, e.key);
       }
     },
-    [getSelectionText, handlePaste, handleCopy],
+    [getSelectionText, handleCopy],
   );
+
+  const { images: stagedImages, error: imageError, addImageFromFile, removeImage, clearImages } = useTerminalImages();
+
+  const canSendImages = Boolean(effectiveProvider && (CODE_PROVIDERS as string[]).includes(effectiveProvider));
 
   const sendInputLine = useCallback(() => {
     const tid = terminalIdRef.current;
     const input = inputRef.current;
     if (!tid || !input) return;
     const value = input.value;
+    setSendError(null);
+
+    if (stagedImages.length > 0) {
+      if (!canSendImages) {
+        setSendError('Image input is not supported for this terminal provider.');
+        trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'PROVIDER_NOT_SUPPORTED' });
+        return;
+      }
+      terminalStreamNormalizer.recordUserInput(tid, value);
+      const imagesToSend = stagedImages.map((img) => ({
+        id: img.id,
+        name: img.name,
+        type: img.type,
+        data: img.data,
+      }));
+      const totalSizeBytes = stagedImages.reduce((sum, img) => sum + img.size, 0);
+      window.electronAPI
+        .sendTerminalWithImages({
+          terminalId: tid,
+          text: value,
+          images: imagesToSend,
+        })
+        .then((result) => {
+          if (result.success) {
+            input.value = '';
+            clearImages();
+            trackEvent({
+              event: 'terminal_image_paste_sent',
+              provider: effectiveProvider!,
+              imageCount: imagesToSend.length,
+              totalSizeBytes,
+            });
+          } else {
+            setSendError(result.error ?? 'Failed to send images.');
+            trackEvent({ event: 'terminal_image_paste_failed', errorCode: result.error ?? 'UNKNOWN' });
+          }
+        })
+        .catch(() => {
+          setSendError('Failed to send images.');
+          trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'IPC_ERROR' });
+        });
+      return;
+    }
+
     if (!value) return;
+    terminalStreamNormalizer.recordUserInput(tid, value);
     window.electronAPI.writeTerminal(tid, value + '\r');
     input.value = '';
-  }, []);
+  }, [stagedImages, canSendImages, clearImages, effectiveProvider]);
+
+  // Phase 2 instant-send: once images are staged and the composer is still
+  // empty, send the message automatically.
+  useEffect(() => {
+    if (!pendingInstantSend) return;
+    setPendingInstantSend(false);
+    const input = inputRef.current;
+    if (!input || input.value !== '') return;
+    if (stagedImages.length === 0) return;
+    sendInputLine();
+  }, [pendingInstantSend, stagedImages, sendInputLine]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -340,7 +515,12 @@ export function UnifiedTerminal({
 
       if (e.key === 'Escape') {
         e.preventDefault();
-        window.electronAPI.writeTerminal(tid, '\u001b');
+        if (stagedImages.length > 0) {
+          clearImages();
+          setSendError(null);
+        } else {
+          window.electronAPI.writeTerminal(tid, '\u001b');
+        }
         return;
       }
 
@@ -361,14 +541,63 @@ export function UnifiedTerminal({
         return;
       }
 
-      // Ctrl+V: paste into the composer input at the cursor.
-      if (e.key.toLowerCase() === 'v' && (e.ctrlKey || e.metaKey)) {
+    },
+    [sendInputLine, stagedImages, clearImages],
+  );
+
+  const handleInputPaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLInputElement>) => {
+      if (!enableTerminalImagePaste) return;
+      const input = e.currentTarget;
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const files = Array.from(e.clipboardData?.files ?? []);
+      let imageHandled = false;
+      let textHandled = false;
+      const composerWasEmpty = input.value === '';
+
+      // Prefer the files list (standard API) and fall back to items for
+      // environments where only items are populated (e.g. some jsdom setups).
+      if (files.length > 0) {
+        for (const file of files) {
+          if (file.type.startsWith('image/')) {
+            imageHandled = true;
+            await addImageFromFile(file);
+          }
+        }
+      } else {
+        for (const item of items) {
+          if (item.kind === 'file' && item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) {
+              imageHandled = true;
+              await addImageFromFile(file);
+            }
+          }
+        }
+      }
+
+      // Text can be provided as a string item even when files are present.
+      for (const item of items) {
+        if (item.kind === 'string' && item.type === 'text/plain') {
+          textHandled = true;
+          item.getAsString((text) => {
+            insertTextAtCursor(input, text);
+          });
+        }
+      }
+
+      if (imageHandled || textHandled) {
         e.preventDefault();
-        insertClipboardIntoInput(e.currentTarget);
-        return;
+      }
+
+      // Phase 2 instant-send: only when the composer was empty, no text was
+      // pasted, and the input is still empty after staging images. Mixed
+      // clipboards always wait for Enter so the user can add context.
+      if (composerWasEmpty && instantSendPastedImages && !textHandled && input.value === '') {
+        setPendingInstantSend(true);
       }
     },
-    [sendInputLine, insertClipboardIntoInput],
+    [addImageFromFile, insertTextAtCursor, instantSendPastedImages, enableTerminalImagePaste],
   );
 
   const handleClick = useCallback(() => {
@@ -383,11 +612,9 @@ export function UnifiedTerminal({
   const resumeFollow = useCallback(() => {
     setPaused(false);
     setShowNewOutput(false);
-    const el = scrollRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, []);
+    userScrolledRef.current = false;
+    virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
+  }, [filteredLines.length, virtualizer]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -402,8 +629,8 @@ export function UnifiedTerminal({
           ref={measureRef}
           data-testid="terminal-measure"
           aria-hidden="true"
-          className={`absolute -left-[9999px] top-0 font-mono whitespace-pre pointer-events-none select-none ${
-            compact ? 'text-[11px] leading-tight' : 'text-[13px] leading-tight'
+          className={`absolute -left-[9999px] top-0 font-terminal whitespace-pre pointer-events-none select-none ${
+            compact ? 'text-[11px] leading-normal' : 'text-[13px] leading-normal'
           }`}
         >
           {SAMPLE_CHARS}
@@ -414,9 +641,10 @@ export function UnifiedTerminal({
           onScroll={handleScroll}
           onContextMenu={handleContextMenu}
           onKeyDown={handleKeyDown}
-          className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
+          onPaste={handleTerminalPaste}
+          className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-terminal ${
             compact ? 'text-[11px]' : 'text-[13px]'
-          } p-2 space-y-0.5`}
+          } p-2`}
           role="log"
           aria-live="polite"
           aria-label={`Terminal output for ${agentName}`}
@@ -428,44 +656,33 @@ export function UnifiedTerminal({
             </div>
           )}
 
-          {filteredLines.map((line, idx) => {
-            // Live thinking placeholders are updated in-place by the store and
-            // surfaced as a single-line indicator in the footer. They do not
-            // render as repeated blocks inside the stream.
-            if (line.thinkingLive) {
-              return null;
-            }
-            if (line.codeChange) {
-              return (
-                <div key={`${line.ts}-${idx}`} className="px-1 -mx-1">
-                  <CodeChangeCard codeChange={line.codeChange} compact={compact} />
-                </div>
-              );
-            }
-            return (
-              <div
-                key={`${line.ts}-${idx}`}
-                className="flex flex-col py-0.5 hover:bg-slate-800/30 rounded px-1 -mx-1"
-              >
-                <div className="flex items-start gap-2">
-                  <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
-                    {line.line}
-                  </span>
-                </div>
-                {showThinking && line.thinking && (
-                  <div className="ml-2 mt-0.5">
-                    <ThinkingBlock
-                      label="Thinking…"
-                      content={line.thinking}
-                      live={false}
+          {filteredLines.length > 0 && (
+            <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
+              {virtualItems.map((virtualItem) => {
+                const line = filteredLines[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.key}
+                    data-index={virtualItem.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <TerminalLine
+                      line={line}
                       compact={compact}
+                      showThinking={showThinking}
                     />
                   </div>
-                )}
-              </div>
-            );
-          })}
-          <div ref={bottomRef} />
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {showNewOutput && paused && (
@@ -499,22 +716,62 @@ export function UnifiedTerminal({
       )}
 
       {/* Vercel-style composer — single chat input for the pane */}
-      <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2">
+      <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2 space-y-2">
+        {/* Image preview strip */}
+        {stagedImages.length > 0 && (
+          <div
+            className="flex gap-2 overflow-x-auto pb-1"
+            data-testid="terminal-image-previews"
+            role="list"
+            aria-label={`${stagedImages.length} pasted image${stagedImages.length === 1 ? '' : 's'}`}
+          >
+            {stagedImages.map((img, idx) => (
+              <ImagePreviewChip
+                key={img.id}
+                image={img}
+                index={idx}
+                onRemove={removeImage}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Validation / send errors */}
+        {(imageError || sendError) && (
+          <div
+            id={errorId}
+            className="text-xs text-red-400 px-1"
+            data-testid="terminal-image-error"
+          >
+            {imageError ?? sendError}
+          </div>
+        )}
+
+        {/* Unsupported provider notice */}
+        {terminalId && stagedImages.length > 0 && !canSendImages && (
+          <div className="text-xs text-amber-400 px-1" data-testid="terminal-provider-mismatch">
+            Image input requires Claude Code, Kimi CLI, or Codex CLI.
+          </div>
+        )}
+
         <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-2 border border-slate-700/50 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/30 transition-all">
           <input
             ref={inputRef}
             type="text"
             defaultValue=""
             onKeyDown={handleInputKeyDown}
+            onPaste={handleInputPaste}
             onFocus={onFocus}
             disabled={!terminalId}
             placeholder={terminalId ? `Message ${agentName}…` : 'Start the agent to type…'}
             className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid="terminal-input"
+            aria-label="Terminal message input"
+            aria-describedby={imageError || sendError ? errorId : undefined}
           />
           <button
             onClick={sendInputLine}
-            disabled={!terminalId}
+            disabled={!terminalId || (stagedImages.length > 0 && !canSendImages)}
             className="p-1.5 rounded-full text-slate-400 hover:text-emerald-400 hover:bg-slate-700/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Send"
             data-testid="terminal-send"
@@ -525,4 +782,109 @@ export function UnifiedTerminal({
       </div>
     </div>
   );
+}
+
+interface TerminalLineProps {
+  line: AgentOutputLine;
+  compact?: boolean;
+  showThinking: boolean;
+}
+
+const LIST_MARKER = /^(\s*)(?:[•\-*]|\d{1,2}\.)\s/;
+
+function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
+  // Live thinking placeholders are updated in-place by the store and
+  // surfaced as a single-line indicator in the footer. They do not render as
+  // repeated blocks inside the stream.
+  if (line.thinkingLive) {
+    return null;
+  }
+  if (line.codeChange) {
+    return (
+      <div className="px-1 -mx-1 py-0.5">
+        <CodeChangeCard codeChange={line.codeChange} compact={compact} />
+      </div>
+    );
+  }
+  const isUser = line.source === 'user';
+  const isInfo = line.source === 'info';
+  const isListItem = LIST_MARKER.test(line.line);
+
+  if (isUser) {
+    return (
+      <div className="flex flex-col py-0.5 rounded px-1 -mx-1 items-end hover:bg-slate-800/30">
+        <div className="flex items-start gap-2 max-w-[90%] justify-end">
+          <span className="min-w-0 whitespace-pre-wrap leading-normal rounded px-1.5 py-0.5 overflow-x-auto font-terminal bg-blue-600/20 text-blue-200">
+            {line.line}
+          </span>
+        </div>
+        {showThinking && line.thinking && (
+          <div className="mr-0 mt-0.5">
+            <ThinkingBlock label="Thinking…" content={line.thinking} live={false} compact={compact} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`flex flex-col py-0.5 px-1 -mx-1 ${
+        isInfo ? 'opacity-70' : ''
+      } hover:bg-slate-800/30`}
+    >
+      <span
+        className={`min-w-0 whitespace-pre-wrap leading-normal font-terminal overflow-x-auto ${
+          isInfo
+            ? 'text-slate-400 italic text-xs'
+            : isListItem
+              ? 'text-slate-300 pl-1'
+              : 'text-slate-300'
+        }`}
+      >
+        {line.line}
+      </span>
+      {showThinking && line.thinking && (
+        <div className="ml-2 mt-0.5">
+          <ThinkingBlock label="Thinking…" content={line.thinking} live={false} compact={compact} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ImagePreviewChipProps {
+  image: StagedImage;
+  index: number;
+  onRemove: (id: string) => void;
+}
+
+function ImagePreviewChip({ image, index, onRemove }: ImagePreviewChipProps) {
+  return (
+    <div className="relative shrink-0 group rounded-lg border border-slate-700 bg-slate-800 overflow-hidden" role="listitem">
+      <img
+        src={image.previewUrl}
+        alt={`Pasted image ${index + 1}`}
+        className="w-16 h-16 object-cover"
+      />
+      <div className="absolute inset-x-0 bottom-0 bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-slate-300 truncate">
+        {image.width}×{image.height} · {formatBytes(image.size)}
+      </div>
+      <button
+        type="button"
+        onClick={() => onRemove(image.id)}
+        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-slate-900/80 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+        aria-label={`Remove pasted image ${image.name || index + 1}`}
+        title="Remove"
+      >
+        <X className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

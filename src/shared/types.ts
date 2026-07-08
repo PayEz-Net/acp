@@ -31,6 +31,9 @@ export interface TerminalData {
 // App layout modes
 export type LayoutMode = 'grid' | 'focus-left' | 'focus-right' | 'tabs';
 
+// Terminal provider runtimes (single authority for PTY image input support)
+export type TerminalProvider = 'claude' | 'kimi' | 'codex';
+
 // Mail message from Vibe SQL
 export interface MailMessage {
   message_id: number;
@@ -315,6 +318,10 @@ export interface AppSettings {
   showSkillChips?: boolean;
   // Show thinking blocks in terminal output (default ON)
   showThinking?: boolean;
+  // Send pasted images immediately when the composer text is empty (default OFF)
+  instantSendPastedImages: boolean;
+  // Feature flag to enable image paste in terminal composer (default ON)
+  enableTerminalImagePaste: boolean;
 }
 
 // IPC channel names
@@ -430,6 +437,11 @@ export const IPC_CHANNELS = {
   // module has no such gate. Used by the terminal paste path.
   CLIPBOARD_READ_TEXT: 'clipboard:read-text',
 
+  // Trigger the native paste editing command on the focused element.
+  // Used by the terminal surface context menu so image paste lands in
+  // the composer the same way Ctrl+V does.
+  TRIGGER_PASTE: 'clipboard:trigger-paste',
+
   // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5). Renderer →
   // main: does this `repo_path` resolve to a real directory ON THIS MACHINE?
   // Reuses pty.ts resolveWorkDir (the single workspace-root authority) so the
@@ -439,6 +451,10 @@ export const IPC_CHANNELS = {
   // inline "Save & open" re-validates the user's typed path through this same
   // channel BEFORE persisting (validate-before-save, never write a 2nd bad path).
   WORKDIR_VALIDATE: 'workdir:validate',
+
+  // Terminal image paste (renderer → main). The renderer stages clipboard image
+  // bytes; main writes them to temp PNGs and emits provider-specific PTY input.
+  TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event
@@ -457,6 +473,19 @@ export interface SpawnFailedPayload {
   /** Present for RUNTIME_NOT_SET (the project whose runtime is unset). */
   project_id?: number;
   message: string;
+}
+
+// Image paste payload (renderer → main). Image bytes are carried as ArrayBuffer;
+// main normalizes to PNG and writes to a temp file the renderer never sees.
+export interface TerminalImagePastePayload {
+  terminalId: string;
+  text: string;
+  images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
+}
+
+export interface TerminalImagePasteResult {
+  success: boolean;
+  error?: string;
 }
 
 // Auth types for IPC
@@ -522,9 +551,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // and preserves user UI prefs by archetype name. Reconcile IS the
   // migration for the agent array — orphan archetypes drop on first
   // cloud sync. Per spec §4.4 / §5.1.
-  settingsVersion: 6,
+  settingsVersion: 7,
   hasSeenWelcome: false,
   colonizationConsent: false,
+  enableTerminalImagePaste: true,
+  instantSendPastedImages: false,
 };
 
 // ============================================

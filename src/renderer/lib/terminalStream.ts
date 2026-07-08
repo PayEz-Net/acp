@@ -41,6 +41,8 @@ export interface StreamLine {
   line: string;
   ts: string;
   project_id?: string;
+  /** Who/what produced this line: agent output, user input, or info/system. */
+  source?: import('../stores/agentOutputStore').OutputSource;
   /** Accumulated thinking content associated with this line (the answer). */
   thinking?: string;
   /** When true, this line is a live thinking placeholder that should be replaced by the final answer. */
@@ -68,6 +70,12 @@ interface TerminalHistory {
   // to suppress non-consecutive duplicate lines within the dedup window, which
   // catches provider TUIs that redraw conversation history or echo input.
   recentKeys: Map<string, number>;
+  // User-input lines already emitted as user-source. Provider TUIs reprint the
+  // user's prompt with various prefixes long after the original echo; this map
+  // lets us suppress those delayed repeats without affecting agent answers.
+  emittedUserInputKeys: Map<string, number>;
+  // Last time we pruned stale entries from recentKeys (ms).
+  recentKeysLastPruned: number;
   // Buffered code-change block waiting for more diff lines or a flush trigger.
   pendingCodeChange: PendingCodeChange | null;
   // Thinking-block state.
@@ -75,10 +83,33 @@ interface TerminalHistory {
   thinkingLabel: string | null;
   thinkingSawBlank: boolean;
   thinkingLiveEmitted: boolean;
+  // Cached joined preview so heavy joins don't run on every spinner frame.
+  thinkingPreview: string;
+  thinkingPreviewBufferLength: number;
 }
 
 const DEDUP_WINDOW_MS = 5000;
 const MAX_THINKING_BUFFER_LINES = 1000;
+const RECENT_KEY_PRUNE_INTERVAL_MS = 1000;
+const COLLAPSE_KEY_CACHE_SIZE = 200;
+
+// Provider TUIs reprint user input as part of redraws, tool-use headers, and
+// conversation history. Keep a longer memory of user input we already emitted
+// so those delayed echoes do not repeat in the pane.
+const USER_INPUT_DEDUP_WINDOW_MS = 30000;
+
+// Common prompt prefixes provider CLIs add to echoed user input (e.g. "> ",
+// "$ ", "# ", "› ", box-drawing variants).
+const USER_INPUT_PROMPT_PREFIX = /^[\s│┃┣├]*[›>➤$#%?→⇒]\s+/;
+
+function stripUserInputPrefix(text: string): string {
+  return text.replace(USER_INPUT_PROMPT_PREFIX, '');
+}
+
+// When a footer/status line is split across PTY chunks or SSE events, the
+// trailing fragment can leak as a short numeric line. Drop these fragments if
+// they arrive within this window after a footer was suppressed.
+const FOOTER_CONTINUATION_WINDOW_MS = 500;
 
 // Spinner glyphs that may appear anywhere in a provider TUI redraw (not just
 // at the line start). Used to build a structural collapse key so frames that
@@ -113,6 +144,22 @@ const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█─━]{3,}[\s]
 // Input prompts use em-dash, en-dash, box-drawing horizontals, or a lone hyphen.
 const FOOTER_LINE = /^(?:[\s|⫶·]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+.*|yolo\s+agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\).*|⫶.*|[—–─━=\-]+\s*input\b.*|composing\b.*\d+[\d\.,]*[kmbt]?\s*tokens?|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|ctl-x:.*|crl-v(?:paste)?.*|[@#]\s*:\s*mention files|jnewline|\/(?:feedback|theme)\b.*|(?:thme|theme)\b.*|↑.*|ctrl-s\b.*)\s*[\s|⫶·]*)+$/i;
 
+// Kimi CLI emits transient numeric fragments during cheap-spinner/status redraws
+// that survive ANSI stripping, e.g. ":275347" (spinner token counter) or "302t".
+// Treat them as footer noise even when they appear without surrounding context.
+const KIMI_STATUS_ARTIFACT = /^(?=[\s\S]*[:\/()kmbt])[\s]*(?::\d{3,}|\d[\d\.,]*[kmbt]?\s*(?:tokens?|t)?(?:\s+\d[\d\.,]*[kmbt]?\s*(?:tokens?|t)?)*\)?)[\s]*$/i;
+
+// Fragments of a split footer line: token ratios and counters that leak on their
+// own after a full footer was suppressed. Only active within
+// FOOTER_CONTINUATION_WINDOW_MS of a dropped footer.
+const FOOTER_FRAGMENT = /^(?=[\s\S]*[:\/()kmbt])[\s]*(?::\d{3,}|\d[\d\.,]*[kmbt]?\)?(?:\s+\d[\d\.,]*[kmbt]?\)?)*(?:\s*(?:tokens?|t))?|\(?\d[\d\.,]*[kmbt]?\s*\/\s*\d[\d\.,]*[kmbt]?\)?(?:\s+\d[\d\.,]*[kmbt]?\)?)*(?:\s*(?:tokens?|t))?)[\s]*$/i;
+
+// Transient cursor-coordinate / SGR / status fragments that survive ANSI
+// stripping and leak as standalone lines or prefixes, e.g. ":37", "2:12",
+// "21:12", ":.8 info:", "[3", "[37m". Treat them as footer noise so they do
+// not pollute the transcript.
+const CHUD_ARTIFACT = /^[\s]*(?:\d{1,2}:\d{2}(?::\d{2})?|:(?:\d+(?:\.\d+)?|\.\d+)(?:\s+\w+:.*)?|\[\d[\d;]*m?)[\s]*$/i;
+
 // Explicit XML-style thinking markers (some providers/TUIs emit these).
 const THINKING_START_MARKER = /<thinking\b/i;
 const THINKING_END_MARKER = /<\/thinking>/i;
@@ -128,6 +175,13 @@ const CODE_CHANGE_MODIFY_TRIGGER = /Now modify\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)
 const CODE_CHANGE_CREATE_TRIGGER = /Creating\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
 const CODE_CHANGE_DELETE_TRIGGER = /Delete\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
 const CODE_CHANGE_TOOL_MARKER = /Using\s+(?:StrReplaceFile|WriteFile)/i;
+
+// Info/system lines that are not agent output and should be visually distinct.
+const INFO_LINE_PATTERNS = [
+  /^\[ACP\s+mail\]/i,
+  /^Failed\s+to\s+start:/i,
+  /^\[ACP\s+[a-z]+\]/i,
+];
 
 function extractCodeChangeTrigger(text: string): { filePath: string; operation: 'modified' | 'created' | 'deleted' } | null {
   const modify = text.match(CODE_CHANGE_MODIFY_TRIGGER);
@@ -170,6 +224,11 @@ function parseCodeChangeDiffLine(text: string): { type: 'context' | 'add' | 'rem
 
 function isCodeChangeToolMarker(text: string): boolean {
   return CODE_CHANGE_TOOL_MARKER.test(text);
+}
+
+function classifySource(text: string): import('../stores/agentOutputStore').OutputSource {
+  if (INFO_LINE_PATTERNS.some((p) => p.test(text))) return 'info';
+  return 'agent';
 }
 
 // Parse token shorthand like 1.2k, 140, 262.1k into a raw number.
@@ -264,11 +323,39 @@ function updateAgentStatus(agentName: string, extract: StatusExtract | null) {
   }
 }
 
+class LruCache<K, V> {
+  private cache = new Map<K, V>();
+  constructor(private readonly maxSize: number) {}
+  get(key: K): V | undefined {
+    const value = this.cache.get(key);
+    if (value !== undefined) {
+      // Move to back (most recently used).
+      this.cache.delete(key);
+      this.cache.set(key, value);
+    }
+    return value;
+  }
+  set(key: K, value: V): void {
+    if (this.cache.has(key)) this.cache.delete(key);
+    else if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(key, value);
+  }
+}
+
+const collapseKeyCache = new LruCache<string, string>(COLLAPSE_KEY_CACHE_SIZE);
+
 function collapseKey(text: string): string {
-  return text
+  const cached = collapseKeyCache.get(text);
+  if (cached !== undefined) return cached;
+  const key = text
     .replace(SPINNER_GLYPHS, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  collapseKeyCache.set(text, key);
+  return key;
 }
 
 function classifyNoise(text: string): NoiseCategory | null {
@@ -278,6 +365,12 @@ function classifyNoise(text: string): NoiseCategory | null {
   // Footer/status metadata is redrawn continuously (context %, token counters,
   // cost summaries). Treat as a family so numeric variants collapse.
   if (FOOTER_LINE.test(text)) return 'footer';
+  // Kimi CLI cheap-spinner numeric artifacts (e.g. ":275347", "302t") are
+  // status noise even when they appear as standalone fragments.
+  if (KIMI_STATUS_ARTIFACT.test(text)) return 'footer';
+  // Residual ANSI/TUI fragments like ":37", "2:12", ":.8 info:", "[3" that
+  // survive stripping and appear as standalone lines.
+  if (CHUD_ARTIFACT.test(text)) return 'footer';
   if (STATUS_GLYPHS.test(text)) return 'status-glyph';
   if (THINKING_LABEL.test(text)) return 'thinking';
   return null;
@@ -296,11 +389,15 @@ function emptyHistory(ts: string): TerminalHistory {
     lastNoiseCategory: null,
     lastFooterTs: null,
     recentKeys: new Map(),
+    emittedUserInputKeys: new Map(),
+    recentKeysLastPruned: 0,
     pendingCodeChange: null,
     thinkingBuffer: [],
     thinkingLabel: null,
     thinkingSawBlank: false,
     thinkingLiveEmitted: false,
+    thinkingPreview: '',
+    thinkingPreviewBufferLength: 0,
   };
 }
 
@@ -309,6 +406,11 @@ export class TerminalStreamNormalizer {
   // A line produced while flushing a code-change block that must be emitted
   // after the structured card. Callers should drain after each process() call.
   private deferredLine: StreamLine | null = null;
+  // Recent user inputs keyed by terminal. If a PTY echo matches one of these
+  // within a short window, the echoed line is tagged as user-source so it is
+  // visually distinct from agent output.
+  private recentUserInputs = new Map<string, { text: string; ts: number }[]>();
+  private readonly USER_INPUT_WINDOW_MS = 2000;
 
   /**
    * Process one raw PTY line. Returns a normalized line to emit, or `null` if
@@ -322,6 +424,16 @@ export class TerminalStreamNormalizer {
 
     let text = stripAnsi(input.line);
     text = normalizeTerminalLine(input.provider as CodeProvider, text);
+
+    // Some provider TUIs emit colon-prefixed numeric fragments at line start
+    // that survive ANSI stripping, e.g. ":32Actually..." or "\.6 to fix...".
+    // Strip the prefix so the real content reaches the pane, but only when the
+    // whole line is not itself a chud artifact (":0.8 info:" should still be
+    // dropped entirely).
+    if (!CHUD_ARTIFACT.test(text)) {
+      text = text.replace(/^[\s]*:(?:\d+(?:\.\d+)?|\.\d+)\s*/, '');
+    }
+
 
     // A carriage return in the line means the provider redrew the current
     // line (e.g., progress updates). Keep only the final segment.
@@ -375,7 +487,17 @@ export class TerminalStreamNormalizer {
 
       // Heuristic end-of-thinking: a non-blank line after we have seen at least
       // one blank line while in thinking mode is treated as the answer line.
+      // Cursor/line-number artifacts (e.g. "78", "50:", "3:", ":32", "\.6") that
+      // leak between thinking lines must not fracture the block into single-line
+      // noise stacks.
+      const THINKING_ARTIFACT = /^[\s]*(?::(?:\d+(?:\.\d+)?|\.\d+)|\d+[:]?)[\s]*$/;
       if (hist.thinkingSawBlank && !isBlank(text)) {
+        if (THINKING_ARTIFACT.test(text)) {
+          hist.thinkingBuffer.push(text);
+          // Keep thinkingSawBlank true so the next real line still flushes.
+          this.history.set(terminalId, hist);
+          return this.makeThinkingLine(input, hist);
+        }
         return this.flushThinking(input, hist, text);
       }
 
@@ -395,15 +517,15 @@ export class TerminalStreamNormalizer {
     // Skip code-change detection while a thinking block is active; thinking
     // content is accumulated separately and attached to the answer line.
     if (!hist?.thinkingLabel) {
-      // Blank lines end a pending code-change block.
+      // Blank lines end a pending code-change block, but the blank line itself
+      // is dropped so it does not push real conversation out of view.
       if (isBlank(text)) {
         const flushed = this.flushPendingCodeChange(input, hist);
-        const blankResult = this.processNormalLine(input, hist, text, ts);
         if (flushed) {
-          this.deferredLine = blankResult;
+          this.deferredLine = null;
           return flushed;
         }
-        return blankResult;
+        return null;
       }
 
       const trigger = extractCodeChangeTrigger(text);
@@ -479,10 +601,19 @@ export class TerminalStreamNormalizer {
   }
 
   private makeThinkingLine(input: StreamLine, hist: TerminalHistory): StreamLine {
+    // Cache the joined preview and invalidate only when the buffer changes.
+    const bufferLength = hist.thinkingBuffer.length;
+    let preview = hist.thinkingPreview;
+    if (hist.thinkingPreviewBufferLength !== bufferLength) {
+      preview = hist.thinkingBuffer.slice(-5).join('\n');
+      hist.thinkingPreview = preview;
+      hist.thinkingPreviewBufferLength = bufferLength;
+      this.history.set(input.terminal_id, hist);
+    }
     return {
       ...input,
       line: hist.thinkingLabel || 'Thinking...',
-      thinking: hist.thinkingBuffer.slice(-5).join('\n'),
+      thinking: preview,
       thinkingLive: true,
     };
   }
@@ -515,16 +646,11 @@ export class TerminalStreamNormalizer {
     text: string,
     ts: string,
   ): StreamLine | null {
-    // Collapse consecutive blank lines to at most two to preserve visual
-    // spacing without emitting long runs of empty lines.
+    // Drop blank/whitespace-only lines entirely. Provider TUIs emit many
+    // invisible redraw frames; emitting even one or two blanks pushes real
+    // conversation up and breaks scrolling in the virtualized pane.
     if (isBlank(text)) {
-      const blankCount = (hist?.consecutiveBlankCount ?? 0) + 1;
-      if (!hist) {
-        hist = emptyHistory(ts);
-        this.history.set(input.terminal_id, hist);
-      }
-      hist.consecutiveBlankCount = blankCount;
-      return blankCount <= 2 ? { ...input, line: text } : null;
+      return null;
     }
 
     const key = collapseKey(text);
@@ -534,6 +660,9 @@ export class TerminalStreamNormalizer {
     // counters, input separators, keybinding hints, yolo agent banners, and pure
     // status-glyph lines must never reach the user-facing pane stream. Drop them
     // immediately rather than emitting the first variant and deduplicating the rest.
+    // NOTE: do not reset consecutiveBlankCount here; blank lines on either side of
+    // a suppressed line are still visually consecutive in the rendered output, so
+    // collapsing must continue across suppressed noise.
     if (noiseCategory === 'footer' || noiseCategory === 'separator' || noiseCategory === 'status-glyph') {
       if (!hist) {
         hist = emptyHistory(ts);
@@ -542,7 +671,6 @@ export class TerminalStreamNormalizer {
       hist.lastText = text;
       hist.lastKey = key;
       hist.lastTs = ts;
-      hist.consecutiveBlankCount = 0;
       hist.lastNoiseCategory = noiseCategory;
       if (noiseCategory === 'footer') {
         hist.lastFooterTs = ts;
@@ -552,17 +680,44 @@ export class TerminalStreamNormalizer {
       return null;
     }
 
+    // Footer continuation suppression: provider status lines sometimes split
+    // across PTY chunks or SSE events (e.g. "context: 63.5% (166.5k/" followed by
+    // "262.1k) 302t"). The trailing fragment is not a footer on its own, so drop
+    // short numeric/token fragments that arrive soon after a suppressed footer.
+    if (hist?.lastFooterTs) {
+      const now = new Date(ts).getTime();
+      const elapsed = now - new Date(hist.lastFooterTs).getTime();
+      if (elapsed >= 0 && elapsed <= FOOTER_CONTINUATION_WINDOW_MS && FOOTER_FRAGMENT.test(text)) {
+        hist.lastFooterTs = ts;
+        hist.lastText = text;
+        hist.lastKey = key;
+        hist.lastTs = ts;
+        hist.lastNoiseCategory = noiseCategory;
+        this.history.set(input.terminal_id, hist);
+        return null;
+      }
+    }
+
     // Recent-seen deduplication: suppress the same structural key if it was
     // emitted within the sliding window, even if other lines came in between.
     // Provider TUIs (especially Claude Code) redraw conversation history and
     // echo user input repeatedly; this prevents those redraws from spamming the
     // pane. The timestamp is refreshed on every duplicate so the window slides
     // while the provider keeps redrawing the same content.
+    // Pruning the map is O(n); do it at most once per second per terminal.
     if (hist) {
       const now = new Date(ts).getTime();
-      for (const [k, t] of hist.recentKeys.entries()) {
-        if (now - t > DEDUP_WINDOW_MS) {
-          hist.recentKeys.delete(k);
+      if (now - hist.recentKeysLastPruned > RECENT_KEY_PRUNE_INTERVAL_MS) {
+        hist.recentKeysLastPruned = now;
+        for (const [k, t] of hist.recentKeys.entries()) {
+          if (now - t > DEDUP_WINDOW_MS) {
+            hist.recentKeys.delete(k);
+          }
+        }
+        for (const [k, t] of hist.emittedUserInputKeys.entries()) {
+          if (now - t > USER_INPUT_DEDUP_WINDOW_MS) {
+            hist.emittedUserInputKeys.delete(k);
+          }
         }
       }
       const lastSeen = hist.recentKeys.get(key);
@@ -571,7 +726,6 @@ export class TerminalStreamNormalizer {
         hist.lastText = text;
         hist.lastKey = key;
         hist.lastTs = ts;
-        hist.consecutiveBlankCount = 0;
         hist.lastNoiseCategory = noiseCategory;
         this.history.set(input.terminal_id, hist);
         return null;
@@ -589,13 +743,83 @@ export class TerminalStreamNormalizer {
     hist.lastNoiseCategory = noiseCategory;
     hist.recentKeys.set(key, new Date(ts).getTime());
 
-    return { ...input, line: text };
+    const userInput = this.matchUserInput(input.terminal_id, text, ts);
+    const source = userInput ? 'user' : classifySource(text);
+
+    // Remember user input we emitted so provider TUIs that reprint it later
+    // (tool headers, conversation redraws, prompt echoes) don't repeat it.
+    // We check both the raw line and the prefix-stripped line so "> message"
+    // echoes match the originally recorded "message".
+    const emittedNow = new Date(ts).getTime();
+    const strippedText = stripUserInputPrefix(text);
+    const rawKey = collapseKey(text);
+    const strippedKey = collapseKey(strippedText);
+    if (source === 'user') {
+      hist.emittedUserInputKeys.set(rawKey, emittedNow);
+      hist.emittedUserInputKeys.set(strippedKey, emittedNow);
+    } else {
+      const emittedRaw = hist.emittedUserInputKeys.get(rawKey);
+      const emittedStripped = hist.emittedUserInputKeys.get(strippedKey);
+      if (
+        (emittedRaw != null && emittedNow - emittedRaw < USER_INPUT_DEDUP_WINDOW_MS) ||
+        (emittedStripped != null && emittedNow - emittedStripped < USER_INPUT_DEDUP_WINDOW_MS)
+      ) {
+        hist.lastText = text;
+        hist.lastKey = key;
+        hist.lastTs = ts;
+        hist.lastNoiseCategory = noiseCategory;
+        this.history.set(input.terminal_id, hist);
+        return null;
+      }
+    }
+
+    hist.consecutiveBlankCount = 0;
+    this.history.set(input.terminal_id, hist);
+    return { ...input, line: text, source };
+  }
+
+  /**
+   * Record text the user sent to a terminal so echoed input can be tagged as
+   * user-source instead of agent output.
+   */
+  recordUserInput(terminalId: string, text: string, ts = Date.now()): void {
+    const inputs = this.recentUserInputs.get(terminalId) ?? [];
+    inputs.push({ text, ts });
+    // Prune stale entries.
+    const cutoff = ts - this.USER_INPUT_WINDOW_MS;
+    const filtered = inputs.filter((i) => i.ts >= cutoff);
+    this.recentUserInputs.set(terminalId, filtered);
+  }
+
+  private matchUserInput(terminalId: string, text: string, ts: string): string | null {
+    const inputs = this.recentUserInputs.get(terminalId);
+    if (!inputs || inputs.length === 0) return null;
+    const now = new Date(ts).getTime();
+    const cutoff = now - this.USER_INPUT_WINDOW_MS;
+    const normalizedRaw = collapseKey(text);
+    const normalizedStripped = collapseKey(stripUserInputPrefix(text));
+    for (let i = inputs.length - 1; i >= 0; i--) {
+      const input = inputs[i];
+      if (input.ts < cutoff) continue;
+      const inputKeyRaw = collapseKey(input.text);
+      const inputKeyStripped = collapseKey(stripUserInputPrefix(input.text));
+      if (
+        inputKeyRaw === normalizedRaw ||
+        inputKeyStripped === normalizedStripped ||
+        input.text === text
+      ) {
+        inputs.splice(i, 1);
+        return input.text;
+      }
+    }
+    return null;
   }
 
   /** Drop history for a terminal (e.g. on kill/reset). */
   dropTerminal(terminalId: string): void {
     const hist = this.history.get(terminalId);
     this.history.delete(terminalId);
+    this.recentUserInputs.delete(terminalId);
     if (hist?.thinkingBuffer.length) {
       // Terminal died mid-think; do not leak partial thinking into the next session.
       // We intentionally do not emit a finalized line here because there is no
@@ -606,6 +830,7 @@ export class TerminalStreamNormalizer {
   /** Reset all history. */
   clear(): void {
     this.history.clear();
+    this.recentUserInputs.clear();
   }
 }
 

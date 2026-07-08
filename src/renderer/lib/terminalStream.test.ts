@@ -84,19 +84,30 @@ describe('TerminalStreamNormalizer', () => {
     expect(n.process(makeLine('Running codex-mini now', 'codex'))?.line).toBe('Running Codex now');
   });
 
-  it('collapses blank lines to at most two consecutive', () => {
+  it('drops blank and whitespace-only lines entirely', () => {
     const n = new TerminalStreamNormalizer();
-    // First two blank lines are emitted.
-    expect(n.process(makeLine(''))?.line).toBe('');
-    expect(n.process(makeLine(''))?.line).toBe('');
-    // Third consecutive blank line is dropped.
     expect(n.process(makeLine(''))).toBeNull();
-    // A non-blank line resets the counter.
+    expect(n.process(makeLine(''))).toBeNull();
+    expect(n.process(makeLine('   '))).toBeNull();
+    expect(n.process(makeLine('\t'))).toBeNull();
+    // A non-blank line still emits normally.
     expect(n.process(makeLine('A'))?.line).toBe('A');
-    // Counter resets, so the next two blanks are emitted again.
-    expect(n.process(makeLine(''))?.line).toBe('');
-    expect(n.process(makeLine('   '))?.line).toBe('');
+    // Blanks after content are still dropped.
     expect(n.process(makeLine(''))).toBeNull();
+    expect(n.process(makeLine('   '))).toBeNull();
+  });
+
+  it('drops blank lines even when interleaved with suppressed noise lines', () => {
+    const n = new TerminalStreamNormalizer();
+    // Real content, then alternating blank / footer / blank / footer should emit
+    // no blank lines because blanks are dropped entirely.
+    expect(n.process(makeLine('A'))?.line).toBe('A');
+    expect(n.process(makeLine(''))).toBeNull();
+    expect(n.process(makeLine('context: 69.4%'))).toBeNull(); // footer suppressed
+    expect(n.process(makeLine(''))).toBeNull();
+    expect(n.process(makeLine('context: 70.1%'))).toBeNull(); // footer suppressed
+    expect(n.process(makeLine(''))).toBeNull();
+    expect(n.process(makeLine('B'))?.line).toBe('B');
   });
 
   it('suppresses identical lines that reappear within the dedup window', () => {
@@ -275,6 +286,94 @@ describe('TerminalStreamNormalizer', () => {
     const n = new TerminalStreamNormalizer();
     expect(n.process(makeLine('(182k/262.1k)'))).toBeNull();
     expect(n.process(makeLine('(183k/262.1k)'))).toBeNull();
+  });
+
+  it('drops the exact Kimi status line seen in the screenshot', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('context: 63.5% (166.5k/262.1k) 302t', 'kimi'))).toBeNull();
+  });
+
+  it('drops Kimi cheap-spinner numeric artifacts as footer noise', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine(':275347', 'kimi'))).toBeNull();
+    expect(n.process(makeLine('302t', 'kimi'))).toBeNull();
+    expect(n.process(makeLine('262.1k) 302t', 'kimi'))).toBeNull();
+    // Plain numbers without status markers must not be dropped.
+    expect(n.process(makeLine('42', 'kimi'))?.line).toBe('42');
+  });
+
+  it('drops residual ANSI/TUI chud artifacts that survive stripping', () => {
+    const n = new TerminalStreamNormalizer();
+    // Time-like cursor-position fragments and status counters.
+    expect(n.process(makeLine(':37', 'kimi'))).toBeNull();
+    expect(n.process(makeLine('2:12', 'kimi'))).toBeNull();
+    expect(n.process(makeLine('21:12', 'kimi'))).toBeNull();
+    expect(n.process(makeLine(':.8 info:', 'kimi'))).toBeNull();
+    expect(n.process(makeLine(':0.8 info: working', 'kimi'))).toBeNull();
+    // Orphaned SGR fragments at line start are removed before classification.
+    expect(n.process(makeLine('[3 Real output line', 'kimi'))?.line).toBe('Real output line');
+    expect(n.process(makeLine('[37mcolored text', 'kimi'))?.line).toBe('colored text');
+    // Colon-prefixed numeric fragments are stripped so real content emerges.
+    expect(n.process(makeLine(':32Actually, the simplest...', 'kimi'))?.line).toBe('Actually, the simplest...');
+    expect(n.process(makeLine(':47 a postgres pod in AKS', 'kimi'))?.line).toBe('a postgres pod in AKS');
+    expect(n.process(makeLine(':.6 to fix the 500 errors', 'kimi'))?.line).toBe('to fix the 500 errors');
+    expect(n.process(makeLine(':0.55 or if I can run', 'kimi'))?.line).toBe('or if I can run');
+    // Standalone numeric artifacts (cursor coordinates / line numbers) do not end
+    // a thinking block, so they don't fracture it into one-line noise stacks.
+    const n2 = new TerminalStreamNormalizer();
+    n2.process(makeLine('Thinking...', 'kimi', 't2'));
+    n2.process(makeLine('step one', 'kimi', 't2'));
+    n2.process(makeLine('', 'kimi', 't2'));
+    const artifact1 = n2.process(makeLine('78', 'kimi', 't2'));
+    expect(artifact1?.thinkingLive).toBe(true);
+    n2.process(makeLine('', 'kimi', 't2'));
+    const artifact2 = n2.process(makeLine('50:', 'kimi', 't2'));
+    expect(artifact2?.thinkingLive).toBe(true);
+    n2.process(makeLine('', 'kimi', 't2'));
+    // Colon-prefixed decimals are absorbed as footer noise and do not fracture.
+    const artifact3 = n2.process(makeLine(':.6', 'kimi', 't2'));
+    expect(artifact3?.thinkingLive).toBe(true);
+    const answer = n2.process(makeLine('Here is the answer', 'kimi', 't2'));
+    expect(answer?.line).toBe('Here is the answer');
+    expect(answer?.thinking).toContain('78');
+    expect(answer?.thinking).toContain('50:');
+    // Real content that happens to contain colons must still emit.
+    expect(n.process(makeLine('See issue #2: fix the bug', 'kimi'))?.line).toBe('See issue #2: fix the bug');
+  });
+
+  it('normalizes Kimi unordered-list bullets to •', () => {
+    const n = new TerminalStreamNormalizer();
+    expect(n.process(makeLine('- First item', 'kimi'))?.line).toBe('• First item');
+    expect(n.process(makeLine('* Second item', 'kimi'))?.line).toBe('• Second item');
+    expect(n.process(makeLine('  - Nested item', 'kimi'))?.line).toBe('  • Nested item');
+    expect(n.process(makeLine('1. Ordered item', 'kimi'))?.line).toBe('1. Ordered item');
+    // Dashes in prose must not be altered.
+    expect(n.process(makeLine('This is - not a list', 'kimi'))?.line).toBe('This is - not a list');
+  });
+
+  it('drops split footer continuation fragments within the continuation window', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
+    const t1 = new Date('2026-07-03T12:00:00.100Z').toISOString();
+    const t2 = new Date('2026-07-03T12:00:00.200Z').toISOString();
+    const t3 = new Date('2026-07-03T12:00:00.300Z').toISOString();
+    // Full footer is dropped as before.
+    expect(n.process(makeLine('context: 63.5% (166.5k/262.1k)', 'kimi', 't1', t0))).toBeNull();
+    // Trailing fragment that leaks on its own is dropped because it arrives soon after the footer.
+    expect(n.process(makeLine('302t', 'kimi', 't1', t1))).toBeNull();
+    // A second fragment is also dropped and extends the window.
+    expect(n.process(makeLine('262.1k) 302t', 'kimi', 't1', t2))).toBeNull();
+    // Real content still reaches the stream.
+    expect(n.process(makeLine('Here is the answer', 'kimi', 't1', t3))?.line).toBe('Here is the answer');
+  });
+
+  it('does not suppress footer-looking fragments outside the continuation window', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date('2026-07-03T12:00:00.000Z').toISOString();
+    const t1 = new Date('2026-07-03T12:00:01.000Z').toISOString();
+    expect(n.process(makeLine('context: 63.5%', 'kimi', 't1', t0))).toBeNull();
+    // A bare token ratio is only treated as a footer fragment within the window.
+    expect(n.process(makeLine('166.5k/262.1k', 'kimi', 't1', t1))?.line).toBe('166.5k/262.1k');
   });
 
   it('drops em-dash input prompts entirely', () => {
@@ -555,6 +654,76 @@ describe('TerminalStreamNormalizer', () => {
     expect(card?.line).toBe('Modified: App.tsx');
     const deferred = n.drain();
     expect(deferred?.line).toBe('Next, review the output.');
+  });
+
+  it('tags echoed user input as user-source and removes it from the match buffer', () => {
+    const n = new TerminalStreamNormalizer();
+    const ts = new Date().toISOString();
+    n.recordUserInput('t1', 'hello world', new Date(ts).getTime());
+    const out = n.process(makeLine('hello world', 'claude', 't1', ts));
+    expect(out?.source).toBe('user');
+    // A different line after the consumed input should be agent-source.
+    const out2 = n.process(makeLine('agent reply', 'claude', 't1', ts));
+    expect(out2?.source).toBe('agent');
+  });
+
+  it('suppresses delayed repeats of user input even after the match buffer expires', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date().toISOString();
+    const t0ms = new Date(t0).getTime();
+    n.recordUserInput('t1', 'mail BAPert', t0ms);
+
+    // First echo arrives quickly and is emitted as user-source.
+    const first = n.process(makeLine('mail BAPert', 'claude', 't1', t0));
+    expect(first?.source).toBe('user');
+
+    // A delayed provider redraw arrives after the 2s match buffer but within
+    // the 30s user-input dedup window; it should be suppressed entirely.
+    const delayed = n.process(
+      makeLine('mail BAPert', 'claude', 't1', new Date(t0ms + 5000).toISOString()),
+    );
+    expect(delayed).toBeNull();
+  });
+
+  it('recognizes echoed user input with a prompt prefix as user-source', () => {
+    const n = new TerminalStreamNormalizer();
+    const ts = new Date().toISOString();
+    n.recordUserInput('t1', 'mail BAPert', new Date(ts).getTime());
+
+    // Provider CLI echoes the input with a leading "> " prompt.
+    const out = n.process(makeLine('> mail BAPert', 'claude', 't1', ts));
+    expect(out?.source).toBe('user');
+    expect(out?.line).toBe('> mail BAPert');
+
+    // A later identical prefixed echo is suppressed as a repeat.
+    const repeat = n.process(
+      makeLine('> mail BAPert', 'claude', 't1', new Date(new Date(ts).getTime() + 5000).toISOString()),
+    );
+    expect(repeat).toBeNull();
+  });
+
+  it('does not suppress unrelated agent output that happens to match old user input', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date().toISOString();
+    const t0ms = new Date(t0).getTime();
+    n.recordUserInput('t1', 'mail BAPert', t0ms);
+    n.process(makeLine('mail BAPert', 'claude', 't1', t0));
+
+    // After the user-input dedup window, the agent legitimately echoes the text.
+    const later = n.process(
+      makeLine('mail BAPert', 'claude', 't1', new Date(t0ms + 31000).toISOString()),
+    );
+    expect(later?.source).toBe('agent');
+  });
+
+  it('classifies ACP mail and failure notices as info-source', () => {
+    const n = new TerminalStreamNormalizer();
+    const mail = n.process(makeLine('[ACP mail] new message from QAPert', 'claude', 't1'));
+    expect(mail?.source).toBe('info');
+    const fail = n.process(makeLine('Failed to start: backend unavailable', 'claude', 't1'));
+    expect(fail?.source).toBe('info');
+    const prose = n.process(makeLine('Here is the answer.', 'claude', 't1'));
+    expect(prose?.source).toBe('agent');
   });
 
 });

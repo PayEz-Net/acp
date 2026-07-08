@@ -6,6 +6,7 @@ import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { TitleBar } from './components/Layout/TitleBar';
 // import { TeamSyncBanner } from './components/Layout/TeamSyncBanner'; // disabled — see mount-site comment below
 import { KanbanBoard } from './components/Kanban/KanbanBoard';
+import { LogViewer } from './components/Logs/LogViewer';
 import { ChatPanel } from './components/Chat/ChatPanel';
 import { CheckinPanel } from './components/Checkin/CheckinPanel';
 import { DocumentSidebar, DocumentModal } from './components/Documents';
@@ -20,6 +21,7 @@ import { BackendStatusBanner } from './components/Layout/BackendStatusBanner';
 import { WorkdirCorrection } from './components/Layout/WorkdirCorrection';
 import { RuntimeReconcileDialog } from './components/Layout/RuntimeReconcileDialog';
 import { RuntimeNotSet } from './components/Layout/RuntimeNotSet';
+import { OverlayPanel } from './components/Layout/OverlayPanel';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useProjectStore } from './stores/projectStore';
@@ -39,7 +41,7 @@ const DEFAULT_AGENTS = [
 ];
 
 export default function App() {
-  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showChat, toggleChat, showStandup, toggleStandup, showContractors, toggleContractors, showTeamEditor, toggleTeamEditor, activeAgentId, setAgents, setSettings } = useAppStore();
+  const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showChat, toggleChat, showStandup, toggleStandup, showContractors, toggleContractors, showTeamEditor, toggleTeamEditor, showLogs, toggleLogs, activeAgentId, setAgents, setSettings } = useAppStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
   const { showPicker, setShowPicker, showSettings, setShowSettings, fetchActiveProject, fetchProjects, activeProject, pickerHasStarted, workdirInvalid } = useProjectStore();
   const { showTeamBuilder, toggleTeamBuilder } = useAppStore();
@@ -99,7 +101,7 @@ export default function App() {
       } catch (err) {
         console.error('Failed to load settings, using defaults:', err);
         setAgents(DEFAULT_AGENTS);
-        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320, environment: 'prod' });
+        setSettings({ layout: 'grid', focusAgent: 'BAPert', showSidebar: true, windowBounds: { x: 100, y: 100, width: 1200, height: 800 }, agents: DEFAULT_AGENTS, mailPollInterval: 30000, theme: 'dark', sidebarWidth: 320, environment: 'prod', enableTerminalImagePaste: true, instantSendPastedImages: false });
       } finally {
         // Task #11 — show welcome modal on first run after settings load
         const s = await window.electronAPI.getSettings();
@@ -303,10 +305,10 @@ export default function App() {
   // Show loading while auth is initializing
   if (authLoading) {
     return (
-      <div className="h-full flex items-center justify-center bg-slate-900">
+      <div className="h-full flex items-center justify-center bg-acp-bg">
         <div className="text-center">
           <div className="w-12 h-12 border-4 border-vibe-500/30 border-t-vibe-500 rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-400">Loading...</p>
+          <p className="text-acp-text-secondary">Loading...</p>
         </div>
       </div>
     );
@@ -329,17 +331,17 @@ export default function App() {
   // Show loading while settings load after auth
   if (!settingsLoaded) {
     return (
-      <div className="h-full flex items-center justify-center bg-slate-900">
+      <div className="h-full flex items-center justify-center bg-acp-bg">
         <div className="text-center">
           <div className="w-12 h-12 border-4 border-vibe-500/30 border-t-vibe-500 rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-400">Loading Agent Collaboration Platform...</p>
+          <p className="text-acp-text-secondary">Loading Agent Collaboration Platform...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0B1221] text-slate-300">
+    <div className="h-full flex flex-col bg-acp-bg text-acp-text-secondary">
       {/* Title Bar */}
       <TitleBar />
 
@@ -361,7 +363,7 @@ export default function App() {
       {/* <TeamSyncBanner /> */}
 
       {/* Main: Terminals + Panels */}
-      <div className="flex-1 min-h-0 flex overflow-hidden p-2 gap-2">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Terminal Grid */}
         <div className="flex-1 min-w-0">
           <TerminalGrid agents={agents} />
@@ -387,25 +389,26 @@ export default function App() {
         <ContractorPanel isOpen={showContractors} onClose={toggleContractors} />
 
         {/* Team Editor Panel */}
-        {showTeamEditor && (
-          <div className="w-96 min-w-[24rem] max-w-full bg-slate-900 border border-slate-800 rounded-lg overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
-              <h3 className="text-sm font-semibold text-slate-200">Team Editor</h3>
-              <button
-                onClick={toggleTeamEditor}
-                className="text-slate-500 hover:text-slate-200 transition-colors"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="flex-1 overflow-auto">
-              <TeamEditor />
-            </div>
+        <OverlayPanel isOpen={showTeamEditor} onClose={toggleTeamEditor} width="w-96" className="bg-slate-900 border-slate-700">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+            <h3 className="text-sm font-semibold text-slate-200">Team Editor</h3>
+            <button
+              onClick={toggleTeamEditor}
+              className="text-slate-500 hover:text-slate-200 transition-colors"
+            >
+              ✕
+            </button>
           </div>
-        )}
+          <div className="flex-1 overflow-auto">
+            <TeamEditor />
+          </div>
+        </OverlayPanel>
 
         {/* Document Sidebar */}
         <DocumentSidebar isOpen={showDocuments} onClose={toggleDocuments} />
+
+        {/* Log viewer */}
+        <LogViewer isOpen={showLogs} onClose={toggleLogs} />
 
       </div>
 

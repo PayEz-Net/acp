@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useChatStore } from '../../stores/chatStore';
 import { useAppStore } from '../../stores/appStore';
 import { X, Plus, MessageSquare } from 'lucide-react';
+import { OverlayPanel } from '../Layout/OverlayPanel';
 import ReactMarkdown from 'react-markdown';
 
 interface ChatPanelProps {
@@ -41,7 +42,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const totalUnread = conversations.reduce((sum, c) => sum + c.unreadCount, 0);
 
   return (
-    <div className="w-96 bg-slate-900 border-l border-slate-700 flex flex-col h-full overflow-hidden">
+    <OverlayPanel isOpen={isOpen} onClose={onClose} width="w-96" className="bg-slate-900 border-slate-700">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
         <div className="flex items-center gap-2">
@@ -130,6 +131,6 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
           </div>
         </div>
       )}
-    </div>
+    </OverlayPanel>
   );
 }

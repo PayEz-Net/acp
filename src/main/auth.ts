@@ -98,6 +98,8 @@ async function handleLogin(email: string, password: string): Promise<LoginResult
  */
 async function handleLogout(): Promise<void> {
   await acpApiLogout();
+  cachedUserId = null;
+  cachedUserIdAt = 0;
   console.log('[Auth] Logged out');
   authEvents.emit('session-cleared');
 }
@@ -155,6 +157,10 @@ export function setupAuthHandlers(mainWindow: BrowserWindow | null): void {
       console.error('[Auth] External session set failed:', result.error);
       return { success: false, error: result.error?.message || 'External session set failed' };
     }
+    // New session may have a different user — invalidate so the next caller
+    // picks up the fresh identity (e.g., account switch).
+    cachedUserId = null;
+    cachedUserIdAt = 0;
     console.log('[Auth] External session persisted in acp-api');
     authEvents.emit('session-persisted');
     return { success: true };
@@ -244,6 +250,34 @@ export async function getAccessToken(): Promise<string | null> {
   // Get token from ACP API
   const { acpApiGetToken } = await import('./acp-api-client');
   return acpApiGetToken();
+}
+
+// Lightweight cache for the current user's ID so high-frequency reporters
+// (e.g., PTY output flushed every 150ms) don't hammer ACP API status.
+let cachedUserId: string | null = null;
+let cachedUserIdAt = 0;
+const USER_ID_CACHE_MS = 60_000;
+
+/**
+ * Get the current authenticated user's ID from ACP API.
+ * Cached for 60s; returns null when no session is active.
+ */
+export async function getCurrentUserId(): Promise<string | null> {
+  const now = Date.now();
+  if (cachedUserId !== null && now - cachedUserIdAt < USER_ID_CACHE_MS) {
+    return cachedUserId;
+  }
+
+  const status = await acpApiGetStatus();
+  if (status.success && status.data?.user?.user_id) {
+    cachedUserId = String(status.data.user.user_id);
+    cachedUserIdAt = now;
+    return cachedUserId;
+  }
+
+  cachedUserId = null;
+  cachedUserIdAt = 0;
+  return null;
 }
 
 /**

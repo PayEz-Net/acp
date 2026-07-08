@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useKanbanStore, getTasksByLane, getPriorityColor } from '../../stores/kanbanStore';
 import { useAppStore } from '../../stores/appStore';
+import { OverlayPanel } from '../Layout/OverlayPanel';
 import { KanbanLane, KanbanTask, KanbanPriority } from '@shared/types';
 import { X, Plus, GripVertical, User, RefreshCw, Archive, ArchiveRestore, ArrowLeft, Loader2 } from 'lucide-react';
 import TaskDetail from './TaskDetail';
@@ -120,7 +121,7 @@ export function KanbanBoard({ isOpen, onClose }: KanbanBoardProps) {
   };
 
   return (
-    <div className="w-[600px] bg-slate-900 border-l border-slate-700 flex flex-col h-full overflow-hidden">
+    <OverlayPanel isOpen={isOpen} onClose={onClose} width="w-[600px]" className="bg-slate-900 border-slate-700">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
         <span className="text-sm font-semibold text-slate-200">Kanban Board</span>
@@ -264,6 +265,6 @@ export function KanbanBoard({ isOpen, onClose }: KanbanBoardProps) {
           </div>
         </div>
       )}
-    </div>
+    </OverlayPanel>
   );
 }

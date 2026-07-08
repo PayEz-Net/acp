@@ -38,6 +38,7 @@ const IPC_CHANNELS = {
   ACP_RETRY_BACKEND: 'acp:retryBackend',
   ACP_GET_LOGS: 'acp:getLogs',
   ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
+  VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
   ACP_RELAUNCH: 'acp:relaunch',
   // Wave C/2 (msg 1155 + 1156)
   PROJECT_SWITCH: 'project:switch',
@@ -50,8 +51,11 @@ const IPC_CHANNELS = {
   BOOT_CLEAR_NEXT_OVERLAY: 'boot:clearNextOverlay',
   OPEN_EXTERNAL: 'shell:openExternal',
   CLIPBOARD_READ_TEXT: 'clipboard:read-text',
+  TRIGGER_PASTE: 'clipboard:trigger-paste',
   // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5).
   WORKDIR_VALIDATE: 'workdir:validate',
+  // Terminal image paste (renderer → main).
+  TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -225,6 +229,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.CLIPBOARD_READ_TEXT);
   },
 
+  // Trigger the native paste editing command on the focused element.
+  triggerPaste: (): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.TRIGGER_PASTE);
+  },
+
+  sendTerminalWithImages: (payload: {
+    terminalId: string;
+    text: string;
+    images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
+  }): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_SEND_WITH_IMAGES, payload);
+  },
+
   // ACP backend
   getBackendStatus: (): Promise<{ available: boolean }> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_BACKEND_STATUS);
@@ -240,6 +257,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getApiLogs: (): Promise<string[]> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_LOGS);
+  },
+
+  getVsqlCacheAuthHeaders: (method: string, path: string): Promise<Record<string, string | boolean>> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, method, path);
   },
 
   onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void): () => void => {
@@ -350,11 +371,18 @@ declare global {
       openOAuthUrl: (url: string) => Promise<void>;
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
       readClipboardText: () => Promise<string>;
+      triggerPaste: () => Promise<void>;
+      sendTerminalWithImages: (payload: {
+        terminalId: string;
+        text: string;
+        images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
+      }) => Promise<{ success: boolean; error?: string }>;
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
+      getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
       // Wave C project-switch + lifecycle event subscribers

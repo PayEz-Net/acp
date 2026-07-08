@@ -1,0 +1,1062 @@
+[
+  {
+    "ts": "2026-07-08T15:00:42.773Z",
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "agentCapabilities": {
+        "loadSession": true,
+        "mcpCapabilities": {
+          "http": true,
+          "sse": false
+        },
+        "promptCapabilities": {
+          "audio": false,
+          "embeddedContext": true,
+          "image": true
+        },
+        "sessionCapabilities": {
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "Kimi Code CLI",
+        "version": "1.37.0"
+      },
+      "authMethods": [
+        {
+          "_meta": {
+            "terminal-auth": {
+              "command": "C:\\Users\\jon-local\\.local\\bin\\kimi",
+              "args": [
+                "login"
+              ],
+              "label": "Kimi Code Login",
+              "env": {},
+              "type": "terminal"
+            }
+          },
+          "description": "Run `kimi login` command in the terminal, then follow the instructions to finish login.",
+          "id": "login",
+          "name": "Login with Kimi account"
+        }
+      ],
+      "protocolVersion": 1
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:44.624Z",
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "models": {
+        "availableModels": [
+          {
+            "modelId": "kimi-code/kimi-for-coding",
+            "name": "kimi-for-coding"
+          },
+          {
+            "modelId": "kimi-code/kimi-for-coding,thinking",
+            "name": "kimi-for-coding (thinking)"
+          }
+        ],
+        "currentModelId": "kimi-code/kimi-for-coding,thinking"
+      },
+      "modes": {
+        "availableModes": [
+          {
+            "description": "The default mode.",
+            "id": "default",
+            "name": "Default"
+          }
+        ],
+        "currentModeId": "default"
+      },
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7"
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:44.625Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "availableCommands": [
+          {
+            "description": "Analyze the codebase and generate an `AGENTS.md` file",
+            "name": "init"
+          },
+          {
+            "description": "Compact the context (optionally with a custom focus, e.g. /compact keep db discussions)",
+            "name": "compact"
+          },
+          {
+            "description": "Clear the context",
+            "name": "clear"
+          },
+          {
+            "description": "Toggle YOLO mode (auto-approve all actions)",
+            "name": "yolo"
+          },
+          {
+            "description": "Toggle plan mode. Usage: /plan [on|off|view|clear]",
+            "name": "plan"
+          },
+          {
+            "description": "Add a directory to the workspace. Usage: /add-dir <path>. Run without args to list added dirs",
+            "name": "add-dir"
+          },
+          {
+            "description": "Export current session context to a markdown file",
+            "name": "export"
+          },
+          {
+            "description": "Import context from a file or session ID",
+            "name": "import"
+          }
+        ],
+        "sessionUpdate": "available_commands_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.895Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "The",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " user",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " wants",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " a",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " concise",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " list",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " of",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " files",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:46.896Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " in",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.225Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " the",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.226Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " current",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.226Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " directory",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.226Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": ".",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.226Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " Current",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.226Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " working",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.227Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " directory",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.227Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " is",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.227Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " E",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.227Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": ":\\",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.610Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "repos",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.610Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "\\",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.611Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "ac",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "p",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "-desktop",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": ".",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " Use",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " Shell",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " or",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.612Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " Glob",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.790Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": ".",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " Shell",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " with",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " `",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "dir",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": "`",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " is",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": " fine",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.791Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": {
+          "text": ".",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.792Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.928Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.929Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.929Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\":",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.930Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.930Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.931Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\",",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.932Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.932Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"timeout",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.932Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"timeout\":",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.932Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"timeout\": ",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:47.999Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"timeout\": 10",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:48.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "{\"command\": \"dir\", \"timeout\": 10}",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:48.011Z",
+    "jsonrpc": "2.0",
+    "id": 0,
+    "method": "session/request_permission",
+    "params": {
+      "options": [
+        {
+          "kind": "allow_once",
+          "name": "Approve once",
+          "optionId": "approve"
+        },
+        {
+          "kind": "allow_always",
+          "name": "Approve for this session",
+          "optionId": "approve_for_session"
+        },
+        {
+          "kind": "reject_once",
+          "name": "Reject",
+          "optionId": "reject"
+        }
+      ],
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "toolCall": {
+        "content": [
+          {
+            "content": {
+              "text": "Requesting approval to perform: Run command `dir`",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "title": "Shell: dir",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:48.022Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "56285146-856c-494c-81df-bb66a77d9de7",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "The tool call is rejected by the user. Stop what you are doing and wait for the user to tell you how to proceed.",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "failed",
+        "toolCallId": "51c0d207-7bd1-4e7d-97d3-372edc888380/tool_i9TbgyVGTue588mEuuuFWE26",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T15:00:48.028Z",
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": {
+      "stopReason": "end_turn"
+    }
+  }
+]

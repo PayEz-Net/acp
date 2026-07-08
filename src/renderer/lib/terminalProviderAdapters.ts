@@ -53,12 +53,19 @@ const CLAUDE_ADAPTER: TerminalAdapter = {
 
 // Kimi emits inline image placeholders like [IMAGE: filename.png].
 const KIMI_IMAGE_PLACEHOLDER = /\[IMAGE:[^\]]*\]/gi;
+// Normalize plain Markdown unordered-list bullets to the bullet used by the
+// native Kimi CLI renderer (pi-tui uses •). This makes transcript-style lists
+// consistent in the pane even when the raw PTY uses dashes or asterisks.
+const KIMI_BULLET_LIST = /^(\s*)[-*](\s)/gm;
 
 const KIMI_ADAPTER: TerminalAdapter = {
   provider: 'kimi',
 
   normalizeLine(input: string): string {
-    return stripSpinnerPrefix(input).replace(KIMI_IMAGE_PLACEHOLDER, '⟨image⟩').trimEnd();
+    return stripSpinnerPrefix(input)
+      .replace(KIMI_IMAGE_PLACEHOLDER, '⟨image⟩')
+      .replace(KIMI_BULLET_LIST, '$1•$2')
+      .trimEnd();
   },
 };
 

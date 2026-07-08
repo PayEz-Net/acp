@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
 import { CODE_PROVIDERS, CodeProvider, PROVIDER_LABELS } from '../../lib/agentProviders';
-import { X, Server, Users, Radio, RefreshCw, Bot, Brain } from 'lucide-react';
+import { X, Server, Users, Radio, RefreshCw, Bot, Brain, Image } from 'lucide-react';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -123,6 +123,39 @@ function ThinkingSection() {
       </label>
       <p className="text-xs text-slate-500 mt-2">
         When enabled, collapsed thinking blocks appear alongside agent answers.
+      </p>
+    </div>
+  );
+}
+
+// Instant-send pasted images when the composer has no text.
+function ImagePasteSection() {
+  const { settings, setSettings } = useAppStore();
+  const [instantSend, setInstantSend] = useState(settings.instantSendPastedImages === true);
+
+  const handleChange = async (enabled: boolean) => {
+    setInstantSend(enabled);
+    const next = { ...settings, instantSendPastedImages: enabled };
+    await window.electronAPI.setSettings(next);
+    setSettings(next);
+  };
+
+  return (
+    <div className="p-4 border-b border-slate-800">
+      <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+        <Image className="w-4 h-4" /> Image Paste
+      </h3>
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={instantSend}
+          onChange={(e) => handleChange(e.target.checked)}
+          className="w-4 h-4 rounded border-slate-600 text-emerald-500 bg-slate-800 focus:ring-emerald-500/50"
+        />
+        <span className="text-sm text-slate-300">Send pasted images immediately</span>
+      </label>
+      <p className="text-xs text-slate-500 mt-2">
+        When enabled, pasting an image into an empty composer sends it right away.
       </p>
     </div>
   );
@@ -262,6 +295,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
         {/* Thinking blocks */}
         <ThinkingSection />
+
+        {/* Image paste */}
+        <ImagePasteSection />
 
         {/* SSE */}
         <div className="p-4">

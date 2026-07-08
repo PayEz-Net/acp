@@ -28,6 +28,15 @@ describe('provider adapters (plain-text inputs)', () => {
     expect(normalizeTerminalLine('kimi', 'Before [IMAGE: a.png] after')).toBe('Before ⟨image⟩ after');
   });
 
+  it('normalizes Kimi unordered-list bullets to •', () => {
+    expect(normalizeTerminalLine('kimi', '- First item')).toBe('• First item');
+    expect(normalizeTerminalLine('kimi', '* Second item')).toBe('• Second item');
+    expect(normalizeTerminalLine('kimi', '  - Nested item')).toBe('  • Nested item');
+    // Ordered lists and prose dashes are untouched.
+    expect(normalizeTerminalLine('kimi', '1. Ordered item')).toBe('1. Ordered item');
+    expect(normalizeTerminalLine('kimi', 'This is - not a list')).toBe('This is - not a list');
+  });
+
   it('normalizes Codex model labels to Codex', () => {
     expect(normalizeTerminalLine('codex', 'codex-mini')).toBe('Codex');
     expect(normalizeTerminalLine('codex', 'codex-mini-latest')).toBe('Codex');

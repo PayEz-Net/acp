@@ -1,0 +1,1458 @@
+﻿diff --git a/src/renderer/components/Terminal/UnifiedTerminal.tsx b/src/renderer/components/Terminal/UnifiedTerminal.tsx
+index 65b53fa..e01646e 100644
+--- a/src/renderer/components/Terminal/UnifiedTerminal.tsx
++++ b/src/renderer/components/Terminal/UnifiedTerminal.tsx
+@@ -5,16 +5,36 @@
+  * adapter applied, blanks and spinner frames collapsed) and renders it as a
+  * scrollable line log. A single Vercel-style composer at the bottom of the pane
+  * is the primary chat/input control.
++ *
++ * Performance notes:
++ * - The visible line list is virtualized with @tanstack/react-virtual and
++ *   dynamic row-height measurement so a 1,000-line scrollback only creates DOM
++ *   nodes for the viewport plus overscan.
++ * - Footer metadata (line count, thinking count, live-thinking state) is
++ *   computed from a debounced snapshot so bursts of PTY output do not recompute
++ *   derived state every frame.
++ * - Auto-scroll uses requestAnimationFrame and only fires when the user is
++ *   already near the bottom.
++ * - Plain-text paste uses the browser's native `paste` event to avoid a
++ *   blocking main-process clipboard round-trip.
+  */
+ 
+-import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+-import { ChevronDown, Send } from 'lucide-react';
+-import { useAgentOutputStore } from '../../stores/agentOutputStore';
++import { useEffect, useRef, useState, useCallback, useMemo, useId } from 'react';
++import { useVirtualizer } from '@tanstack/react-virtual';
++
++import { ChevronDown, Send, X } from 'lucide-react';
++import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOutputStore';
+ import { useAppStore } from '../../stores/appStore';
+ import { useProjectStore } from '../../stores/projectStore';
+ import { useAgentStatusStore } from '../../stores/agentStatusStore';
+ import { ThinkingBlock } from '../ThinkingBlock';
+ import { TerminalFooter } from './TerminalFooter';
++import { CodeChangeCard } from './CodeChangeCard';
++import { terminalStreamNormalizer } from '../../lib/terminalStream';
++import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImages';
++import { CODE_PROVIDERS } from '../../lib/agentProviders';
++import { perfMark, perfMeasure } from '../../lib/perf';
++import { trackEvent } from '../../lib/telemetry';
+ 
+ export interface UnifiedTerminalProps {
+   /** Agent whose output stream to render. */
+@@ -37,6 +57,8 @@ export const MIN_COLS = 10;
+ export const MIN_ROWS = 4;
+ 
+ const SAMPLE_CHARS = 'MMMMMMMMMM';
++const AUTO_SCROLL_THRESHOLD_PX = 40;
++const FOOTER_DEBOUNCE_MS = 100;
+ 
+ export function UnifiedTerminal({
+   agentName: agentNameProp,
+@@ -49,49 +71,81 @@ export function UnifiedTerminal({
+ }: UnifiedTerminalProps) {
+   const agent = agentProp ?? null;
+   const agentName = agent?.name ?? agentNameProp ?? '';
+-  const lines = useAgentOutputStore((s) => s.lines);
++  // Narrow selector: only subscribe to lines for this agent.
++  const allLines = useAgentOutputStore((s) => s.lines);
++  const filteredLines = useMemo(
++    () => allLines.filter((l) => l.agent === agentName),
++    [allLines, agentName],
++  );
+   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
+-  const filteredLines = useMemo(() => lines.filter((l) => l.agent === agentName), [lines, agentName]);
+ 
+   const containerRef = useRef<HTMLDivElement>(null);
+   const measureRef = useRef<HTMLSpanElement>(null);
+   const scrollRef = useRef<HTMLDivElement>(null);
+-  const bottomRef = useRef<HTMLDivElement>(null);
+   const inputRef = useRef<HTMLInputElement>(null);
+   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   const terminalIdRef = useRef(terminalId);
++  const userScrolledRef = useRef(false);
++  const rafScrollRef = useRef<number | null>(null);
+   terminalIdRef.current = terminalId;
+ 
+   const [paused, setPaused] = useState(false);
+   const [showNewOutput, setShowNewOutput] = useState(false);
++  const [sendError, setSendError] = useState<string | null>(null);
++  const [pendingInstantSend, setPendingInstantSend] = useState(false);
++  const errorId = useId();
++
++  // Debounced footer metadata so PTY bursts don't recompute stats every frame.
++  // Initialize synchronously from the current lines so first render is correct.
++  const computeStats = useCallback((lines: AgentOutputLine[]) => {
++    const lineCount = lines.length;
++    const thinkingCount = lines.filter((l) => l.thinking && !l.thinkingLive).length;
++    const isThinkingLive = lines.length > 0 && !!lines[lines.length - 1].thinkingLive;
++    return { lineCount, thinkingCount, isThinkingLive };
++  }, []);
++
++  const [debouncedStats, setDebouncedStats] = useState(() => computeStats(filteredLines));
++
++  useEffect(() => {
++    const t = setTimeout(() => {
++      setDebouncedStats(computeStats(filteredLines));
++    }, FOOTER_DEBOUNCE_MS);
++    return () => clearTimeout(t);
++  }, [filteredLines, computeStats]);
+ 
+-  // Per-session output stats for the footer.
+-  const lineCount = filteredLines.length;
+-  const thinkingCount = filteredLines.filter((l) => l.thinking && !l.thinkingLive).length;
+-  const isThinkingLive = filteredLines.length > 0 && !!filteredLines[filteredLines.length - 1].thinkingLive;
++  const { lineCount, thinkingCount, isThinkingLive } = debouncedStats;
+   const activeProject = useProjectStore((s) => s.activeProject);
+   const repoPath = activeProject?.repo_path ?? '';
+-  const teamRuntime = activeProject?.runtime_choice ?? null;
+-  const effectiveProvider = agent?.provider ?? teamRuntime;
++  // runtime_choice is the single authority for the team runtime; agent.provider
++  // may be stale from the legacy agentProvider field.
++  const effectiveProvider = activeProject?.runtime_choice ?? agent?.provider ?? null;
++  const instantSendPastedImages = useAppStore((s) => s.settings.instantSendPastedImages) === true;
++  const enableTerminalImagePaste = useAppStore((s) => s.settings.enableTerminalImagePaste) !== false;
+   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
+   const contextUsage = agentStatus?.contextUsage ?? 0;
+ 
+   const computeDimensions = useCallback(() => {
+     const container = containerRef.current;
+     const measure = measureRef.current;
+-    if (!container || !measure) return { cols: MIN_COLS, rows: MIN_ROWS };
++    const scroll = scrollRef.current;
++    if (!container || !measure || !scroll) return { cols: MIN_COLS, rows: MIN_ROWS };
+ 
+     const rect = measure.getBoundingClientRect();
+     const charWidth = rect.width / SAMPLE_CHARS.length;
+     const lineHeight = rect.height;
+     if (charWidth <= 0 || lineHeight <= 0) return { cols: MIN_COLS, rows: MIN_ROWS };
+ 
+-    const style = window.getComputedStyle(container);
++    // Measure the scroll surface (the actual text box), not the outer host.
++    // clientWidth includes padding but excludes the scrollbar; subtract the
++    // padding to get the content box the PTY should format for. This keeps the
++    // reported cols/rows in sync with where the DOM will wrap, avoiding the
++    // "resize is hard" mismatch where the CLI emitted more cols than fit.
++    const style = window.getComputedStyle(scroll);
+     const paddingHor = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+     const paddingVer = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+ 
+-    const availableWidth = Math.max(0, container.clientWidth - paddingHor);
+-    const availableHeight = Math.max(0, container.clientHeight - paddingVer);
++    const availableWidth = Math.max(0, scroll.clientWidth - paddingHor);
++    const availableHeight = Math.max(0, scroll.clientHeight - paddingVer);
+ 
+     const cols = Math.max(MIN_COLS, Math.floor(availableWidth / charWidth));
+     const rows = Math.max(MIN_ROWS, Math.floor(availableHeight / lineHeight));
+@@ -142,24 +196,60 @@ export function UnifiedTerminal({
+     }
+   }, [terminalId, reportDimensions]);
+ 
+-  // Auto-scroll to bottom when new lines arrive, unless paused.
++  // Virtualize the line list. Dynamic row heights handle wrapped lines.
++  const virtualizer = useVirtualizer({
++    count: filteredLines.length,
++    getScrollElement: () => scrollRef.current,
++    estimateSize: () => 24,
++    measureElement: (el) => el.getBoundingClientRect().height,
++    overscan: 5,
++    getItemKey: (index) => filteredLines[index]?.id ?? `fallback-${index}`,
++  });
++
++  const totalSize = virtualizer.getTotalSize();
++  const virtualItems = virtualizer.getVirtualItems();
++
++  // Determine whether the user is currently near the bottom.
++  const isNearBottom = useCallback(() => {
++    const el = scrollRef.current;
++    if (!el) return true;
++    return el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
++  }, []);
++
++  // Auto-scroll to bottom when new lines arrive, unless paused or user scrolled up.
+   useEffect(() => {
+     if (paused) {
+       setShowNewOutput(true);
+       return;
+     }
+-    const el = scrollRef.current;
+-    if (el) {
+-      el.scrollTop = el.scrollHeight;
+-    }
+-    setShowNewOutput(false);
+-  }, [filteredLines, paused]);
++    if (rafScrollRef.current) cancelAnimationFrame(rafScrollRef.current);
++    rafScrollRef.current = requestAnimationFrame(() => {
++      rafScrollRef.current = null;
++      const el = scrollRef.current;
++      if (!el) return;
++      const nearBottom = userScrolledRef.current ? isNearBottom() : true;
++      if (nearBottom) {
++        virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
++        setShowNewOutput(false);
++        userScrolledRef.current = false;
++      } else {
++        setShowNewOutput(true);
++      }
++    });
++    return () => {
++      if (rafScrollRef.current) {
++        cancelAnimationFrame(rafScrollRef.current);
++        rafScrollRef.current = null;
++      }
++    };
++  }, [filteredLines.length, paused, virtualizer, isNearBottom]);
+ 
+   // Track scroll position to pause/resume automatically.
+   const handleScroll = useCallback(() => {
+     const el = scrollRef.current;
+     if (!el) return;
+-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
++    userScrolledRef.current = true;
++    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD_PX;
+     if (nearBottom && paused) {
+       setPaused(false);
+       setShowNewOutput(false);
+@@ -194,36 +284,68 @@ export function UnifiedTerminal({
+     }
+   }, [getSelectionText]);
+ 
+-  const handlePaste = useCallback(async () => {
++  const writePastedText = useCallback(async (text: string) => {
++    const tid = terminalIdRef.current;
++    if (!tid || !text) return;
++    const start = perfMark('terminal-paste');
++    window.electronAPI.writeTerminal(tid, text);
++    perfMeasure('terminal-paste', start, { length: text.length });
++  }, []);
++
++  // Native paste path for the terminal surface — avoids the main-process
++  // clipboard round-trip on the critical input path.
++  const handleTerminalPaste = useCallback(
++    (e: React.ClipboardEvent) => {
++      const tid = terminalIdRef.current;
++      if (!tid) return;
++      const text = e.clipboardData?.getData('text/plain') ?? '';
++      if (text) {
++        e.preventDefault();
++        writePastedText(text);
++      }
++    },
++    [writePastedText],
++  );
++
++  // Fallback paste path used by the context-menu handler.
++  const handlePasteFallback = useCallback(async () => {
+     const tid = terminalIdRef.current;
+     if (!tid) return;
+     try {
+       const text = await window.electronAPI.readClipboardText();
+       if (text) {
+-        window.electronAPI.writeTerminal(tid, text);
++        writePastedText(text);
+       }
+     } catch (err) {
+-      console.warn(`[UnifiedTerminal ${agentName}] paste failed:`, err);
++      console.warn(`[UnifiedTerminal ${agentName}] paste fallback failed:`, err);
+     }
+-  }, [agentName]);
++  }, [agentName, writePastedText]);
+ 
+-  const insertClipboardIntoInput = useCallback(async (input: HTMLInputElement) => {
++  const handleContextMenuPaste = useCallback(async () => {
++    // Prefer the native paste path so images from the clipboard land in the
++    // composer input and are staged exactly like Ctrl+V. Focus the input first
++    // so webContents.paste() targets it.
++    inputRef.current?.focus();
+     try {
+-      const text = await window.electronAPI.readClipboardText();
+-      if (!text) return;
+-      const start = input.selectionStart ?? input.value.length;
+-      const end = input.selectionEnd ?? input.value.length;
+-      const newValue = input.value.slice(0, start) + text + input.value.slice(end);
+-      input.value = newValue;
+-      const newCursor = start + text.length;
+-      requestAnimationFrame(() => {
+-        input.setSelectionRange(newCursor, newCursor);
+-        input.focus();
+-      });
++      await window.electronAPI.triggerPaste();
+     } catch (err) {
+-      console.warn(`[UnifiedTerminal ${agentName}] input paste failed:`, err);
++      console.warn(`[UnifiedTerminal ${agentName}] context-menu paste failed:`, err);
++      // Fallback for plain text: read the OS clipboard and write it to the PTY.
++      await handlePasteFallback();
+     }
+-  }, [agentName]);
++  }, [agentName, handlePasteFallback]);
++
++  const insertTextAtCursor = useCallback((input: HTMLInputElement, text: string) => {
++    const start = input.selectionStart ?? input.value.length;
++    const end = input.selectionEnd ?? input.value.length;
++    const newValue = input.value.slice(0, start) + text + input.value.slice(end);
++    input.value = newValue;
++    const newCursor = start + text.length;
++    requestAnimationFrame(() => {
++      input.setSelectionRange(newCursor, newCursor);
++      input.focus();
++    });
++  }, []);
+ 
+   const handleContextMenu = useCallback(
+     (e: React.MouseEvent) => {
+@@ -234,7 +356,7 @@ export function UnifiedTerminal({
+         items.push({ label: 'Copy', action: handleCopy });
+       }
+       if (terminalIdRef.current) {
+-        items.push({ label: 'Paste', action: handlePaste });
++        items.push({ label: 'Paste', action: handleContextMenuPaste });
+       }
+       if (items.length === 0) return;
+ 
+@@ -260,7 +382,7 @@ export function UnifiedTerminal({
+         }, { once: true });
+       });
+     },
+-    [handleCopy, handlePaste, getSelectionText],
++    [handleCopy, handleContextMenuPaste, getSelectionText],
+   );
+ 
+   const handleKeyDown = useCallback(
+@@ -281,12 +403,7 @@ export function UnifiedTerminal({
+         return;
+       }
+ 
+-      // Ctrl+V: paste from clipboard.
+-      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
+-        e.preventDefault();
+-        handlePaste();
+-        return;
+-      }
++      // Ctrl+V is now handled by the native paste event on the scroll surface.
+ 
+       // Forward a few useful control sequences.
+       if (e.key.length > 1) {
+@@ -312,18 +429,78 @@ export function UnifiedTerminal({
+         window.electronAPI.writeTerminal(tid, e.key);
+       }
+     },
+-    [getSelectionText, handlePaste, handleCopy],
++    [getSelectionText, handleCopy],
+   );
+ 
++  const { images: stagedImages, error: imageError, addImageFromFile, removeImage, clearImages } = useTerminalImages();
++
++  const canSendImages = Boolean(effectiveProvider && (CODE_PROVIDERS as string[]).includes(effectiveProvider));
++
+   const sendInputLine = useCallback(() => {
+     const tid = terminalIdRef.current;
+     const input = inputRef.current;
+     if (!tid || !input) return;
+     const value = input.value;
++    setSendError(null);
++
++    if (stagedImages.length > 0) {
++      if (!canSendImages) {
++        setSendError('Image input is not supported for this terminal provider.');
++        trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'PROVIDER_NOT_SUPPORTED' });
++        return;
++      }
++      terminalStreamNormalizer.recordUserInput(tid, value);
++      const imagesToSend = stagedImages.map((img) => ({
++        id: img.id,
++        name: img.name,
++        type: img.type,
++        data: img.data,
++      }));
++      const totalSizeBytes = stagedImages.reduce((sum, img) => sum + img.size, 0);
++      window.electronAPI
++        .sendTerminalWithImages({
++          terminalId: tid,
++          text: value,
++          images: imagesToSend,
++        })
++        .then((result) => {
++          if (result.success) {
++            input.value = '';
++            clearImages();
++            trackEvent({
++              event: 'terminal_image_paste_sent',
++              provider: effectiveProvider!,
++              imageCount: imagesToSend.length,
++              totalSizeBytes,
++            });
++          } else {
++            setSendError(result.error ?? 'Failed to send images.');
++            trackEvent({ event: 'terminal_image_paste_failed', errorCode: result.error ?? 'UNKNOWN' });
++          }
++        })
++        .catch(() => {
++          setSendError('Failed to send images.');
++          trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'IPC_ERROR' });
++        });
++      return;
++    }
++
+     if (!value) return;
++    terminalStreamNormalizer.recordUserInput(tid, value);
+     window.electronAPI.writeTerminal(tid, value + '\r');
+     input.value = '';
+-  }, []);
++  }, [stagedImages, canSendImages, clearImages, effectiveProvider]);
++
++  // Phase 2 instant-send: once images are staged and the composer is still
++  // empty, send the message automatically.
++  useEffect(() => {
++    if (!pendingInstantSend) return;
++    setPendingInstantSend(false);
++    const input = inputRef.current;
++    if (!input || input.value !== '') return;
++    if (stagedImages.length === 0) return;
++    sendInputLine();
++  }, [pendingInstantSend, stagedImages, sendInputLine]);
+ 
+   const handleInputKeyDown = useCallback(
+     (e: React.KeyboardEvent<HTMLInputElement>) => {
+@@ -338,7 +515,12 @@ export function UnifiedTerminal({
+ 
+       if (e.key === 'Escape') {
+         e.preventDefault();
+-        window.electronAPI.writeTerminal(tid, '\u001b');
++        if (stagedImages.length > 0) {
++          clearImages();
++          setSendError(null);
++        } else {
++          window.electronAPI.writeTerminal(tid, '\u001b');
++        }
+         return;
+       }
+ 
+@@ -359,14 +541,63 @@ export function UnifiedTerminal({
+         return;
+       }
+ 
+-      // Ctrl+V: paste into the composer input at the cursor.
+-      if (e.key.toLowerCase() === 'v' && (e.ctrlKey || e.metaKey)) {
++    },
++    [sendInputLine, stagedImages, clearImages],
++  );
++
++  const handleInputPaste = useCallback(
++    async (e: React.ClipboardEvent<HTMLInputElement>) => {
++      if (!enableTerminalImagePaste) return;
++      const input = e.currentTarget;
++      const items = Array.from(e.clipboardData?.items ?? []);
++      const files = Array.from(e.clipboardData?.files ?? []);
++      let imageHandled = false;
++      let textHandled = false;
++      const composerWasEmpty = input.value === '';
++
++      // Prefer the files list (standard API) and fall back to items for
++      // environments where only items are populated (e.g. some jsdom setups).
++      if (files.length > 0) {
++        for (const file of files) {
++          if (file.type.startsWith('image/')) {
++            imageHandled = true;
++            await addImageFromFile(file);
++          }
++        }
++      } else {
++        for (const item of items) {
++          if (item.kind === 'file' && item.type.startsWith('image/')) {
++            const file = item.getAsFile();
++            if (file) {
++              imageHandled = true;
++              await addImageFromFile(file);
++            }
++          }
++        }
++      }
++
++      // Text can be provided as a string item even when files are present.
++      for (const item of items) {
++        if (item.kind === 'string' && item.type === 'text/plain') {
++          textHandled = true;
++          item.getAsString((text) => {
++            insertTextAtCursor(input, text);
++          });
++        }
++      }
++
++      if (imageHandled || textHandled) {
+         e.preventDefault();
+-        insertClipboardIntoInput(e.currentTarget);
+-        return;
++      }
++
++      // Phase 2 instant-send: only when the composer was empty, no text was
++      // pasted, and the input is still empty after staging images. Mixed
++      // clipboards always wait for Enter so the user can add context.
++      if (composerWasEmpty && instantSendPastedImages && !textHandled && input.value === '') {
++        setPendingInstantSend(true);
+       }
+     },
+-    [sendInputLine, insertClipboardIntoInput],
++    [addImageFromFile, insertTextAtCursor, instantSendPastedImages, enableTerminalImagePaste],
+   );
+ 
+   const handleClick = useCallback(() => {
+@@ -381,11 +612,9 @@ export function UnifiedTerminal({
+   const resumeFollow = useCallback(() => {
+     setPaused(false);
+     setShowNewOutput(false);
+-    const el = scrollRef.current;
+-    if (el) {
+-      el.scrollTop = el.scrollHeight;
+-    }
+-  }, []);
++    userScrolledRef.current = false;
++    virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
++  }, [filteredLines.length, virtualizer]);
+ 
+   return (
+     <div className="flex flex-col h-full overflow-hidden">
+@@ -412,9 +641,10 @@ export function UnifiedTerminal({
+           onScroll={handleScroll}
+           onContextMenu={handleContextMenu}
+           onKeyDown={handleKeyDown}
++          onPaste={handleTerminalPaste}
+           className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-mono ${
+             compact ? 'text-[11px]' : 'text-[13px]'
+-          } p-2 space-y-0.5`}
++          } p-2`}
+           role="log"
+           aria-live="polite"
+           aria-label={`Terminal output for ${agentName}`}
+@@ -426,37 +656,33 @@ export function UnifiedTerminal({
+             </div>
+           )}
+ 
+-          {filteredLines.map((line, idx) => {
+-            // Live thinking placeholders are updated in-place by the store and
+-            // surfaced as a single-line indicator in the footer. They do not
+-            // render as repeated blocks inside the stream.
+-            if (line.thinkingLive) {
+-              return null;
+-            }
+-            return (
+-              <div
+-                key={`${line.ts}-${idx}`}
+-                className="flex flex-col py-0.5 hover:bg-slate-800/30 rounded px-1 -mx-1"
+-              >
+-                <div className="flex items-start gap-2">
+-                  <span className="text-slate-300 min-w-0 whitespace-pre-wrap leading-tight [overflow-wrap:anywhere]">
+-                    {line.line}
+-                  </span>
+-                </div>
+-                {showThinking && line.thinking && (
+-                  <div className="ml-2 mt-0.5">
+-                    <ThinkingBlock
+-                      label="Thinking…"
+-                      content={line.thinking}
+-                      live={false}
++          {filteredLines.length > 0 && (
++            <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
++              {virtualItems.map((virtualItem) => {
++                const line = filteredLines[virtualItem.index];
++                return (
++                  <div
++                    key={virtualItem.key}
++                    data-index={virtualItem.index}
++                    ref={virtualizer.measureElement}
++                    style={{
++                      position: 'absolute',
++                      top: 0,
++                      left: 0,
++                      width: '100%',
++                      transform: `translateY(${virtualItem.start}px)`,
++                    }}
++                  >
++                    <TerminalLine
++                      line={line}
+                       compact={compact}
++                      showThinking={showThinking}
+                     />
+                   </div>
+-                )}
+-              </div>
+-            );
+-          })}
+-          <div ref={bottomRef} />
++                );
++              })}
++            </div>
++          )}
+         </div>
+ 
+         {showNewOutput && paused && (
+@@ -490,22 +716,62 @@ export function UnifiedTerminal({
+       )}
+ 
+       {/* Vercel-style composer — single chat input for the pane */}
+-      <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2">
++      <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2 space-y-2">
++        {/* Image preview strip */}
++        {stagedImages.length > 0 && (
++          <div
++            className="flex gap-2 overflow-x-auto pb-1"
++            data-testid="terminal-image-previews"
++            role="list"
++            aria-label={`${stagedImages.length} pasted image${stagedImages.length === 1 ? '' : 's'}`}
++          >
++            {stagedImages.map((img, idx) => (
++              <ImagePreviewChip
++                key={img.id}
++                image={img}
++                index={idx}
++                onRemove={removeImage}
++              />
++            ))}
++          </div>
++        )}
++
++        {/* Validation / send errors */}
++        {(imageError || sendError) && (
++          <div
++            id={errorId}
++            className="text-xs text-red-400 px-1"
++            data-testid="terminal-image-error"
++          >
++            {imageError ?? sendError}
++          </div>
++        )}
++
++        {/* Unsupported provider notice */}
++        {terminalId && stagedImages.length > 0 && !canSendImages && (
++          <div className="text-xs text-amber-400 px-1" data-testid="terminal-provider-mismatch">
++            Image input requires Claude Code, Kimi CLI, or Codex CLI.
++          </div>
++        )}
++
+         <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-2 border border-slate-700/50 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/30 transition-all">
+           <input
+             ref={inputRef}
+             type="text"
+             defaultValue=""
+             onKeyDown={handleInputKeyDown}
++            onPaste={handleInputPaste}
+             onFocus={onFocus}
+             disabled={!terminalId}
+             placeholder={terminalId ? `Message ${agentName}…` : 'Start the agent to type…'}
+             className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+             data-testid="terminal-input"
++            aria-label="Terminal message input"
++            aria-describedby={imageError || sendError ? errorId : undefined}
+           />
+           <button
+             onClick={sendInputLine}
+-            disabled={!terminalId}
++            disabled={!terminalId || (stagedImages.length > 0 && !canSendImages)}
+             className="p-1.5 rounded-full text-slate-400 hover:text-emerald-400 hover:bg-slate-700/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+             title="Send"
+             data-testid="terminal-send"
+@@ -517,3 +783,94 @@ export function UnifiedTerminal({
+     </div>
+   );
+ }
++
++interface TerminalLineProps {
++  line: AgentOutputLine;
++  compact?: boolean;
++  showThinking: boolean;
++}
++
++function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
++  // Live thinking placeholders are updated in-place by the store and
++  // surfaced as a single-line indicator in the footer. They do not render as
++  // repeated blocks inside the stream.
++  if (line.thinkingLive) {
++    return null;
++  }
++  if (line.codeChange) {
++    return (
++      <div className="px-1 -mx-1 py-0.5">
++        <CodeChangeCard codeChange={line.codeChange} compact={compact} />
++      </div>
++    );
++  }
++  const isUser = line.source === 'user';
++  const isInfo = line.source === 'info';
++  return (
++    <div
++      className={`flex flex-col py-0.5 rounded px-1 -mx-1 ${
++        isUser ? 'items-end' : 'items-start'
++      } ${isInfo ? 'opacity-70' : ''} hover:bg-slate-800/30`}
++    >
++      <div className={`flex items-start gap-2 max-w-[90%] ${isUser ? 'justify-end' : ''}`}>
++        <span
++          className={`min-w-0 whitespace-pre-wrap leading-tight rounded px-1.5 py-0.5 overflow-x-auto ${
++            isUser
++              ? 'bg-blue-600/20 text-blue-200'
++              : isInfo
++                ? 'text-slate-400 italic text-xs'
++                : 'text-slate-300'
++          }`}
++        >
++          {line.line}
++        </span>
++      </div>
++      {showThinking && line.thinking && (
++        <div className={`${isUser ? 'mr-0' : 'ml-2'} mt-0.5`}>
++          <ThinkingBlock
++            label="Thinking…"
++            content={line.thinking}
++            live={false}
++            compact={compact}
++          />
++        </div>
++      )}
++    </div>
++  );
++}
++
++interface ImagePreviewChipProps {
++  image: StagedImage;
++  index: number;
++  onRemove: (id: string) => void;
++}
++
++function ImagePreviewChip({ image, index, onRemove }: ImagePreviewChipProps) {
++  return (
++    <div className="relative shrink-0 group rounded-lg border border-slate-700 bg-slate-800 overflow-hidden" role="listitem">
++      <img
++        src={image.previewUrl}
++        alt={`Pasted image ${index + 1}`}
++        className="w-16 h-16 object-cover"
++      />
++      <div className="absolute inset-x-0 bottom-0 bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-slate-300 truncate">
++        {image.width}×{image.height} · {formatBytes(image.size)}
++      </div>
++      <button
++        type="button"
++        onClick={() => onRemove(image.id)}
++        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-slate-900/80 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
++        aria-label={`Remove pasted image ${image.name || index + 1}`}
++        title="Remove"
++      >
++        <X className="w-3 h-3" />
++      </button>
++    </div>
++  );
++}
++
++function formatBytes(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++}
+diff --git a/src/renderer/lib/ansi.ts b/src/renderer/lib/ansi.ts
+index b5d58c5..5a814fc 100644
+--- a/src/renderer/lib/ansi.ts
++++ b/src/renderer/lib/ansi.ts
+@@ -5,13 +5,24 @@
+  * colors/styles, 24-bit and 256-color codes, cursor show/hide, erase-line,
+  * generic CSI sequences, OSC hyperlinks/titles). This is intentionally not a
+  * full VT100 parser.
++ *
++ * Bridge note: node-pty chunks can split an escape sequence across data events.
++ * We strip complete sequences *and* trailing incomplete sequences so fragments
++ * like "ESC[656" or a lone ESC at a chunk boundary do not leak into the DOM
++ * line renderer.
+  */
+ 
+ const ANSI_ERASE_LINE = /\u001b\[\d?K/g;
+ const ANSI_CURSOR_SHOW_HIDE = /\u001b\[\?25[hl]/g;
+ const ANSI_COLOR_AND_STYLE = /\u001b\[(?:\d+;)*\d*m/g;
+-const ANSI_GENERIC_CSI = /\u001b\[[\d;?]*[A-Za-z]/g;
++// Standard CSI final bytes include @ A-Z [ \ ] ^ _ ` a-z { | } ~ .
++// Also allow private-marker prefixes < = ? for completeness.
++const ANSI_GENERIC_CSI = /(?:\u001b\[|\x9b)[<=?]?[\d;]*[@A-Za-z\\[\]^_`{|}~]/g;
+ const ANSI_OSC = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
++// Incomplete CSI at end of string (sequence was split across the bridge).
++const ANSI_CSI_INCOMPLETE = /(?:\u001b\[|\x9b)[<=?]?[\d;]*$/g;
++// A lone ESC at the very end is almost certainly a split sequence.
++const ANSI_LONE_ESC = /\u001b$/g;
+ 
+ /** Remove ANSI escape sequences from a string. */
+ export function stripAnsi(input: string): string {
+@@ -20,5 +31,7 @@ export function stripAnsi(input: string): string {
+     .replace(ANSI_ERASE_LINE, '')
+     .replace(ANSI_CURSOR_SHOW_HIDE, '')
+     .replace(ANSI_COLOR_AND_STYLE, '')
+-    .replace(ANSI_GENERIC_CSI, '');
++    .replace(ANSI_GENERIC_CSI, '')
++    .replace(ANSI_CSI_INCOMPLETE, '')
++    .replace(ANSI_LONE_ESC, '');
+ }
+diff --git a/src/renderer/lib/terminalStream.ts b/src/renderer/lib/terminalStream.ts
+index 7db2a9e..274a62b 100644
+--- a/src/renderer/lib/terminalStream.ts
++++ b/src/renderer/lib/terminalStream.ts
+@@ -26,6 +26,14 @@ import { normalizeTerminalLine } from './terminalProviderAdapters';
+ import { type CodeProvider } from './agentProviders';
+ import { useAgentStatusStore } from '../stores/agentStatusStore';
+ 
++export interface CodeChangeLine {
++  filePath: string;
++  operation: 'modified' | 'created' | 'deleted';
++  hunks: Array<{
++    lines: Array<{ type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number }>;
++  }>;
++}
++
+ export interface StreamLine {
+   agent: string;
+   terminal_id: string;
+@@ -33,10 +41,20 @@ export interface StreamLine {
+   line: string;
+   ts: string;
+   project_id?: string;
++  /** Who/what produced this line: agent output, user input, or info/system. */
++  source?: import('../stores/agentOutputStore').OutputSource;
+   /** Accumulated thinking content associated with this line (the answer). */
+   thinking?: string;
+   /** When true, this line is a live thinking placeholder that should be replaced by the final answer. */
+   thinkingLive?: boolean;
++  /** Structured code-change payload when this line represents an edit block. */
++  codeChange?: CodeChangeLine;
++}
++
++interface PendingCodeChange {
++  filePath: string;
++  operation: 'modified' | 'created' | 'deleted';
++  lines: Array<{ type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number }>;
+ }
+ 
+ interface TerminalHistory {
+@@ -52,15 +70,46 @@ interface TerminalHistory {
+   // to suppress non-consecutive duplicate lines within the dedup window, which
+   // catches provider TUIs that redraw conversation history or echo input.
+   recentKeys: Map<string, number>;
++  // User-input lines already emitted as user-source. Provider TUIs reprint the
++  // user's prompt with various prefixes long after the original echo; this map
++  // lets us suppress those delayed repeats without affecting agent answers.
++  emittedUserInputKeys: Map<string, number>;
++  // Last time we pruned stale entries from recentKeys (ms).
++  recentKeysLastPruned: number;
++  // Buffered code-change block waiting for more diff lines or a flush trigger.
++  pendingCodeChange: PendingCodeChange | null;
+   // Thinking-block state.
+   thinkingBuffer: string[];
+   thinkingLabel: string | null;
+   thinkingSawBlank: boolean;
+   thinkingLiveEmitted: boolean;
++  // Cached joined preview so heavy joins don't run on every spinner frame.
++  thinkingPreview: string;
++  thinkingPreviewBufferLength: number;
+ }
+ 
+ const DEDUP_WINDOW_MS = 5000;
+ const MAX_THINKING_BUFFER_LINES = 1000;
++const RECENT_KEY_PRUNE_INTERVAL_MS = 1000;
++const COLLAPSE_KEY_CACHE_SIZE = 200;
++
++// Provider TUIs reprint user input as part of redraws, tool-use headers, and
++// conversation history. Keep a longer memory of user input we already emitted
++// so those delayed echoes do not repeat in the pane.
++const USER_INPUT_DEDUP_WINDOW_MS = 30000;
++
++// Common prompt prefixes provider CLIs add to echoed user input (e.g. "> ",
++// "$ ", "# ", "› ", box-drawing variants).
++const USER_INPUT_PROMPT_PREFIX = /^[\s│┃┣├]*[›>➤$#%?→⇒]\s+/;
++
++function stripUserInputPrefix(text: string): string {
++  return text.replace(USER_INPUT_PROMPT_PREFIX, '');
++}
++
++// When a footer/status line is split across PTY chunks or SSE events, the
++// trailing fragment can leak as a short numeric line. Drop these fragments if
++// they arrive within this window after a footer was suppressed.
++const FOOTER_CONTINUATION_WINDOW_MS = 500;
+ 
+ // Spinner glyphs that may appear anywhere in a provider TUI redraw (not just
+ // at the line start). Used to build a structural collapse key so frames that
+@@ -95,6 +144,16 @@ const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█─━]{3,}[\s]
+ // Input prompts use em-dash, en-dash, box-drawing horizontals, or a lone hyphen.
+ const FOOTER_LINE = /^(?:[\s|⫶·]*(?:(?:context|tokens?|usage|cost|cpu|memory|tools?|files?|calls?|provider|model)\s*[:=]\s*[\d\.,\/%\sKMBT$]+.*|yolo\s+agent\b.*|\(\d[\d\.,]*[kmbt]?\/\d[\d\.,]*[kmbt]?\).*|⫶.*|[—–─━=\-]+\s*input\b.*|composing\b.*\d+[\d\.,]*[kmbt]?\s*tokens?|(?:ctrl|shift|alt|cmd)-[a-z0-9]+:.*|ctl-x:.*|crl-v(?:paste)?.*|[@#]\s*:\s*mention files|jnewline|\/(?:feedback|theme)\b.*|(?:thme|theme)\b.*|↑.*|ctrl-s\b.*)\s*[\s|⫶·]*)+$/i;
+ 
++// Kimi CLI emits transient numeric fragments during cheap-spinner/status redraws
++// that survive ANSI stripping, e.g. ":275347" (spinner token counter) or "302t".
++// Treat them as footer noise even when they appear without surrounding context.
++const KIMI_STATUS_ARTIFACT = /^(?=[\s\S]*[:\/()kmbt])[\s]*(?::\d{3,}|\d[\d\.,]*[kmbt]?\s*(?:tokens?|t)?(?:\s+\d[\d\.,]*[kmbt]?\s*(?:tokens?|t)?)*\)?)[\s]*$/i;
++
++// Fragments of a split footer line: token ratios and counters that leak on their
++// own after a full footer was suppressed. Only active within
++// FOOTER_CONTINUATION_WINDOW_MS of a dropped footer.
++const FOOTER_FRAGMENT = /^(?=[\s\S]*[:\/()kmbt])[\s]*(?::\d{3,}|\d[\d\.,]*[kmbt]?\)?(?:\s+\d[\d\.,]*[kmbt]?\)?)*(?:\s*(?:tokens?|t))?|\(?\d[\d\.,]*[kmbt]?\s*\/\s*\d[\d\.,]*[kmbt]?\)?(?:\s+\d[\d\.,]*[kmbt]?\)?)*(?:\s*(?:tokens?|t))?)[\s]*$/i;
++
+ // Explicit XML-style thinking markers (some providers/TUIs emit these).
+ const THINKING_START_MARKER = /<thinking\b/i;
+ const THINKING_END_MARKER = /<\/thinking>/i;
+@@ -104,6 +163,68 @@ const THINKING_END_MARKER = /<\/thinking>/i;
+ // exact matches.
+ type NoiseCategory = 'status-glyph' | 'thinking' | 'separator' | 'footer';
+ 
++// Code-change detection heuristics for agent-emitted file edits.
++// Trigger lines name the file and operation (e.g. "Now modify TerminalPane.tsx...").
++const CODE_CHANGE_MODIFY_TRIGGER = /Now modify\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
++const CODE_CHANGE_CREATE_TRIGGER = /Creating\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
++const CODE_CHANGE_DELETE_TRIGGER = /Delete\s+(.+?)(?:\s*(?:\.{3,}|…)\s*|$)/i;
++const CODE_CHANGE_TOOL_MARKER = /Using\s+(?:StrReplaceFile|WriteFile)/i;
++
++// Info/system lines that are not agent output and should be visually distinct.
++const INFO_LINE_PATTERNS = [
++  /^\[ACP\s+mail\]/i,
++  /^Failed\s+to\s+start:/i,
++  /^\[ACP\s+[a-z]+\]/i,
++];
++
++function extractCodeChangeTrigger(text: string): { filePath: string; operation: 'modified' | 'created' | 'deleted' } | null {
++  const modify = text.match(CODE_CHANGE_MODIFY_TRIGGER);
++  if (modify) return { filePath: modify[1].trim(), operation: 'modified' };
++  const create = text.match(CODE_CHANGE_CREATE_TRIGGER);
++  if (create) return { filePath: create[1].trim(), operation: 'created' };
++  const del = text.match(CODE_CHANGE_DELETE_TRIGGER);
++  if (del) return { filePath: del[1].trim(), operation: 'deleted' };
++  return null;
++}
++
++function parseCodeChangeDiffLine(text: string): { type: 'context' | 'add' | 'remove'; text: string; lineNumber?: number } | null {
++  const trimmed = text.trimStart();
++  // Lines like "| 71 const foo = ..." carry a line number and optional +/- prefix.
++  if (trimmed.startsWith('|')) {
++    const after = trimmed.slice(1).trimStart();
++    const numMatch = after.match(/^(\d+)\s+/);
++    if (numMatch) {
++      const lineNumber = parseInt(numMatch[1], 10);
++      const rest = after.slice(numMatch[0].length);
++      if (rest.startsWith('+')) {
++        return { type: 'add', text: rest.slice(1).trimStart(), lineNumber };
++      }
++      if (rest.startsWith('-')) {
++        return { type: 'remove', text: rest.slice(1).trimStart(), lineNumber };
++      }
++      return { type: 'context', text: rest, lineNumber };
++    }
++    return { type: 'context', text: after };
++  }
++  // Unified-diff style standalone +/- lines.
++  if (trimmed.startsWith('+')) {
++    return { type: 'add', text: trimmed.slice(1).trimStart() };
++  }
++  if (trimmed.startsWith('-')) {
++    return { type: 'remove', text: trimmed.slice(1).trimStart() };
++  }
++  return null;
++}
++
++function isCodeChangeToolMarker(text: string): boolean {
++  return CODE_CHANGE_TOOL_MARKER.test(text);
++}
++
++function classifySource(text: string): import('../stores/agentOutputStore').OutputSource {
++  if (INFO_LINE_PATTERNS.some((p) => p.test(text))) return 'info';
++  return 'agent';
++}
++
+ // Parse token shorthand like 1.2k, 140, 262.1k into a raw number.
+ function parseTokens(value: string): number {
+   const cleaned = value.trim().toLowerCase().replace(/,/g, '');
+@@ -196,11 +317,39 @@ function updateAgentStatus(agentName: string, extract: StatusExtract | null) {
+   }
+ }
+ 
++class LruCache<K, V> {
++  private cache = new Map<K, V>();
++  constructor(private readonly maxSize: number) {}
++  get(key: K): V | undefined {
++    const value = this.cache.get(key);
++    if (value !== undefined) {
++      // Move to back (most recently used).
++      this.cache.delete(key);
++      this.cache.set(key, value);
++    }
++    return value;
++  }
++  set(key: K, value: V): void {
++    if (this.cache.has(key)) this.cache.delete(key);
++    else if (this.cache.size >= this.maxSize) {
++      const oldest = this.cache.keys().next().value;
++      if (oldest !== undefined) this.cache.delete(oldest);
++    }
++    this.cache.set(key, value);
++  }
++}
++
++const collapseKeyCache = new LruCache<string, string>(COLLAPSE_KEY_CACHE_SIZE);
++
+ function collapseKey(text: string): string {
+-  return text
++  const cached = collapseKeyCache.get(text);
++  if (cached !== undefined) return cached;
++  const key = text
+     .replace(SPINNER_GLYPHS, ' ')
+     .replace(/\s+/g, ' ')
+     .trim();
++  collapseKeyCache.set(text, key);
++  return key;
+ }
+ 
+ function classifyNoise(text: string): NoiseCategory | null {
+@@ -210,6 +359,9 @@ function classifyNoise(text: string): NoiseCategory | null {
+   // Footer/status metadata is redrawn continuously (context %, token counters,
+   // cost summaries). Treat as a family so numeric variants collapse.
+   if (FOOTER_LINE.test(text)) return 'footer';
++  // Kimi CLI cheap-spinner numeric artifacts (e.g. ":275347", "302t") are
++  // status noise even when they appear as standalone fragments.
++  if (KIMI_STATUS_ARTIFACT.test(text)) return 'footer';
+   if (STATUS_GLYPHS.test(text)) return 'status-glyph';
+   if (THINKING_LABEL.test(text)) return 'thinking';
+   return null;
+@@ -228,19 +380,34 @@ function emptyHistory(ts: string): TerminalHistory {
+     lastNoiseCategory: null,
+     lastFooterTs: null,
+     recentKeys: new Map(),
++    emittedUserInputKeys: new Map(),
++    recentKeysLastPruned: 0,
++    pendingCodeChange: null,
+     thinkingBuffer: [],
+     thinkingLabel: null,
+     thinkingSawBlank: false,
+     thinkingLiveEmitted: false,
++    thinkingPreview: '',
++    thinkingPreviewBufferLength: 0,
+   };
+ }
+ 
+ export class TerminalStreamNormalizer {
+   private history = new Map<string, TerminalHistory>();
++  // A line produced while flushing a code-change block that must be emitted
++  // after the structured card. Callers should drain after each process() call.
++  private deferredLine: StreamLine | null = null;
++  // Recent user inputs keyed by terminal. If a PTY echo matches one of these
++  // within a short window, the echoed line is tagged as user-source so it is
++  // visually distinct from agent output.
++  private recentUserInputs = new Map<string, { text: string; ts: number }[]>();
++  private readonly USER_INPUT_WINDOW_MS = 2000;
+ 
+   /**
+    * Process one raw PTY line. Returns a normalized line to emit, or `null` if
+-   * the line should be dropped.
++   * the line should be dropped. Call drain() after each process() to retrieve
++   * any additional line that was deferred (e.g., a normal line following a
++   * flushed code-change block).
+    */
+   process(input: StreamLine): StreamLine | null {
+     const terminalId = input.terminal_id;
+@@ -317,15 +484,107 @@ export class TerminalStreamNormalizer {
+       return this.makeThinkingLine(input, hist);
+     }
+ 
++    // --- Code-change block handling --------------------------------------
++    // Skip code-change detection while a thinking block is active; thinking
++    // content is accumulated separately and attached to the answer line.
++    if (!hist?.thinkingLabel) {
++      // Blank lines end a pending code-change block.
++      if (isBlank(text)) {
++        const flushed = this.flushPendingCodeChange(input, hist);
++        const blankResult = this.processNormalLine(input, hist, text, ts);
++        if (flushed) {
++          this.deferredLine = blankResult;
++          return flushed;
++        }
++        return blankResult;
++      }
++
++      const trigger = extractCodeChangeTrigger(text);
++      if (trigger) {
++        const flushed = this.flushPendingCodeChange(input, hist);
++        if (!hist) {
++          hist = emptyHistory(ts);
++        }
++        hist.pendingCodeChange = { filePath: trigger.filePath, operation: trigger.operation, lines: [] };
++        this.history.set(terminalId, hist);
++        return flushed;
++      }
++
++      const diffLine = parseCodeChangeDiffLine(text);
++      if (diffLine) {
++        if (hist?.pendingCodeChange) {
++          hist.pendingCodeChange.lines.push(diffLine);
++          this.history.set(terminalId, hist);
++          return null;
++        }
++        // No pending block: fall through to normal processing.
++      }
++
++      if (isCodeChangeToolMarker(text)) {
++        const flushed = this.flushPendingCodeChange(input, hist);
++        // Tool markers themselves are dropped.
++        return flushed;
++      }
++
++      const flushed = this.flushPendingCodeChange(input, hist);
++      const normalResult = this.processNormalLine(input, hist, text, ts);
++      if (flushed) {
++        this.deferredLine = normalResult;
++        return flushed;
++      }
++      return normalResult;
++    }
++
+     // --- Existing normalization ------------------------------------------
+     return this.processNormalLine(input, hist, text, ts);
+   }
+ 
++  /**
++   * Return any line that was deferred during the last process() call. Callers
++   * should invoke this after every process() and emit the result if non-null.
++   */
++  drain(): StreamLine | null {
++    const line = this.deferredLine;
++    this.deferredLine = null;
++    return line;
++  }
++
++  private flushPendingCodeChange(input: StreamLine, hist: TerminalHistory | undefined): StreamLine | null {
++    if (!hist?.pendingCodeChange || hist.pendingCodeChange.lines.length === 0) {
++      if (hist) {
++        hist.pendingCodeChange = null;
++        this.history.set(input.terminal_id, hist);
++      }
++      return null;
++    }
++    const { filePath, operation, lines } = hist.pendingCodeChange;
++    hist.pendingCodeChange = null;
++    this.history.set(input.terminal_id, hist);
++    return {
++      ...input,
++      line: `${operation.charAt(0).toUpperCase() + operation.slice(1)}: ${filePath}`,
++      codeChange: {
++        filePath,
++        operation,
++        hunks: [{ lines }],
++      },
++    };
++  }
++
+   private makeThinkingLine(input: StreamLine, hist: TerminalHistory): StreamLine {
++    // Cache the joined preview and invalidate only when the buffer changes.
++    const bufferLength = hist.thinkingBuffer.length;
++    let preview = hist.thinkingPreview;
++    if (hist.thinkingPreviewBufferLength !== bufferLength) {
++      preview = hist.thinkingBuffer.slice(-5).join('\n');
++      hist.thinkingPreview = preview;
++      hist.thinkingPreviewBufferLength = bufferLength;
++      this.history.set(input.terminal_id, hist);
++    }
+     return {
+       ...input,
+       line: hist.thinkingLabel || 'Thinking...',
+-      thinking: hist.thinkingBuffer.slice(-5).join('\n'),
++      thinking: preview,
+       thinkingLive: true,
+     };
+   }
+@@ -377,6 +636,9 @@ export class TerminalStreamNormalizer {
+     // counters, input separators, keybinding hints, yolo agent banners, and pure
+     // status-glyph lines must never reach the user-facing pane stream. Drop them
+     // immediately rather than emitting the first variant and deduplicating the rest.
++    // NOTE: do not reset consecutiveBlankCount here; blank lines on either side of
++    // a suppressed line are still visually consecutive in the rendered output, so
++    // collapsing must continue across suppressed noise.
+     if (noiseCategory === 'footer' || noiseCategory === 'separator' || noiseCategory === 'status-glyph') {
+       if (!hist) {
+         hist = emptyHistory(ts);
+@@ -385,7 +647,6 @@ export class TerminalStreamNormalizer {
+       hist.lastText = text;
+       hist.lastKey = key;
+       hist.lastTs = ts;
+-      hist.consecutiveBlankCount = 0;
+       hist.lastNoiseCategory = noiseCategory;
+       if (noiseCategory === 'footer') {
+         hist.lastFooterTs = ts;
+@@ -395,17 +656,44 @@ export class TerminalStreamNormalizer {
+       return null;
+     }
+ 
++    // Footer continuation suppression: provider status lines sometimes split
++    // across PTY chunks or SSE events (e.g. "context: 63.5% (166.5k/" followed by
++    // "262.1k) 302t"). The trailing fragment is not a footer on its own, so drop
++    // short numeric/token fragments that arrive soon after a suppressed footer.
++    if (hist?.lastFooterTs) {
++      const now = new Date(ts).getTime();
++      const elapsed = now - new Date(hist.lastFooterTs).getTime();
++      if (elapsed >= 0 && elapsed <= FOOTER_CONTINUATION_WINDOW_MS && FOOTER_FRAGMENT.test(text)) {
++        hist.lastFooterTs = ts;
++        hist.lastText = text;
++        hist.lastKey = key;
++        hist.lastTs = ts;
++        hist.lastNoiseCategory = noiseCategory;
++        this.history.set(input.terminal_id, hist);
++        return null;
++      }
++    }
++
+     // Recent-seen deduplication: suppress the same structural key if it was
+     // emitted within the sliding window, even if other lines came in between.
+     // Provider TUIs (especially Claude Code) redraw conversation history and
+     // echo user input repeatedly; this prevents those redraws from spamming the
+     // pane. The timestamp is refreshed on every duplicate so the window slides
+     // while the provider keeps redrawing the same content.
++    // Pruning the map is O(n); do it at most once per second per terminal.
+     if (hist) {
+       const now = new Date(ts).getTime();
+-      for (const [k, t] of hist.recentKeys.entries()) {
+-        if (now - t > DEDUP_WINDOW_MS) {
+-          hist.recentKeys.delete(k);
++      if (now - hist.recentKeysLastPruned > RECENT_KEY_PRUNE_INTERVAL_MS) {
++        hist.recentKeysLastPruned = now;
++        for (const [k, t] of hist.recentKeys.entries()) {
++          if (now - t > DEDUP_WINDOW_MS) {
++            hist.recentKeys.delete(k);
++          }
++        }
++        for (const [k, t] of hist.emittedUserInputKeys.entries()) {
++          if (now - t > USER_INPUT_DEDUP_WINDOW_MS) {
++            hist.emittedUserInputKeys.delete(k);
++          }
+         }
+       }
+       const lastSeen = hist.recentKeys.get(key);
+@@ -414,7 +702,6 @@ export class TerminalStreamNormalizer {
+         hist.lastText = text;
+         hist.lastKey = key;
+         hist.lastTs = ts;
+-        hist.consecutiveBlankCount = 0;
+         hist.lastNoiseCategory = noiseCategory;
+         this.history.set(input.terminal_id, hist);
+         return null;
+@@ -432,13 +719,83 @@ export class TerminalStreamNormalizer {
+     hist.lastNoiseCategory = noiseCategory;
+     hist.recentKeys.set(key, new Date(ts).getTime());
+ 
+-    return { ...input, line: text };
++    const userInput = this.matchUserInput(input.terminal_id, text, ts);
++    const source = userInput ? 'user' : classifySource(text);
++
++    // Remember user input we emitted so provider TUIs that reprint it later
++    // (tool headers, conversation redraws, prompt echoes) don't repeat it.
++    // We check both the raw line and the prefix-stripped line so "> message"
++    // echoes match the originally recorded "message".
++    const emittedNow = new Date(ts).getTime();
++    const strippedText = stripUserInputPrefix(text);
++    const rawKey = collapseKey(text);
++    const strippedKey = collapseKey(strippedText);
++    if (source === 'user') {
++      hist.emittedUserInputKeys.set(rawKey, emittedNow);
++      hist.emittedUserInputKeys.set(strippedKey, emittedNow);
++    } else {
++      const emittedRaw = hist.emittedUserInputKeys.get(rawKey);
++      const emittedStripped = hist.emittedUserInputKeys.get(strippedKey);
++      if (
++        (emittedRaw != null && emittedNow - emittedRaw < USER_INPUT_DEDUP_WINDOW_MS) ||
++        (emittedStripped != null && emittedNow - emittedStripped < USER_INPUT_DEDUP_WINDOW_MS)
++      ) {
++        hist.lastText = text;
++        hist.lastKey = key;
++        hist.lastTs = ts;
++        hist.lastNoiseCategory = noiseCategory;
++        this.history.set(input.terminal_id, hist);
++        return null;
++      }
++    }
++
++    hist.consecutiveBlankCount = 0;
++    this.history.set(input.terminal_id, hist);
++    return { ...input, line: text, source };
++  }
++
++  /**
++   * Record text the user sent to a terminal so echoed input can be tagged as
++   * user-source instead of agent output.
++   */
++  recordUserInput(terminalId: string, text: string, ts = Date.now()): void {
++    const inputs = this.recentUserInputs.get(terminalId) ?? [];
++    inputs.push({ text, ts });
++    // Prune stale entries.
++    const cutoff = ts - this.USER_INPUT_WINDOW_MS;
++    const filtered = inputs.filter((i) => i.ts >= cutoff);
++    this.recentUserInputs.set(terminalId, filtered);
++  }
++
++  private matchUserInput(terminalId: string, text: string, ts: string): string | null {
++    const inputs = this.recentUserInputs.get(terminalId);
++    if (!inputs || inputs.length === 0) return null;
++    const now = new Date(ts).getTime();
++    const cutoff = now - this.USER_INPUT_WINDOW_MS;
++    const normalizedRaw = collapseKey(text);
++    const normalizedStripped = collapseKey(stripUserInputPrefix(text));
++    for (let i = inputs.length - 1; i >= 0; i--) {
++      const input = inputs[i];
++      if (input.ts < cutoff) continue;
++      const inputKeyRaw = collapseKey(input.text);
++      const inputKeyStripped = collapseKey(stripUserInputPrefix(input.text));
++      if (
++        inputKeyRaw === normalizedRaw ||
++        inputKeyStripped === normalizedStripped ||
++        input.text === text
++      ) {
++        inputs.splice(i, 1);
++        return input.text;
++      }
++    }
++    return null;
+   }
+ 
+   /** Drop history for a terminal (e.g. on kill/reset). */
+   dropTerminal(terminalId: string): void {
+     const hist = this.history.get(terminalId);
+     this.history.delete(terminalId);
++    this.recentUserInputs.delete(terminalId);
+     if (hist?.thinkingBuffer.length) {
+       // Terminal died mid-think; do not leak partial thinking into the next session.
+       // We intentionally do not emit a finalized line here because there is no
+@@ -449,6 +806,7 @@ export class TerminalStreamNormalizer {
+   /** Reset all history. */
+   clear(): void {
+     this.history.clear();
++    this.recentUserInputs.clear();
+   }
+ }
+ 
+diff --git a/src/renderer/stores/agentOutputStore.ts b/src/renderer/stores/agentOutputStore.ts
+index eb41f2b..1489058 100644
+--- a/src/renderer/stores/agentOutputStore.ts
++++ b/src/renderer/stores/agentOutputStore.ts
+@@ -1,15 +1,29 @@
+ import { create } from 'zustand';
+ 
++export type OutputSource = 'agent' | 'user' | 'info';
++
++let nextLineId = 1;
++
++export function generateAgentOutputLineId(): string {
++  return `line-${nextLineId++}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
++}
++
+ export interface AgentOutputLine {
++  /** Stable unique identifier for this line. Used as a React key. */
++  id: string;
+   agent: string;
+   terminal_id?: string;
+   provider?: string;
+   line: string;
+   ts: string;
++  /** Who/what produced this line: agent output, user input, or info/system. */
++  source?: OutputSource;
+   /** Accumulated thinking content associated with this line (the answer). */
+   thinking?: string;
+   /** When true, this line is a live thinking placeholder that should be replaced by the final answer. */
+   thinkingLive?: boolean;
++  /** Structured code-change payload when this line represents an edit block. */
++  codeChange?: import('../lib/terminalStream').CodeChangeLine;
+ }
+ 
+ interface AgentOutputStore {
+@@ -18,20 +32,49 @@ interface AgentOutputStore {
+   paused: boolean;
+   selectedAgent: string | null;
+ 
+-  addLine: (line: AgentOutputLine) => void;
+-  addLines: (lines: AgentOutputLine[]) => void;
++  addLine: (line: Omit<AgentOutputLine, 'id'>) => void;
++  addLines: (lines: Omit<AgentOutputLine, 'id'>[]) => void;
+   clear: (agentName?: string) => void;
+   setPaused: (paused: boolean) => void;
+   setSelectedAgent: (agent: string | null) => void;
+   setMaxLines: (max: number) => void;
+ }
+ 
+-const MAX_DEFAULT = 1000;
++const MAX_DEFAULT = 500;
+ 
+ function isLiveThinking(line: AgentOutputLine): boolean {
+   return !!line.thinkingLive;
+ }
+ 
++function assignLineId(line: Omit<AgentOutputLine, 'id'>): AgentOutputLine {
++  return { ...line, id: generateAgentOutputLineId() };
++}
++
++function appendLines(state: { lines: AgentOutputLine[]; maxLines: number }, incoming: AgentOutputLine[]): AgentOutputLine[] {
++  const start = performance.now();
++  const next = state.lines.slice();
++  for (const line of incoming) {
++    const lastIdx = next.length - 1;
++    const last = next[lastIdx];
++    if (isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
++      next[lastIdx] = line;
++    } else if (!isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
++      // Final answer line replaces the live-thinking placeholder.
++      next[lastIdx] = line;
++    } else {
++      next.push(line);
++    }
++  }
++  if (next.length > state.maxLines) {
++    next.splice(0, next.length - state.maxLines);
++  }
++  const duration = performance.now() - start;
++  if (process.env.NODE_ENV === 'development' && duration > 1) {
++    console.log(`[agentOutputStore] addLines: ${incoming.length} lines in ${duration.toFixed(2)}ms (${next.length} total)`);
++  }
++  return next;
++}
++
+ export const useAgentOutputStore = create<AgentOutputStore>((set) => ({
+   lines: [],
+   maxLines: MAX_DEFAULT,
+@@ -41,22 +84,7 @@ export const useAgentOutputStore = create<AgentOutputStore>((set) => ({
+   addLine: (line) => {
+     if (!line?.line && !line?.thinking) return;
+     set((state) => {
+-      const next = [...state.lines];
+-      const lastIdx = next.length - 1;
+-      const last = next[lastIdx];
+-      // Replace the previous live-thinking placeholder for the same agent
+-      // rather than appending a new one, so the UI shows a single updating block.
+-      if (isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
+-        next[lastIdx] = line;
+-      } else if (!isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
+-        // Final answer line replaces the live-thinking placeholder.
+-        next[lastIdx] = line;
+-      } else {
+-        next.push(line);
+-      }
+-      if (next.length > state.maxLines) {
+-        next.splice(0, next.length - state.maxLines);
+-      }
++      const next = appendLines(state, [assignLineId(line)]);
+       return { lines: next };
+     });
+   },
+@@ -65,21 +93,7 @@ export const useAgentOutputStore = create<AgentOutputStore>((set) => ({
+     const valid = lines.filter((l) => l?.line || l?.thinking);
+     if (valid.length === 0) return;
+     set((state) => {
+-      const next = [...state.lines];
+-      for (const line of valid) {
+-        const lastIdx = next.length - 1;
+-        const last = next[lastIdx];
+-        if (isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
+-          next[lastIdx] = line;
+-        } else if (!isLiveThinking(line) && last && last.agent === line.agent && isLiveThinking(last)) {
+-          next[lastIdx] = line;
+-        } else {
+-          next.push(line);
+-        }
+-      }
+-      if (next.length > state.maxLines) {
+-        next.splice(0, next.length - state.maxLines);
+-      }
++      const next = appendLines(state, valid.map(assignLineId));
+       return { lines: next };
+     });
+   },

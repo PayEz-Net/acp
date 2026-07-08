@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -10,7 +10,33 @@ import { useProjectStore } from '../../stores/projectStore';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+class ResizeObserverMock {
+  private callback: ResizeObserverCallback | null = null;
+  observe = vi.fn((target: Element) => {
+    if (this.callback) {
+      this.callback(
+        [
+          {
+            target,
+            contentRect: { width: 600, height: 800, top: 0, left: 0, bottom: 800, right: 600, x: 0, y: 0 },
+            borderBoxSize: [{ inlineSize: 600, blockSize: 800 }],
+            contentBoxSize: [{ inlineSize: 600, blockSize: 800 }],
+            devicePixelContentBoxSize: [{ inlineSize: 600, blockSize: 800 }],
+          } as unknown as ResizeObserverEntry,
+        ],
+        this as unknown as ResizeObserver,
+      );
+    }
+  });
+  disconnect = vi.fn();
+  unobserve = vi.fn();
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+  }
+}
+
 function render(element: React.ReactElement) {
+  vi.stubGlobal('ResizeObserver', ResizeObserverMock);
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -25,6 +51,7 @@ function cleanup(root: ReturnType<typeof createRoot>, container: HTMLElement) {
     root.unmount();
   });
   document.body.removeChild(container);
+  vi.unstubAllGlobals();
 }
 
 beforeEach(() => {
@@ -43,8 +70,8 @@ describe('AgentOutputPanel', () => {
   it('renders the output stream for all agents by default', () => {
     useAgentOutputStore.setState({
       lines: [
-        { agent: 'BAPert', line: 'Planning...', ts: new Date().toISOString() },
-        { agent: 'NextPert-Scout', line: 'Found 3 files', ts: new Date().toISOString() },
+        { id: 'bapert-1', agent: 'BAPert', line: 'Planning...', ts: new Date().toISOString() },
+        { id: 'scout-1', agent: 'NextPert-Scout', line: 'Found 3 files', ts: new Date().toISOString() },
       ],
     });
 
@@ -70,7 +97,7 @@ describe('AgentOutputPanel', () => {
     });
     useAgentOutputStore.setState({
       lines: [
-        { agent: 'NextPert-Scout', line: 'refactor complete', ts: new Date().toISOString() },
+        { id: 'scout-2', agent: 'NextPert-Scout', line: 'refactor complete', ts: new Date().toISOString() },
       ],
     });
 
@@ -90,7 +117,7 @@ describe('AgentOutputPanel', () => {
     });
     useAgentOutputStore.setState({
       lines: [
-        { agent: 'DotNetPert', line: 'build succeeded', ts: new Date().toISOString() },
+        { id: 'dotnet-1', agent: 'DotNetPert', line: 'build succeeded', ts: new Date().toISOString() },
       ],
     });
 
@@ -102,7 +129,7 @@ describe('AgentOutputPanel', () => {
   it('renders live thinking as a compact inline indicator instead of prose', () => {
     useAgentOutputStore.setState({
       lines: [
-        { agent: 'BAPert', line: 'Analyzing context...', thinking: 'step one', thinkingLive: true, ts: new Date().toISOString() },
+        { id: 'bapert-2', agent: 'BAPert', line: 'Analyzing context...', thinking: 'step one', thinkingLive: true, ts: new Date().toISOString() },
       ],
     });
 
@@ -112,10 +139,32 @@ describe('AgentOutputPanel', () => {
     cleanup(root, container);
   });
 
+  it('renders long paths without break-words so they scroll instead of wrapping mid-token', () => {
+    useAgentOutputStore.setState({
+      lines: [
+        {
+          id: 'scout-path-1',
+          agent: 'NextPert-Scout',
+          line: 'E:\\Repos\\Agents\\NextPert-Scout\\someLongFileNameThatShouldNotBreakMidToken.jpg',
+          ts: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const { container, root } = render(<AgentOutputPanel isOpen onClose={() => {}} />);
+    const lineSpan = container.querySelector('.whitespace-pre-wrap');
+    expect(lineSpan).not.toBeNull();
+    expect(lineSpan?.classList.contains('overflow-x-auto')).toBe(true);
+    expect(lineSpan?.classList.contains('break-words')).toBe(false);
+    expect(container.textContent).toContain('someLongFileNameThatShouldNotBreakMidToken.jpg');
+    cleanup(root, container);
+  });
+
   it('renders code-change blocks as structured cards in the side panel', () => {
     useAgentOutputStore.setState({
       lines: [
         {
+          id: 'scout-3',
           agent: 'NextPert-Scout',
           line: 'Modified: App.tsx',
           ts: new Date().toISOString(),

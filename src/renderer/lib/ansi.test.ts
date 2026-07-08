@@ -37,7 +37,44 @@ describe('stripAnsi', () => {
     expect(stripAnsi(raw)).toBe('OK');
   });
 
+  it('removes cursor movement sequences', () => {
+    expect(stripAnsi('\u001b[656DActually')).toBe('Actually');
+    expect(stripAnsi('\u001b[92mtext\u001b[0m')).toBe('text');
+  });
+
+  it('removes CSI sequences introduced by the single-byte CSI (C1) character', () => {
+    expect(stripAnsi('\x9b31mred\x9b0m')).toBe('red');
+  });
+
+  it('strips incomplete CSI sequences split across the bridge', () => {
+    expect(stripAnsi('\u001b[656')).toBe('');
+    expect(stripAnsi('\u001b[656;92')).toBe('');
+    expect(stripAnsi('\u001b[?25')).toBe('');
+    expect(stripAnsi('text\u001b[656')).toBe('text');
+  });
+
+  it('strips a trailing lone ESC from a split sequence', () => {
+    expect(stripAnsi('text\u001b')).toBe('text');
+    expect(stripAnsi('\u001b')).toBe('');
+  });
+
   it('leaves plain text unchanged', () => {
     expect(stripAnsi('plain text')).toBe('plain text');
+    expect(stripAnsi('[656] and [foo] are not escapes')).toBe('[656] and [foo] are not escapes');
+    expect(stripAnsi('issue #2: fix the bug')).toBe('issue #2: fix the bug');
+  });
+
+  it('strips orphaned SGR/cursor fragments when ESC is missing', () => {
+    // These leak when a sequence is split across the PTY bridge and the ESC
+    // byte has already been consumed by an earlier chunk.
+    expect(stripAnsi('[3 Reasoning...')).toBe('Reasoning...');
+    expect(stripAnsi('[37mcolored text')).toBe('colored text');
+    expect(stripAnsi('[38;5;123mcolored text')).toBe('colored text');
+    expect(stripAnsi('[2;12Hcursor text')).toBe('cursor text');
+  });
+
+  it('strips trailing cursor-position fragments', () => {
+    expect(stripAnsi('text\r2;12H')).toBe('text\r');
+    expect(stripAnsi('text1;1f')).toBe('text');
   });
 });

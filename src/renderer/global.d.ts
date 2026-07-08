@@ -54,6 +54,12 @@ declare global {
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
       openExternal: (url: string) => Promise<void>;
       readClipboardText: () => Promise<string>;
+      triggerPaste: () => Promise<void>;
+      sendTerminalWithImages: (payload: {
+        terminalId: string;
+        text: string;
+        images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
+      }) => Promise<{ success: boolean; error?: string }>;
 
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;
