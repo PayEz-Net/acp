@@ -261,7 +261,9 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
           // the agent badge, matching the terminal-pane footer pill. The
           // placeholder line text is not rendered as prose, so it cannot
           // wrap or splatter mid-word into the scrollback.
-          <ThinkingBlock label={line.line || 'Thinking...'} content={line.thinking || ''} live compact />
+          <div className="flex-1 min-w-0">
+            <ThinkingBlock label={line.line || 'Thinking...'} content={line.thinking || ''} live compact />
+          </div>
         ) : line.codeChange ? (
           <div className="flex-1 min-w-0">
             <CodeChangeCard codeChange={line.codeChange} compact />
@@ -272,8 +274,8 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
               isUser
                 ? 'px-2 py-1 break-words bg-blue-600/25 text-blue-100'
                 : isInfo
-                  ? 'px-1.5 py-0.5 overflow-x-auto text-slate-400 italic text-xs'
-                  : 'px-1.5 py-0.5 overflow-x-auto text-slate-300'
+                  ? 'flex-1 px-1.5 py-0.5 overflow-x-auto text-slate-400 italic text-xs'
+                  : 'flex-1 px-1.5 py-0.5 overflow-x-auto text-slate-300'
             }`}
           >
             {line.line}
@@ -281,7 +283,7 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
         )}
       </div>
       {showThinking && !line.thinkingLive && line.thinking !== undefined && (
-        <div className={`${isUser ? 'mr-0' : 'ml-14'} mt-1`}>
+        <div className={`mt-1 ${isUser ? 'mr-0' : 'w-full'}`}>
           <ThinkingBlock label="Thinking" content={line.thinking} compact />
         </div>
       )}
