@@ -82,6 +82,11 @@ export class AcpProcess extends EventEmitter {
     this.write(message);
   }
 
+  respond(id: number | string, result: unknown): void {
+    const message: AcpJsonRpcMessage = { jsonrpc: '2.0', id, result };
+    this.write(message);
+  }
+
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
     this.killed = true;
     if (this.child && !this.child.killed) {

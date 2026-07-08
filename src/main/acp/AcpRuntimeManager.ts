@@ -106,7 +106,7 @@ export class AcpRuntimeManager extends EventEmitter {
         capabilities: this.provider.defaultCapabilities,
       })) as Record<string, unknown>;
 
-      const sessionResult = (await this.process.request('session/new', {})) as Record<string, unknown>;
+      const sessionResult = (await this.process.request('session/new', { mcpServers: [] })) as Record<string, unknown>;
 
       this.sessionId = (sessionResult.sessionId as string) ?? null;
       this.initialized = true;
@@ -265,15 +265,14 @@ export class AcpRuntimeManager extends EventEmitter {
     outcome = 'selected',
   ): void {
     if (!this.process) return;
-    this.process
-      .request('session/respond_permission', {
-        requestId,
+    // Live kimi acp requires a JSON-RPC *response* (matching the request id)
+    // with result.outcome as an object, not a flat result or method call.
+    this.process.respond(requestId, {
+      outcome: {
         outcome,
         optionId,
-      })
-      .catch((err) => {
-        this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });
-      });
+      },
+    });
   }
 
   private emitAcpEvent(update: AcpSessionUpdate): void {

@@ -8,10 +8,12 @@ interface MockAcpProcess {
   started: boolean;
   requests: Array<{ method: string; params: unknown }>;
   notifications: Array<{ method: string; params: unknown }>;
+  responses: Array<{ id: number | string; result: unknown }>;
   killed: boolean;
   start(): void;
   request(method: string, params?: unknown): Promise<unknown>;
   notify(method: string, params?: unknown): void;
+  respond(id: number | string, result: unknown): void;
   kill(): void;
   isRunning(): boolean;
   on(event: string, listener: (...args: unknown[]) => void): void;
@@ -31,6 +33,7 @@ vi.mock('./AcpProcess', () => ({
     started = false;
     requests: Array<{ method: string; params: unknown }> = [];
     notifications: Array<{ method: string; params: unknown }> = [];
+    responses: Array<{ id: number | string; result: unknown }> = [];
     killed = false;
 
     constructor() {
@@ -51,6 +54,10 @@ vi.mock('./AcpProcess', () => ({
 
     notify(method: string, params?: unknown): void {
       this.notifications.push({ method, params });
+    }
+
+    respond(id: number | string, result: unknown): void {
+      this.responses.push({ id, result });
     }
 
     kill(): void {
@@ -169,10 +176,12 @@ describe('AcpRuntimeManager', () => {
     expect(permissionEvent?.update).toMatchObject({ requestId: 99 });
 
     manager.respondToPermission(99, 'allow');
-    expect(getProcess().requests).toContainEqual(
+    expect(getProcess().responses).toContainEqual(
       expect.objectContaining({
-        method: 'session/respond_permission',
-        params: expect.objectContaining({ requestId: 99, optionId: 'allow' }),
+        id: 99,
+        result: expect.objectContaining({
+          outcome: expect.objectContaining({ outcome: 'selected', optionId: 'allow' }),
+        }),
       }),
     );
   });

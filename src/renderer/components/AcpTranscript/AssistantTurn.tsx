@@ -1,6 +1,3 @@
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeHighlight from 'rehype-highlight';
 import type { AcpTurn } from '@shared/acpTypes';
 import { ToolCallCard } from './ToolCallCard';
 import { ThinkingBlock } from '../ThinkingBlock';
@@ -11,14 +8,19 @@ interface AssistantTurnProps {
 
 /**
  * Render an assistant turn: optional thinking block, tool-call cards, and
- * Markdown answer prose styled to match native Kimi conventions.
+ * plain pre-wrap answer prose so ACP output formats consistently with the PTY
+ * terminal surface.
  */
 export function AssistantTurn({ turn }: AssistantTurnProps) {
   const isLive = turn.status !== 'done' && turn.status !== 'error';
+  const hasAnswer = turn.contentText.trim().length > 0;
+  const hasThinking = turn.thinking.trim().length > 0;
 
   return (
     <div className="py-2" data-testid="assistant-turn">
-      {turn.thinking && (
+      {/* Live kimi acp streams everything through agent_thought_chunk. When there
+          is no separate answer content, render the thinking as the main answer. */}
+      {hasThinking && hasAnswer && (
         <ThinkingBlock
           content={turn.thinking}
           label={isLive ? 'Thinking...' : 'Thought'}
@@ -31,32 +33,15 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
         <ToolCallCard key={toolCall.toolCallId} toolCall={toolCall} />
       ))}
 
-      {turn.contentText && (
-        <div className="font-terminal text-slate-300 text-xs leading-relaxed mt-1">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
-            components={{
-              p: ({ children }) => <p className="mb-1">{children}</p>,
-              ul: ({ children }) => <ul className="list-disc list-inside mb-1">{children}</ul>,
-              ol: ({ children }) => <ol className="list-decimal list-inside mb-1">{children}</ol>,
-              li: ({ children }) => <li className="ml-2">{children}</li>,
-              code: ({ className, children }) => {
-                const inline = !className;
-                return inline ? (
-                  <code className="bg-slate-800/60 px-1 rounded">{children}</code>
-                ) : (
-                  <pre className="bg-slate-900/70 rounded p-2 my-1 overflow-x-auto">
-                    <code className={className}>{children}</code>
-                  </pre>
-                );
-              },
-            }}
-          >
-            {turn.contentText}
-          </ReactMarkdown>
-        </div>
-      )}
+      {hasAnswer ? (
+        <pre className="font-terminal text-slate-300 text-xs leading-normal whitespace-pre-wrap overflow-x-auto">
+          {turn.contentText}
+        </pre>
+      ) : hasThinking ? (
+        <pre className="font-terminal text-slate-300 text-xs leading-normal whitespace-pre-wrap overflow-x-auto">
+          {turn.thinking}
+        </pre>
+      ) : null}
     </div>
   );
 }

@@ -170,13 +170,19 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - This WO supersedes ad-hoc terminal formatting patches. No further regex whack-a-mole without lead approval.
 - If `kimi acp` proves unstable during implementation, immediately raise a blocker and fall back to the custom PTY-text-treatment path.
 - Backend cache questions should route to DotNetPert.
-- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708` (pushed @ `26346b91b44285be492849a976ca500d5c0540f1`).
+- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708` (NextPert pushed @ `ede715b0ce4e50a3b73960ab50d45d3ad635f41e`; Scout transport commit pending).
 - Type consolidation resolved: canonical ACP IPC/event types live in `src/shared/acpTypes.ts`. Main forwards raw JSON-RPC `session/update` events to the renderer as `{ agent: string; sessionId: string; update: AcpSessionUpdate }`. The duplicate ACP block was removed from `src/shared/types.ts`.
 - Renderer → main IPC payloads (BAPert decision 2026-07-08):
-  - `ACP_PROMPT`: `{ agent, sessionId, text }`
+  - `ACP_PROMPT`: `{ agent, sessionId, text }` — main converts `text` into the content-block array `kimi acp` expects.
   - `ACP_CANCEL`: `{ agent, sessionId }`
   - `ACP_SET_MODE`: `{ agent, sessionId, mode }`
   - `ACP_KILL`: `{ agent, sessionId }`
+  - `ACP_PERMISSION_RESPONSE`: `{ agent, sessionId, permissionRequestId, outcome, optionId? }` — main replies to the JSON-RPC request with `result: { outcome: { outcome, optionId } }`.
+- Live `kimi acp` behavior verified 2026-07-08:
+  - `session/new` requires `mcpServers: []`.
+  - `session/prompt` expects `prompt` as an array of content blocks.
+  - Permission response must be a JSON-RPC response (same `id`) with `result.outcome = { outcome: "selected", optionId }`.
+  - `agent_thought_chunk` carries all assistant prose; `agent_message_chunk` was not observed. Renderer must fall back to rendering `thinking` as the main answer when `contentText` is empty.
   - `ACP_PERMISSION_RESPONSE`: `{ agent, sessionId, permissionRequestId, outcome, optionId? }`
 - `session/permission_response` JSON-RPC shape sent to `kimi acp`: `{ requestId, outcome, optionId }`. Main maps `permissionRequestId → requestId` and passes through `outcome` (defaulting to `"selected"`).
 - Kimi ACP feature flag in `UnifiedTerminal`: `effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp'`. Claude/Codex continue to use the PTY line stream.

@@ -101,6 +101,16 @@ describe('AssistantTurn', () => {
     expect(container.textContent).toContain('Shell: dir');
     cleanup(root, container);
   });
+
+  it('renders thinking as main answer when content is empty', () => {
+    const turn = makeTurn({
+      thinking: 'I should help.',
+      contentText: '',
+    });
+    const { container, root } = render(<AssistantTurn turn={turn} />);
+    expect(container.textContent).toContain('I should help.');
+    cleanup(root, container);
+  });
 });
 
 describe('UserTurn', () => {
