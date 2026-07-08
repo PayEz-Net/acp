@@ -12,6 +12,16 @@ import type { TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
 
+// Minimal ANSI/control-character cleanup. The Kimi CLI can leak SGR/cursor
+// fragments into content blocks during TUI redraws; stripping them here keeps
+// the renderer from painting trash characters into the transcript.
+const ANSI_OR_CONTROL =
+  /\u001b\[[\d;]*[A-Za-z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[\d;]*$|\u001b$|[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g;
+
+function sanitizeContentText(text: string): string {
+  return text.replace(ANSI_OR_CONTROL, '');
+}
+
 export interface AcpRuntimeOptions {
   agentName: string;
   workDir: string;
@@ -313,12 +323,15 @@ function extractContent(content: unknown): AcpContentBlock | null {
 
   // Plain string fallback (legacy or simplified transport).
   if (typeof content === 'string') {
-    return { type: 'content', content: { type: 'text', text: content } };
+    return { type: 'content', content: { type: 'text', text: sanitizeContentText(content) } };
   }
 
   // Flat text object fallback.
   if (typeof content === 'object' && (content as Record<string, unknown>).text !== undefined) {
-    return { type: 'content', content: { type: 'text', text: String((content as Record<string, unknown>).text) } };
+    return {
+      type: 'content',
+      content: { type: 'text', text: sanitizeContentText(String((content as Record<string, unknown>).text)) },
+    };
   }
 
   return null;

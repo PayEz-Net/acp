@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { stripAnsi } from '../lib/ansi';
 import type {
   AcpContentBlock,
   AcpEventPayload,
@@ -17,7 +18,7 @@ function generateTurnId(): string {
 
 function textFromContentBlock(block: AcpContentBlock): string {
   if (block.type === 'content' && block.content.type === 'text') {
-    return block.content.text;
+    return stripAnsi(block.content.text);
   }
   return '';
 }

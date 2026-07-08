@@ -1,4 +1,5 @@
 import type { AcpTurn } from '@shared/acpTypes';
+import ReactMarkdown from 'react-markdown';
 import { ToolCallCard } from './ToolCallCard';
 import { ThinkingBlock } from '../ThinkingBlock';
 
@@ -6,10 +7,18 @@ interface AssistantTurnProps {
   turn: AcpTurn;
 }
 
+function MarkdownProse({ children }: { children: string }) {
+  return (
+    <div className="prose prose-invert prose-sm max-w-none break-words text-slate-200">
+      <ReactMarkdown>{children}</ReactMarkdown>
+    </div>
+  );
+}
+
 /**
  * Render an assistant turn: optional thinking block, tool-call cards, and
- * plain pre-wrap answer prose so ACP output formats consistently with the PTY
- * terminal surface.
+ * Markdown answer prose so ACP output (which is Markdown-shaped) formats
+ * naturally instead of showing raw asterisks/list markers.
  */
 export function AssistantTurn({ turn }: AssistantTurnProps) {
   const isLive = turn.status !== 'done' && turn.status !== 'error';
@@ -26,6 +35,7 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
           label={isLive ? 'Thinking' : 'Thought'}
           live={isLive && turn.status === 'thinking'}
           compact
+          markdown
         />
       )}
 
@@ -34,13 +44,9 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
       ))}
 
       {hasAnswer ? (
-        <pre className="font-terminal text-slate-200 text-sm leading-normal whitespace-pre-wrap break-words">
-          {turn.contentText}
-        </pre>
+        <MarkdownProse>{turn.contentText}</MarkdownProse>
       ) : hasThinking ? (
-        <pre className="font-terminal text-slate-200 text-sm leading-normal whitespace-pre-wrap break-words">
-          {turn.thinking}
-        </pre>
+        <MarkdownProse>{turn.thinking}</MarkdownProse>
       ) : null}
     </div>
   );

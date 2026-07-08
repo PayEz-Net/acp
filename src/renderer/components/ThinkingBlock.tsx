@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 
 interface ThinkingBlockProps {
   /** Label shown on the toggle (e.g. "Thinking..."). */
@@ -12,6 +13,8 @@ interface ThinkingBlockProps {
   compact?: boolean;
   /** Force expanded state; otherwise internal toggle is used. */
   defaultExpanded?: boolean;
+  /** When true, render the collapsed/expanded content as Markdown. */
+  markdown?: boolean;
 }
 
 const PREVIEW_LINES = 2;
@@ -22,6 +25,7 @@ export function ThinkingBlock({
   live,
   compact,
   defaultExpanded = false,
+  markdown,
 }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
@@ -66,13 +70,21 @@ export function ThinkingBlock({
         )}
       </button>
       {content && content.trim() !== '' && (
-        <pre
-          className={`mt-1 font-terminal text-slate-400 italic whitespace-pre-wrap bg-slate-800/40 rounded p-2 pl-[1.125rem] ${
+        <div
+          className={`mt-1 bg-slate-800/40 rounded ${
             compact ? 'text-[11px]' : 'text-xs'
           }`}
         >
-          {expanded ? content : preview}
-        </pre>
+          {markdown ? (
+            <div className="p-2 pl-[1.125rem] prose prose-invert prose-xs max-w-none break-words text-slate-400 italic">
+              <ReactMarkdown>{expanded ? content : preview}</ReactMarkdown>
+            </div>
+          ) : (
+            <pre className="p-2 pl-[1.125rem] font-terminal text-slate-400 italic whitespace-pre-wrap">
+              {expanded ? content : preview}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   );

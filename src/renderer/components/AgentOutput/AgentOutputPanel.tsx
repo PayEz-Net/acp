@@ -31,10 +31,18 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
   const userScrolledRef = useRef(false);
   const rafScrollRef = useRef<number | null>(null);
 
-  const filtered = useMemo(
-    () => (selectedAgent ? lines.filter((l) => l.agent === selectedAgent) : lines),
-    [lines, selectedAgent],
-  );
+  const { filtered, allHiddenByKimi } = useMemo(() => {
+    const base = selectedAgent ? lines.filter((l) => l.agent === selectedAgent) : lines;
+    // Kimi runs through the ACP transcript in the terminal pane; showing the raw
+    // PTY stream here is just trash characters and redraw noise.
+    const visible = base.filter((l) => {
+      const agent = agents.find((a) => a.name === l.agent);
+      const provider = (teamRuntime ?? l.provider ?? agent?.provider) as CodeProvider | undefined;
+      return provider !== 'kimi';
+    });
+    const allHiddenByKimi = base.length > 0 && visible.length === 0;
+    return { filtered: visible, allHiddenByKimi };
+  }, [lines, selectedAgent, agents, teamRuntime]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -184,7 +192,11 @@ export function AgentOutputPanel({ isOpen, onClose }: AgentOutputPanelProps) {
         {filtered.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-2">
             <Terminal className="w-8 h-8 opacity-30" />
-            <p className="text-xs">Agent terminal output will appear here.</p>
+            <p className="text-xs text-center px-4">
+              {allHiddenByKimi
+                ? 'Kimi output is shown in the terminal pane.'
+                : 'Agent terminal output will appear here.'}
+            </p>
           </div>
         )}
 

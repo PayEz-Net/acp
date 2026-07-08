@@ -87,12 +87,12 @@ describe('AgentOutputPanel', () => {
       activeProject: {
         id: 1,
         name: 'acp-desktop',
-        runtime_choice: 'kimi',
+        runtime_choice: 'claude',
       } as any,
     });
     useAppStore.setState({
       agents: [
-        { id: 'a1', name: 'NextPert-Scout', provider: 'claude' } as any,
+        { id: 'a1', name: 'NextPert-Scout', provider: 'kimi' } as any,
       ],
     });
     useAgentOutputStore.setState({
@@ -103,9 +103,35 @@ describe('AgentOutputPanel', () => {
 
     const { container, root } = render(<AgentOutputPanel isOpen onClose={() => {}} />);
 
-    // Provider badge on the output line should read "kimi", not the stale "claude".
-    expect(container.textContent).toContain('Kimi');
-    expect(container.textContent).not.toContain('Claude');
+    // Provider badge on the output line should read "claude", not the stale "kimi".
+    expect(container.textContent).toContain('Claude');
+    expect(container.textContent).not.toContain('Kimi');
+    cleanup(root, container);
+  });
+
+  it('hides raw Kimi PTY lines and shows a pointer to the terminal pane', () => {
+    useProjectStore.setState({
+      activeProject: {
+        id: 1,
+        name: 'acp-desktop',
+        runtime_choice: 'kimi',
+      } as any,
+    });
+    useAppStore.setState({
+      agents: [
+        { id: 'a1', name: 'NextPert-Scout', provider: 'kimi' } as any,
+      ],
+    });
+    useAgentOutputStore.setState({
+      lines: [
+        { id: 'scout-kimi-1', agent: 'NextPert-Scout', line: 'raw PTY trash', ts: new Date().toISOString() },
+      ],
+    });
+
+    const { container, root } = render(<AgentOutputPanel isOpen onClose={() => {}} />);
+
+    expect(container.textContent).not.toContain('raw PTY trash');
+    expect(container.textContent).toContain('Kimi output is shown in the terminal pane');
     cleanup(root, container);
   });
 
