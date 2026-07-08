@@ -6,9 +6,9 @@ import { AcpProcess } from './AcpProcess';
 class MockChild extends EventEmitter {
   pid = 1234;
   killed = false;
-  stdin = Object.assign(new EventEmitter(), { write: vi.fn(), writable: true });
-  stdout = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
-  stderr = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
+  stdin = Object.assign(new EventEmitter(), { write: vi.fn(), writable: true }) as EventEmitter & { write: ReturnType<typeof vi.fn>; writable: boolean };
+  stdout = Object.assign(new EventEmitter(), { setEncoding: vi.fn() }) as EventEmitter & { setEncoding: ReturnType<typeof vi.fn> };
+  stderr = Object.assign(new EventEmitter(), { setEncoding: vi.fn() }) as EventEmitter & { setEncoding: ReturnType<typeof vi.fn> };
 
   kill(_signal?: NodeJS.Signals): boolean {
     this.killed = true;

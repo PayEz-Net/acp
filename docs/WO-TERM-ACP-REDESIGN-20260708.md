@@ -170,7 +170,7 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - This WO supersedes ad-hoc terminal formatting patches. No further regex whack-a-mole without lead approval.
 - If `kimi acp` proves unstable during implementation, immediately raise a blocker and fall back to the custom PTY-text-treatment path.
 - Backend cache questions should route to DotNetPert.
-- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708`.
+- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708` (pushed @ `26346b91b44285be492849a976ca500d5c0540f1`).
 - Type consolidation resolved: canonical ACP IPC/event types live in `src/shared/acpTypes.ts`. Main forwards raw JSON-RPC `session/update` events to the renderer as `{ agent: string; sessionId: string; update: AcpSessionUpdate }`. The duplicate ACP block was removed from `src/shared/types.ts`.
 - Renderer → main IPC payloads (BAPert decision 2026-07-08):
   - `ACP_PROMPT`: `{ agent, sessionId, text }`

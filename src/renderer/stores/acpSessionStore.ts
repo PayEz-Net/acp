@@ -23,7 +23,22 @@ function textFromContentBlock(block: AcpContentBlock): string {
 }
 
 export function textFromBlocks(blocks: AcpContentBlock[]): string {
-  return blocks.map(textFromContentBlock).join('');
+  const raw = blocks.map(textFromContentBlock).join('');
+  return collapseRenderedWhitespace(raw);
+}
+
+function collapseRenderedWhitespace(text: string): string {
+  // Collapse runs of blank lines to a single newline and trim leading/trailing
+  // whitespace so the virtualized pane doesn't balloon with empty paragraphs.
+  return text.replace(/\n\s*\n/g, '\n').trim();
+}
+
+function isBlankTextBlock(block: AcpContentBlock): boolean {
+  return (
+    block.type === 'content' &&
+    block.content.type === 'text' &&
+    block.content.text.trim() === ''
+  );
 }
 
 function mergeContentBlocks(existing: AcpContentBlock[], delta: AcpContentBlock[]): AcpContentBlock[] {
@@ -119,6 +134,13 @@ function updateActiveTurn(
   return { ...session, turns };
 }
 
+function getLastUserTurn(session: AcpSessionState): AcpTurn | undefined {
+  for (let i = session.turns.length - 1; i >= 0; i--) {
+    if (session.turns[i].role === 'user') return session.turns[i];
+  }
+  return undefined;
+}
+
 function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): AcpSessionState {
   switch (update.sessionUpdate) {
     case 'initialized': {
@@ -135,14 +157,25 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
     }
 
     case 'agent_thought_chunk': {
+      const thoughtText = textFromContentBlock(update.content);
+      if (!thoughtText || thoughtText.trim() === '') return session;
       return updateActiveTurn(session, (turn) => ({
         ...turn,
         status: 'thinking',
-        thinking: turn.thinking + textFromContentBlock(update.content),
+        thinking: collapseRenderedWhitespace(turn.thinking + thoughtText),
       }));
     }
 
     case 'agent_message_chunk': {
+      if (isBlankTextBlock(update.content)) return session;
+      const messageText = textFromContentBlock(update.content);
+      // Some ACP providers echo the last user message as the first assistant
+      // chunk. Suppress that exact echo so the user bubble stays the single
+      // source of truth for what the user typed.
+      const lastUser = getLastUserTurn(session);
+      if (lastUser && messageText && collapseRenderedWhitespace(messageText) === lastUser.contentText) {
+        return session;
+      }
       return updateActiveTurn(session, (turn) => {
         const nextContent = mergeContentBlocks(turn.content, [update.content]);
         return {
@@ -261,8 +294,7 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
           [{ type: 'content', content: { type: 'text', text } }],
           ts,
         );
-        session.turns.push(turn);
-        session.activeTurnId = null;
+        sessions.set(agent, { ...session, turns: [...session.turns, turn], activeTurnId: null });
         return { sessions };
       });
     },
@@ -272,8 +304,7 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
         const sessions = new Map(state.sessions);
         const session = getOrCreateSession(sessions, agent);
         const turn = createTurn(agent, sessionId, 'assistant', [], ts);
-        session.turns.push(turn);
-        session.activeTurnId = turn.id;
+        sessions.set(agent, { ...session, turns: [...session.turns, turn], activeTurnId: turn.id });
         return { sessions };
       });
     },

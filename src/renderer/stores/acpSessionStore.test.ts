@@ -267,7 +267,66 @@ describe('acpSessionStore', () => {
     expect(assistantTurn?.toolCalls).toHaveLength(1);
     expect(assistantTurn?.toolCalls[0].toolCallId).toBe('tc-list');
     expect(assistantTurn?.toolCalls[0].status).toBe('completed');
-    expect(assistantTurn?.toolCalls[0].contentText).toBe('README.md\nsrc\n');
+    expect(assistantTurn?.toolCalls[0].contentText).toBe('README.md\nsrc');
     expect(session?.activeTurnId).toBeNull();
+  });
+
+  it('ignores blank thought chunks', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_thought_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Useful thought.' } },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_thought_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: '   \n  ' } },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].thinking).toBe('Useful thought.');
+  });
+
+  it('ignores blank message chunks', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Hello' } },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: '\n\n   \n' } },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].contentText).toBe('Hello');
+  });
+
+  it('collapses multiple blank lines in content text', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Line 1\n\n\n\nLine 2\n\n' } },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].contentText).toBe('Line 1\nLine 2');
   });
 });

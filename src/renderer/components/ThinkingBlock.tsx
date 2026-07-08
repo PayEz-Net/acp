@@ -65,7 +65,7 @@ export function ThinkingBlock({
           <span className="text-slate-600 ml-1">({hiddenCount} more lines)</span>
         )}
       </button>
-      {content && (
+      {content && content.trim() !== '' && (
         <pre
           className={`mt-1 font-terminal text-slate-400 italic whitespace-pre-wrap bg-slate-800/40 rounded p-2 pl-[1.125rem] ${
             compact ? 'text-[11px]' : 'text-xs'

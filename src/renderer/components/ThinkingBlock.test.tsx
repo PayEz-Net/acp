@@ -53,3 +53,10 @@ describe('ThinkingBlock', () => {
     cleanup(root, container);
   });
 });
+
+
+  it('does not render an empty whitespace-only pre block', () => {
+    const { container, root } = render(<ThinkingBlock content={'   \n  '} defaultExpanded />);
+    expect(container.querySelector('pre')).toBeNull();
+    cleanup(root, container);
+  });
