@@ -791,6 +791,27 @@ export class TerminalStreamNormalizer {
     this.recentUserInputs.set(terminalId, filtered);
   }
 
+  /**
+   * Register user input that has already been rendered deterministically (e.g.
+   * injected as a user-source line by the composer). Any later PTY echo of the
+   * same text — with or without a prompt prefix — is suppressed rather than
+   * re-rendered as agent output.
+   */
+  suppressEcho(terminalId: string, text: string, ts = Date.now()): void {
+    let hist = this.history.get(terminalId);
+    if (!hist) {
+      hist = emptyHistory(new Date(ts).toISOString());
+      this.history.set(terminalId, hist);
+    }
+    const rawKey = collapseKey(text);
+    const strippedKey = collapseKey(stripUserInputPrefix(text));
+    hist.emittedUserInputKeys.set(rawKey, ts);
+    hist.emittedUserInputKeys.set(strippedKey, ts);
+    hist.recentKeys.set(rawKey, ts);
+    hist.recentKeys.set(strippedKey, ts);
+    this.history.set(terminalId, hist);
+  }
+
   private matchUserInput(terminalId: string, text: string, ts: string): string | null {
     const inputs = this.recentUserInputs.get(terminalId);
     if (!inputs || inputs.length === 0) return null;

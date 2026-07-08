@@ -268,12 +268,12 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
           </div>
         ) : (
           <span
-            className={`min-w-0 whitespace-pre-wrap leading-tight rounded px-1.5 py-0.5 overflow-x-auto ${
+            className={`min-w-0 whitespace-pre-wrap leading-tight rounded ${
               isUser
-                ? 'bg-blue-600/20 text-blue-200'
+                ? 'px-2 py-1 break-words bg-blue-600/25 text-blue-100'
                 : isInfo
-                  ? 'text-slate-400 italic text-xs'
-                  : 'text-slate-300'
+                  ? 'px-1.5 py-0.5 overflow-x-auto text-slate-400 italic text-xs'
+                  : 'px-1.5 py-0.5 overflow-x-auto text-slate-300'
             }`}
           >
             {line.line}

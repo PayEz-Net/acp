@@ -11,7 +11,7 @@ export function UserTurn({ turn }: UserTurnProps) {
       data-testid="user-turn"
     >
       <div className="flex items-start gap-2 max-w-[90%] justify-end">
-        <span className="min-w-0 whitespace-pre-wrap leading-normal rounded px-1.5 py-0.5 overflow-x-auto font-terminal bg-blue-600/20 text-blue-200">
+        <span className="min-w-0 whitespace-pre-wrap break-words leading-normal rounded px-2 py-1 font-terminal bg-blue-600/25 text-blue-100 text-sm">
           {turn.contentText}
         </span>
       </div>

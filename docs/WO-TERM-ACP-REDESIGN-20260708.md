@@ -103,18 +103,25 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 
 **Acceptance:** QAPert compares screenshots to native `kimi-code` CLI and the known regression screenshots.
 
-### Task 4 — Tool approval polish
-**Owner:** NextPert-Scout  
-**Files:** `src/main/acp/AcpRuntimeManager.ts`, renderer approval UI
+### Task 4 — Tool approval + chat/terminal polish
+**Owner:** NextPert (primary), NextPert-Scout (support)  
+**Files:** `src/main/acp/AcpRuntimeManager.ts`, `src/renderer/components/AcpTranscript/`, chat panel composer, `TerminalFooter`
 
 **Requirements:**
-- Correctly respond to `session/request_permission` with the ACP `selected` outcome shape.
+- Correctly respond to `session/request_permission` with the verified nested outcome shape.
 - Map to ACP Desktop autonomy/permission settings.
 - Add explicit approval UI when auto-approve is off.
 - Add footer activity indicators (model, tokens, status) from ACP events.
 - Bind `Ctrl+C` to `session/cancel` for the active turn.
+- **Deterministic user-turn rendering:** capture composer input and render it as a user bubble immediately; do not parse the agent output stream to find user messages.
+- **Input history:** Up/Down arrows in the composer recall previous inputs.
+- **Visual polish:** fix mid-word breaks, add color/font hierarchy, remove the AI sparkle from human messages, relocate/collapse inline token metadata, clean up thinking-block "…" clutter in both chat panel and terminal.
 
-**Acceptance:** A prompt that triggers a shell command can be approved/rejected and the tool card updates accordingly.
+**Acceptance:**
+- A prompt that triggers a shell command can be approved/rejected and the tool card updates.
+- User messages always render as right-aligned bubbles.
+- Up/Down recall previous inputs.
+- No mid-word breaks in normal prose; human messages have no AI sparkle.
 
 ### Task 5 — QA acceptance
 **Owner:** QAPert  
@@ -143,11 +150,11 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - [x] Task 1 complete — ACP transport integrated and tested.
 - [x] Task 2 complete — turn-based store merged and golden-tested.
 - [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done.
-- [x] Task 4 complete — tool approval UI and footer activity indicators implemented.
+- [ ] Task 4 complete — tool approval UI, footer indicators, deterministic user turns, input history, and chat/terminal visual polish.
 - [ ] Task 5 complete — QAPert signs off.
 - [x] `npm test` passes (277 tests, 1 skipped QA placeholder).
-- [ ] `npx tsc --noEmit` clean.
-- [ ] `npm run build:electron` succeeds.
+- [x] `npx tsc --noEmit` clean.
+- [x] `npm run build:electron` succeeds.
 - [ ] Jon signs off.
 
 ---

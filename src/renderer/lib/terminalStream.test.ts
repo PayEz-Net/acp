@@ -726,4 +726,38 @@ describe('TerminalStreamNormalizer', () => {
     expect(prose?.source).toBe('agent');
   });
 
+  it('suppresses PTY echoes of deterministically injected user input', () => {
+    const n = new TerminalStreamNormalizer();
+    const ts = new Date().toISOString();
+    n.suppressEcho('t1', 'hello world', new Date(ts).getTime());
+
+    // The exact echo should be suppressed.
+    expect(n.process(makeLine('hello world', 'claude', 't1', ts))).toBeNull();
+
+    // A prompt-prefixed echo should also be suppressed.
+    expect(n.process(makeLine('> hello world', 'claude', 't1', ts))).toBeNull();
+
+    // Unrelated agent output still reaches the stream.
+    const reply = n.process(makeLine('agent reply', 'claude', 't1', ts));
+    expect(reply?.source).toBe('agent');
+    expect(reply?.line).toBe('agent reply');
+  });
+
+  it('suppresses delayed provider redraws of deterministically injected user input', () => {
+    const n = new TerminalStreamNormalizer();
+    const t0 = new Date().toISOString();
+    const t0ms = new Date(t0).getTime();
+    n.suppressEcho('t1', 'mail BAPert', t0ms);
+
+    // Immediate echo suppressed.
+    expect(n.process(makeLine('mail BAPert', 'claude', 't1', t0))).toBeNull();
+
+    // Provider redraw after the 2s match buffer but within the 30s window is
+    // still suppressed because suppressEcho seeds the longer-lived map.
+    const delayed = n.process(
+      makeLine('mail BAPert', 'claude', 't1', new Date(t0ms + 5000).toISOString()),
+    );
+    expect(delayed).toBeNull();
+  });
+
 });

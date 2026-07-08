@@ -23,7 +23,7 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
       {hasThinking && hasAnswer && (
         <ThinkingBlock
           content={turn.thinking}
-          label={isLive ? 'Thinking...' : 'Thought'}
+          label={isLive ? 'Thinking' : 'Thought'}
           live={isLive && turn.status === 'thinking'}
           compact
         />
@@ -34,11 +34,11 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
       ))}
 
       {hasAnswer ? (
-        <pre className="font-terminal text-slate-300 text-xs leading-normal whitespace-pre-wrap overflow-x-auto">
+        <pre className="font-terminal text-slate-200 text-sm leading-normal whitespace-pre-wrap break-words">
           {turn.contentText}
         </pre>
       ) : hasThinking ? (
-        <pre className="font-terminal text-slate-300 text-xs leading-normal whitespace-pre-wrap overflow-x-auto">
+        <pre className="font-terminal text-slate-200 text-sm leading-normal whitespace-pre-wrap break-words">
           {turn.thinking}
         </pre>
       ) : null}

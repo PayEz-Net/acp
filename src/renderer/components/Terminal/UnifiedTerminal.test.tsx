@@ -429,6 +429,44 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
+    it('recalls previous input with Up arrow and restores draft with Down arrow', () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'first command';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      act(() => {
+        input.value = 'second command';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      act(() => {
+        input.value = 'draft';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      });
+      expect(input.value).toBe('second command');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      });
+      expect(input.value).toBe('first command');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      });
+      expect(input.value).toBe('second command');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      });
+      expect(input.value).toBe('draft');
+
+      cleanup(root, container);
+    });
+
     it('sends Escape to the PTY from the composer', () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
@@ -975,5 +1013,81 @@ describe('UnifiedTerminal', () => {
       expect(input.value).toBe('');
       cleanup(root, container);
     });
+  });
+
+  it('injects a deterministic user-source line when sending input in PTY mode', () => {
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+    const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+    act(() => {
+      input.value = 'build now';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+
+    expect(mockWriteTerminal).toHaveBeenCalledWith('t1', 'build now\r');
+    const userLine = useAgentOutputStore.getState().lines.find(
+      (l) => l.agent === 'NextPert' && l.source === 'user',
+    );
+    expect(userLine).toBeDefined();
+    expect(userLine?.line).toBe('build now');
+    cleanup(root, container);
+  });
+
+  it('recalls previous inputs with Up/Down arrows in the composer', () => {
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+    const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+    act(() => {
+      input.value = 'first command';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    act(() => {
+      input.value = 'second command';
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    });
+    expect(input.value).toBe('second command');
+
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    });
+    expect(input.value).toBe('first command');
+
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    });
+    expect(input.value).toBe('second command');
+
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    });
+    expect(input.value).toBe('');
+
+    cleanup(root, container);
+  });
+
+  it('renders user bubbles with break-words and without overflow-x-auto', () => {
+    useAgentOutputStore.setState({
+      lines: [
+        {
+          id: 'u1',
+          agent: 'NextPert',
+          terminal_id: 't1',
+          line: 'A longer user message that should wrap at words.',
+          source: 'user',
+          ts: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+    const userSpan = container.querySelector('[class*="bg-blue-600/25"]');
+    expect(userSpan).not.toBeNull();
+    expect(userSpan?.classList.contains('break-words')).toBe(true);
+    expect(userSpan?.classList.contains('overflow-x-auto')).toBe(false);
+    cleanup(root, container);
   });
 });

@@ -33,6 +33,7 @@ import { TerminalFooter } from './TerminalFooter';
 import { CodeChangeCard } from './CodeChangeCard';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
 import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImages';
+import { useInputHistory } from '../../hooks/useInputHistory';
 import { CODE_PROVIDERS } from '../../lib/agentProviders';
 import { perfMark, perfMeasure } from '../../lib/perf';
 import { trackEvent } from '../../lib/telemetry';
@@ -127,6 +128,8 @@ export function UnifiedTerminal({
   const contextUsage = agentStatus?.contextUsage ?? 0;
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agentName));
   const isAcpMode = effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp';
+  const sessionKey = isAcpMode ? (acpSession?.sessionId ?? '') : (terminalId ?? '');
+  const inputHistory = useInputHistory(agentName, sessionKey || undefined);
 
   const computeDimensions = useCallback(() => {
     const container = containerRef.current;
@@ -458,6 +461,7 @@ export function UnifiedTerminal({
       useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value);
       useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
       window.electronAPI.sendAcpPrompt({ agent: agentName, sessionId, text: value });
+      inputHistory.commit(value);
       input.value = '';
       return;
     }
@@ -470,7 +474,12 @@ export function UnifiedTerminal({
         trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'PROVIDER_NOT_SUPPORTED' });
         return;
       }
-      terminalStreamNormalizer.recordUserInput(tid, value);
+      if (value.trim()) {
+        const ts = new Date().toISOString();
+        useAgentOutputStore.getState().addLine({ agent: agentName, terminal_id: tid, line: value, source: 'user', ts });
+        terminalStreamNormalizer.suppressEcho(tid, value);
+        inputHistory.commit(value);
+      }
       const imagesToSend = stagedImages.map((img) => ({
         id: img.id,
         name: img.name,
@@ -507,10 +516,13 @@ export function UnifiedTerminal({
     }
 
     if (!value) return;
-    terminalStreamNormalizer.recordUserInput(tid, value);
+    const ts = new Date().toISOString();
+    useAgentOutputStore.getState().addLine({ agent: agentName, terminal_id: tid, line: value, source: 'user', ts });
+    terminalStreamNormalizer.suppressEcho(tid, value);
     window.electronAPI.writeTerminal(tid, value + '\r');
+    inputHistory.commit(value);
     input.value = '';
-  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName]);
+  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName, inputHistory]);
 
   // Phase 2 instant-send: once images are staged and the composer is still
   // empty, send the message automatically.
@@ -530,6 +542,20 @@ export function UnifiedTerminal({
       if (e.key === 'Enter') {
         e.preventDefault();
         sendInputLine();
+        return;
+      }
+
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const input = inputRef.current;
+        if (!input) return;
+        const next = inputHistory.cycle(e.key === 'ArrowUp' ? 'up' : 'down', input.value);
+        if (next !== null) {
+          input.value = next;
+          requestAnimationFrame(() => {
+            input.setSelectionRange(next.length, next.length);
+          });
+        }
         return;
       }
 
@@ -569,7 +595,7 @@ export function UnifiedTerminal({
       }
 
     },
-    [sendInputLine, stagedImages, clearImages, isAcpMode, acpSession, agentName],
+    [sendInputLine, stagedImages, clearImages, isAcpMode, acpSession, agentName, inputHistory],
   );
 
   const handleInputPaste = useCallback(
@@ -853,7 +879,7 @@ function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
     return (
       <div className="flex flex-col py-0.5 rounded px-1 -mx-1 items-end hover:bg-slate-800/30">
         <div className="flex items-start gap-2 max-w-[90%] justify-end">
-          <span className="min-w-0 whitespace-pre-wrap leading-normal rounded px-1.5 py-0.5 overflow-x-auto font-terminal bg-blue-600/20 text-blue-200">
+          <span className="min-w-0 whitespace-pre-wrap break-words leading-normal rounded px-2 py-1 font-terminal bg-blue-600/25 text-blue-100">
             {line.line}
           </span>
         </div>
