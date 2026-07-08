@@ -150,10 +150,11 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - [x] Task 1 complete — ACP transport integrated and tested.
 - [x] Task 2 complete — turn-based store merged and golden-tested.
 - [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done.
-- [ ] Task 4 complete — tool approval UI, footer indicators, deterministic user turns, input history, and chat/terminal visual polish.
+- [x] Task 4 complete — tool approval UI, footer indicators, deterministic user turns, input history, and chat/terminal visual polish.
 - [ ] Task 5 complete — QAPert signs off.
-- [x] `npm test` passes (277 tests, 1 skipped QA placeholder).
+- [x] `npm test` passes (297 tests, 1 skipped QA placeholder).
 - [x] `npx tsc --noEmit` clean.
+- [x] `npx tsc --noEmit -p tsconfig.main.json` clean.
 - [x] `npm run build:electron` succeeds.
 - [ ] Jon signs off.
 
@@ -193,4 +194,9 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
   - `ACP_PERMISSION_RESPONSE`: `{ agent, sessionId, permissionRequestId, outcome, optionId? }`
 - `session/permission_response` JSON-RPC shape sent to `kimi acp`: `{ requestId, outcome, optionId }`. Main maps `permissionRequestId → requestId` and passes through `outcome` (defaulting to `"selected"`).
 - Kimi ACP feature flag in `UnifiedTerminal`: `effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp'`. Claude/Codex continue to use the PTY line stream.
+- Task 4 chat/terminal polish completed 2026-07-08:
+  - Deterministic user turns: PTY composer now injects a `source: 'user'` line into `agentOutputStore` and calls `terminalStreamNormalizer.suppressEcho()` so provider echo does not re-render as agent output. ACP mode already captures user turns in `acpSessionStore`.
+  - Composer Up/Down arrows recall per-agent/per-session input history via `useInputHistory` in both `UnifiedTerminal` and `ChatPanel`.
+  - User bubbles use `break-words` (no mid-token breaks) and a stronger blue tint; agent prose uses larger/lighter text for hierarchy; thinking-block labels no longer append "…".
+  - Token/context metadata stays in `TerminalFooter`; inline sparkle/status glyphs are stripped from captured user input by the echo-suppression path.
 - Kimi API-key model-swap in Claude Code / Codex was considered and deferred. Moonshot exposes Anthropic/OpenAI-compatible endpoints, so Claude Code can point to `api.moonshot.ai/anthropic` and Codex can point to `api.moonshot.ai/v1` via a local compatibility layer. We deferred this because it outsources tool execution to the Claude/Codex clients, which would force us back into PTY-stream parsing to render tool cards and approval UI, and it would replace native Kimi UX with Claude/Codex UX. It remains a useful future runtime option but is out of scope for this WO.

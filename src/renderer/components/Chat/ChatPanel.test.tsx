@@ -26,6 +26,12 @@ function cleanup(root: ReturnType<typeof createRoot>, container: HTMLElement) {
   document.body.removeChild(container);
 }
 
+function typeInto(input: HTMLInputElement, text: string) {
+  input.value = text;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function mockFetch(response: { ok?: boolean; json?: unknown; status?: number } = {}) {
   return vi.fn().mockResolvedValue({
     ok: response.ok ?? true,
