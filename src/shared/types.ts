@@ -455,6 +455,14 @@ export const IPC_CHANNELS = {
   // Terminal image paste (renderer → main). The renderer stages clipboard image
   // bytes; main writes them to temp PNGs and emits provider-specific PTY input.
   TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
+
+  // ACP (Agent Client Protocol) transport for Kimi and future structured providers.
+  ACP_EVENT: 'acp:event',
+  ACP_PROMPT: 'acp:prompt',
+  ACP_CANCEL: 'acp:cancel',
+  ACP_SET_MODE: 'acp:set-mode',
+  ACP_KILL: 'acp:kill',
+  ACP_PERMISSION_RESPONSE: 'acp:permission-response',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event

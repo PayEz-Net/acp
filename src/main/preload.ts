@@ -56,6 +56,13 @@ const IPC_CHANNELS = {
   WORKDIR_VALIDATE: 'workdir:validate',
   // Terminal image paste (renderer → main).
   TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
+  // ACP (Agent Client Protocol) transport.
+  ACP_EVENT: 'acp:event',
+  ACP_PROMPT: 'acp:prompt',
+  ACP_CANCEL: 'acp:cancel',
+  ACP_SET_MODE: 'acp:set-mode',
+  ACP_KILL: 'acp:kill',
+  ACP_PERMISSION_RESPONSE: 'acp:permission-response',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -69,6 +76,14 @@ type LoginRequest = { email: string; password: string };
 type LoginResult = { success: boolean; error?: string; requires2FA?: boolean; available2FAMethods?: string[] };
 type TwoFactorRequest = { code: string; method: 'email' | 'sms' };
 type TwoFactorResult = { success: boolean; error?: string };
+
+// ACP transport type aliases (mirrors ../shared/acpTypes).
+type AcpPromptPayload = { agent: string; sessionId: string; text: string };
+type AcpCancelPayload = { agent: string; sessionId: string };
+type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
+type AcpKillPayload = { agent: string; sessionId: string };
+type AcpPermissionResponsePayload = { agent: string; sessionId: string; permissionRequestId: number | string; outcome: string; optionId?: string };
+type AcpEventPayload = { agent: string; sessionId: string; update: unknown };
 
 
 // Expose protected methods to renderer via contextBridge
@@ -242,6 +257,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_SEND_WITH_IMAGES, payload);
   },
 
+  // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
+  sendAcpPrompt: (payload: AcpPromptPayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_PROMPT, payload);
+  },
+
+  sendAcpCancel: (payload: AcpCancelPayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_CANCEL, payload);
+  },
+
+  sendAcpSetMode: (payload: AcpSetModePayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_SET_MODE, payload);
+  },
+
+  sendAcpKill: (payload: AcpKillPayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_KILL, payload);
+  },
+
+  sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_PERMISSION_RESPONSE, payload);
+  },
+
+  onAcpEvent: (callback: (payload: AcpEventPayload) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, payload: AcpEventPayload) => callback(payload);
+    ipcRenderer.on(IPC_CHANNELS.ACP_EVENT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACP_EVENT, handler);
+  },
+
   // ACP backend
   getBackendStatus: (): Promise<{ available: boolean }> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_BACKEND_STATUS);
@@ -377,6 +419,13 @@ declare global {
         text: string;
         images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
       }) => Promise<{ success: boolean; error?: string }>;
+      // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
+      sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
+      sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
+      sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
+      sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
+      sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
+      onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;
       getLocalSecret: () => Promise<string | null>;

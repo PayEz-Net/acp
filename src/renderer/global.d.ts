@@ -1,4 +1,5 @@
 import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload } from '@shared/types';
+import type { AcpEventPayload, AcpPromptPayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
 
 export {};
 
@@ -60,6 +61,14 @@ declare global {
         text: string;
         images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
       }) => Promise<{ success: boolean; error?: string }>;
+
+      // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
+      sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
+      sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
+      sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
+      sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
+      sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
+      onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
 
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;

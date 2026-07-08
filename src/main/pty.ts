@@ -6,9 +6,23 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as http from 'http';
-import { IPC_CHANNELS, type SpawnFailedPayload, type TerminalProvider } from '../shared/types';
+import {
+  IPC_CHANNELS,
+  type SpawnFailedPayload,
+  type TerminalProvider,
+} from '../shared/types';
+import {
+  type AcpEventPayload,
+  type AcpPromptPayload,
+  type AcpCancelPayload,
+  type AcpSetModePayload,
+  type AcpKillPayload,
+  type AcpPermissionResponsePayload,
+} from '../shared/acpTypes';
 import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
+import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
+import { getProviderConfig } from './acp/providerConfigs';
 import { buildImageInputCommand } from './lib/terminalInputAdapters';
 import { writePastedImages, cleanupOldPastedImages, ImagePasteError } from './lib/imagePaste';
 
@@ -93,7 +107,15 @@ export interface SpawnAgentOptions {
 }
 
 const terminals: Map<string, ManagedPty> = new Map();
+const acpRuntimes: Map<string, AcpRuntimeManager> = new Map();
 let mainWindowRef: BrowserWindow | null = null;
+
+function getAcpRuntimeByAgent(agentName: string): AcpRuntimeManager | undefined {
+  for (const runtime of acpRuntimes.values()) {
+    if (runtime.getAgentName() === agentName) return runtime;
+  }
+  return undefined;
+}
 
 // ESC [ ? 2 0 0 4 h  — DECSET, enable bracketed paste
 const BRACKETED_PASTE_ON = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x34, 0x68]);
@@ -510,12 +532,7 @@ function noteWorkDirSkip(agentName: string, requested: string, resolved: string)
 }
 
 export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgentOptions): string {
-  const id = crypto.randomUUID();
-  const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-  const acpBinDir = getAcpBinDir();
-  const existingPath = process.env.PATH || process.env.Path || '';
-
-  // Guard BEFORE pty.spawn — a non-existent cwd makes node-pty throw
+  // Guard BEFORE allocating any runtime — a non-existent cwd makes node-pty throw
   // Win32 267 asynchronously and crash the main process (see WorkDirError).
   const resolvedWorkDir = resolveWorkDir(workDir);
   if (!resolvedWorkDir) {
@@ -556,11 +573,52 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   }
   console.log(`[PTY] Provider for ${agentName}: ${provider} — source: team-runtime`);
 
-  console.log(`[PTY] Spawning ${agentName} shell=${shell} cwd=${resolvedWorkDir}`);
-
   // Best-effort cleanup of stale pasted-image temp files whenever a new
   // terminal session starts. Only files older than 24 h are removed.
   cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
+
+  // ACP path (structured JSON-RPC). Kimi is the Phase 1 ACP provider;
+  // Claude/Codex continue to use the PTY fallback below.
+  const providerConfig = getProviderConfig(provider);
+  if (providerConfig.supportsAcp) {
+    const id = crypto.randomUUID();
+    console.log(`[ACP] Starting ${agentName} via ACP (${provider}) cwd=${resolvedWorkDir}`);
+    const runtime = new AcpRuntimeManager(id, providerConfig, {
+      agentName,
+      workDir: resolvedWorkDir,
+      projectId: opts?.projectId,
+      bootPrompt: opts?.bootPrompt,
+      effort: opts?.effort,
+    });
+    // Phase 1: explicit renderer approval is coming later; until then stay
+    // conservative and surface permission requests through ACP_EVENT.
+    runtime.setAutoApprove(false);
+    acpRuntimes.set(id, runtime);
+    runtime.on('event', (payload: AcpEventPayload) => {
+      safeSend(IPC_CHANNELS.ACP_EVENT, payload);
+    });
+    // Reuse the PTY_SPAWNED channel so the renderer's agentName→terminalId
+    // mapping works the same way for ACP sessions.
+    safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id });
+    runtime.start().catch((err) => {
+      console.error(`[ACP] Runtime failed to start for ${agentName}:`, err);
+      safeSend(IPC_CHANNELS.ACP_EVENT, {
+        agent: agentName,
+        sessionId: runtime.getSessionId() ?? '',
+        update: { sessionUpdate: 'error', error: err instanceof Error ? err.message : String(err) },
+      });
+      acpRuntimes.delete(id);
+    });
+    return id;
+  }
+
+  // PTY fallback path for providers that don't support ACP (Claude, Codex).
+  const id = crypto.randomUUID();
+  const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
+  const acpBinDir = getAcpBinDir();
+  const existingPath = process.env.PATH || process.env.Path || '';
+
+  console.log(`[PTY] Spawning ${agentName} shell=${shell} cwd=${resolvedWorkDir}`);
 
   const ptyProcess = pty.spawn(shell, [], {
     name: 'xterm-256color',
@@ -799,7 +857,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   return id;
 }
 
-/** Kill a PTY by terminal ID */
+/** Kill a terminal by terminal ID. Handles both PTY and ACP runtimes. */
 export function killTerminal(terminalId: string): boolean {
   const terminal = terminals.get(terminalId);
   if (terminal) {
@@ -814,6 +872,12 @@ export function killTerminal(terminalId: string): boolean {
     // killAllPty).
     treeKillPty(terminal.pty);
     terminals.delete(terminalId);
+    return true;
+  }
+  const runtime = acpRuntimes.get(terminalId);
+  if (runtime) {
+    runtime.kill();
+    acpRuntimes.delete(terminalId);
     return true;
   }
   return false;
@@ -841,12 +905,19 @@ export function getTerminalByAgent(agentName: string, projectId?: number): Manag
   return undefined;
 }
 
-/** Get all active terminals. Includes the runtime/provider each PTY was
- *  actually launched with (SPEC-team-runtime §3.2) so the renderer's
+/** Get all active terminals. Includes the runtime/provider each PTY/ACP session
+ *  was actually launched with (SPEC-team-runtime §3.2) so the renderer's
  *  reconcile-on-switch can detect agents running on a provider that no
  *  longer matches the team runtime. */
 export function getActiveTerminals(): Array<{ id: string; agentName: string; projectId?: number; provider: AgentRuntime }> {
-  return Array.from(terminals.values()).map(t => ({ id: t.id, agentName: t.agentName, projectId: t.projectId, provider: t.provider }));
+  const ptyEntries = Array.from(terminals.values()).map(t => ({ id: t.id, agentName: t.agentName, projectId: t.projectId, provider: t.provider }));
+  const acpEntries = Array.from(acpRuntimes.entries()).map(([id, runtime]) => ({
+    id,
+    agentName: runtime.getAgentName(),
+    projectId: runtime.getProjectId(),
+    provider: runtime.getProvider(),
+  }));
+  return [...ptyEntries, ...acpEntries];
 }
 
 export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
@@ -896,6 +967,47 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   // terminals + the provider each was launched with, to find agents whose
   // running provider no longer matches the team runtime.
   ipcMain.handle(IPC_CHANNELS.PTY_LIST, () => getActiveTerminals());
+
+  // ACP (Agent Client Protocol) transport handlers. These route renderer
+  // composer/actions to the structured JSON-RPC runtime for Kimi and future
+  // ACP-capable providers. Claude/Codex continue to use the PTY handlers above.
+  ipcMain.handle(IPC_CHANNELS.ACP_PROMPT, async (_, payload: AcpPromptPayload) => {
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) {
+      console.warn(`[ACP] prompt for unknown agent: ${payload.agent}`);
+      return;
+    }
+    await runtime.prompt(payload.text);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_CANCEL, (_, payload: AcpCancelPayload) => {
+    getAcpRuntimeByAgent(payload.agent)?.cancel();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_SET_MODE, (_, payload: AcpSetModePayload) => {
+    getAcpRuntimeByAgent(payload.agent)?.setMode(payload.mode);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_KILL, (_, payload: AcpKillPayload) => {
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) return;
+    // Find the runtime's id so we can remove it from the map.
+    for (const [id, r] of acpRuntimes.entries()) {
+      if (r === runtime) {
+        r.kill();
+        acpRuntimes.delete(id);
+        break;
+      }
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_PERMISSION_RESPONSE, (_, payload: AcpPermissionResponsePayload) => {
+    getAcpRuntimeByAgent(payload.agent)?.respondToPermission(
+      payload.permissionRequestId,
+      payload.optionId ?? 'reject',
+      payload.outcome,
+    );
+  });
 }
 
 /**
@@ -927,4 +1039,6 @@ export function killAllPty() {
     treeKillPty(terminal.pty);
   });
   terminals.clear();
+  acpRuntimes.forEach((runtime) => runtime.kill());
+  acpRuntimes.clear();
 }

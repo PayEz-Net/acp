@@ -139,10 +139,10 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 
 ## 6. Definition of done
 
-- [ ] Task 0 complete — feature branch created from clean working tree.
+- [x] Task 0 complete — feature branch `feature/WO-TERM-ACP-REDESIGN-20260708` created.
 - [ ] Task 1 complete — ACP transport integrated and tested.
-- [ ] Task 2 complete — turn-based store merged and golden-tested.
-- [ ] Task 3 complete — semantic renderer behind Kimi feature flag.
+- [x] Task 2 complete — turn-based store merged and golden-tested.
+- [x] Task 3 complete — semantic renderer and `UnifiedTerminal` wiring done; transport integration pending.
 - [ ] Task 4 complete — tool approval and activity polish.
 - [ ] Task 5 complete — QAPert signs off.
 - [ ] `npm test` passes (240+ tests).
@@ -157,9 +157,10 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 | Role | Agent | Accepted | Date |
 |---|---|---|---|
 | Lead / Requirements | BAPert | ✅ | 2026-07-08 |
-| Implementer — transport | NextPert-Scout | ⬜ | |
-| Implementer — store/renderer | NextPert | ⬜ | |
-| QA | QAPert | ⬜ | |
+| Implementer — transport | NextPert-Scout | ✅ | 2026-07-08 |
+| Implementer — store/renderer | NextPert | ✅ (branch skeleton up) | 2026-07-08 |
+| Backend consultant | DotNetPert | ✅ | 2026-07-08 |
+| QA | QAPert | ✅ (conditional) | 2026-07-08 |
 | Stakeholder | Jon | ⬜ | |
 
 ---
@@ -169,3 +170,14 @@ Replace the ad-hoc PTY-stream regex normalizer with a structured-event-driven te
 - This WO supersedes ad-hoc terminal formatting patches. No further regex whack-a-mole without lead approval.
 - If `kimi acp` proves unstable during implementation, immediately raise a blocker and fall back to the custom PTY-text-treatment path.
 - Backend cache questions should route to DotNetPert.
+- Implementation branch: `feature/WO-TERM-ACP-REDESIGN-20260708`.
+- Type consolidation resolved: canonical ACP IPC/event types live in `src/shared/acpTypes.ts`. Main forwards raw JSON-RPC `session/update` events to the renderer as `{ agent: string; sessionId: string; update: AcpSessionUpdate }`. The duplicate ACP block was removed from `src/shared/types.ts`.
+- Renderer → main IPC payloads (BAPert decision 2026-07-08):
+  - `ACP_PROMPT`: `{ agent, sessionId, text }`
+  - `ACP_CANCEL`: `{ agent, sessionId }`
+  - `ACP_SET_MODE`: `{ agent, sessionId, mode }`
+  - `ACP_KILL`: `{ agent, sessionId }`
+  - `ACP_PERMISSION_RESPONSE`: `{ agent, sessionId, permissionRequestId, outcome, optionId? }`
+- `session/permission_response` JSON-RPC shape sent to `kimi acp`: `{ requestId, outcome, optionId }`. Main maps `permissionRequestId → requestId` and passes through `outcome` (defaulting to `"selected"`).
+- Kimi ACP feature flag in `UnifiedTerminal`: `effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp'`. Claude/Codex continue to use the PTY line stream.
+- Kimi API-key model-swap in Claude Code / Codex was considered and deferred. Moonshot exposes Anthropic/OpenAI-compatible endpoints, so Claude Code can point to `api.moonshot.ai/anthropic` and Codex can point to `api.moonshot.ai/v1` via a local compatibility layer. We deferred this because it outsources tool execution to the Claude/Codex clients, which would force us back into PTY-stream parsing to render tool cards and approval UI, and it would replace native Kimi UX with Claude/Codex UX. It remains a useful future runtime option but is out of scope for this WO.

@@ -27,6 +27,7 @@ import { useDocumentStore } from './stores/documentStore';
 import { useProjectStore } from './stores/projectStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useTeamStore } from './stores/teamStore';
+import { useAcpSessionStore } from './stores/acpSessionStore';
 import { useAcpSse } from './hooks/useAcpSse';
 import { useVsqlCacheSse } from './hooks/useVsqlCacheSse';
 import { useTeamPoll } from './hooks/useTeamPoll';
@@ -233,6 +234,15 @@ export default function App() {
         projectName: proj?.name ?? 'the current project',
         badPath: payload.work_dir ?? '',
       });
+    });
+    return unsub;
+  }, []);
+
+  // ACP (Agent Client Protocol) event stream — forward structured JSON-RPC
+  // session/update notifications into the per-agent ACP session store.
+  useEffect(() => {
+    const unsub = window.electronAPI.onAcpEvent((payload) => {
+      useAcpSessionStore.getState().applyEvent(payload);
     });
     return unsub;
   }, []);

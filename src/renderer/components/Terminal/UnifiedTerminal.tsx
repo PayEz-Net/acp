@@ -27,6 +27,7 @@ import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOut
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { TerminalFooter } from './TerminalFooter';
 import { CodeChangeCard } from './CodeChangeCard';
@@ -35,6 +36,7 @@ import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImag
 import { CODE_PROVIDERS } from '../../lib/agentProviders';
 import { perfMark, perfMeasure } from '../../lib/perf';
 import { trackEvent } from '../../lib/telemetry';
+import { AcpTranscript } from '../AcpTranscript';
 
 export interface UnifiedTerminalProps {
   /** Agent whose output stream to render. */
@@ -123,6 +125,8 @@ export function UnifiedTerminal({
   const enableTerminalImagePaste = useAppStore((s) => s.settings.enableTerminalImagePaste) !== false;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
+  const acpSession = useAcpSessionStore((s) => s.sessions.get(agentName));
+  const isAcpMode = effectiveProvider === 'kimi' && acpSession?.runtimeMode === 'acp';
 
   const computeDimensions = useCallback(() => {
     const container = containerRef.current;
@@ -387,6 +391,7 @@ export function UnifiedTerminal({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (isAcpMode) return;
       const tid = terminalIdRef.current;
       if (!tid) return;
 
@@ -429,7 +434,7 @@ export function UnifiedTerminal({
         window.electronAPI.writeTerminal(tid, e.key);
       }
     },
-    [getSelectionText, handleCopy],
+    [getSelectionText, handleCopy, isAcpMode],
   );
 
   const { images: stagedImages, error: imageError, addImageFromFile, removeImage, clearImages } = useTerminalImages();
@@ -439,9 +444,25 @@ export function UnifiedTerminal({
   const sendInputLine = useCallback(() => {
     const tid = terminalIdRef.current;
     const input = inputRef.current;
-    if (!tid || !input) return;
+    if (!input) return;
     const value = input.value;
     setSendError(null);
+
+    if (isAcpMode) {
+      if (stagedImages.length > 0) {
+        setSendError('Image input is not yet supported for ACP mode.');
+        return;
+      }
+      if (!value) return;
+      const sessionId = acpSession?.sessionId ?? '';
+      useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value);
+      useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
+      window.electronAPI.sendAcpPrompt({ agent: agentName, sessionId, text: value });
+      input.value = '';
+      return;
+    }
+
+    if (!tid) return;
 
     if (stagedImages.length > 0) {
       if (!canSendImages) {
@@ -489,7 +510,7 @@ export function UnifiedTerminal({
     terminalStreamNormalizer.recordUserInput(tid, value);
     window.electronAPI.writeTerminal(tid, value + '\r');
     input.value = '';
-  }, [stagedImages, canSendImages, clearImages, effectiveProvider]);
+  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName]);
 
   // Phase 2 instant-send: once images are staged and the composer is still
   // empty, send the message automatically.
@@ -505,7 +526,6 @@ export function UnifiedTerminal({
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       const tid = terminalIdRef.current;
-      if (!tid) return;
 
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -518,15 +538,17 @@ export function UnifiedTerminal({
         if (stagedImages.length > 0) {
           clearImages();
           setSendError(null);
-        } else {
+        } else if (!isAcpMode && tid) {
           window.electronAPI.writeTerminal(tid, '\u001b');
         }
         return;
       }
 
       if (e.key === 'Tab') {
-        e.preventDefault();
-        window.electronAPI.writeTerminal(tid, '\t');
+        if (!isAcpMode && tid) {
+          e.preventDefault();
+          window.electronAPI.writeTerminal(tid, '\t');
+        }
         return;
       }
 
@@ -535,14 +557,19 @@ export function UnifiedTerminal({
         const input = e.currentTarget;
         if (input.selectionStart === input.selectionEnd) {
           e.preventDefault();
-          window.electronAPI.writeTerminal(tid, '\u0003');
+          if (isAcpMode) {
+            const sessionId = acpSession?.sessionId ?? '';
+            window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
+          } else if (tid) {
+            window.electronAPI.writeTerminal(tid, '\u0003');
+          }
           input.value = '';
         }
         return;
       }
 
     },
-    [sendInputLine, stagedImages, clearImages],
+    [sendInputLine, stagedImages, clearImages, isAcpMode, acpSession, agentName],
   );
 
   const handleInputPaste = useCallback(
@@ -650,38 +677,44 @@ export function UnifiedTerminal({
           aria-label={`Terminal output for ${agentName}`}
           tabIndex={0}
         >
-          {filteredLines.length === 0 && !terminalId && (
-            <div className="h-full flex items-center justify-center text-slate-500 select-none">
-              Terminal output will appear here.
-            </div>
-          )}
+          {isAcpMode ? (
+            <AcpTranscript turns={acpSession?.turns ?? []} activeTurnId={acpSession?.activeTurnId ?? null} />
+          ) : (
+            <>
+              {filteredLines.length === 0 && !terminalId && (
+                <div className="h-full flex items-center justify-center text-slate-500 select-none">
+                  Terminal output will appear here.
+                </div>
+              )}
 
-          {filteredLines.length > 0 && (
-            <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
-              {virtualItems.map((virtualItem) => {
-                const line = filteredLines[virtualItem.index];
-                return (
-                  <div
-                    key={virtualItem.key}
-                    data-index={virtualItem.index}
-                    ref={virtualizer.measureElement}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    <TerminalLine
-                      line={line}
-                      compact={compact}
-                      showThinking={showThinking}
-                    />
-                  </div>
-                );
-              })}
-            </div>
+              {filteredLines.length > 0 && (
+                <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
+                  {virtualItems.map((virtualItem) => {
+                    const line = filteredLines[virtualItem.index];
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={virtualizer.measureElement}
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${virtualItem.start}px)`,
+                        }}
+                      >
+                        <TerminalLine
+                          line={line}
+                          compact={compact}
+                          showThinking={showThinking}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
 
