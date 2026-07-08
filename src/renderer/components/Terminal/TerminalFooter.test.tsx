@@ -5,6 +5,7 @@ import { act } from 'react';
 
 import { TerminalFooter } from './TerminalFooter';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import type { AgentState } from '@shared/types';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -38,6 +39,7 @@ function makeAgent(overrides: Partial<AgentState> = {}): AgentState {
 
 beforeEach(() => {
   useAgentStatusStore.setState({ statuses: {} });
+  useAcpSessionStore.setState({ sessions: new Map() });
 });
 
 describe('TerminalFooter', () => {
@@ -139,6 +141,66 @@ describe('TerminalFooter', () => {
       />,
     );
     expect(container.textContent).toContain('fallback');
+    cleanup(root, container);
+  });
+
+  it('shows ACP live status and model from the initialized event', () => {
+    useAcpSessionStore.getState().applyEvent({
+      agent: 'Nextpert-Scout',
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'initialized',
+        sessionId: 's1',
+        capabilities: {},
+        agentInfo: { name: 'Kimi Code CLI', version: '1.0.0' },
+      },
+    });
+    useAcpSessionStore.getState().startAssistantTurn('Nextpert-Scout', 's1');
+    useAcpSessionStore.getState().applyEvent({
+      agent: 'Nextpert-Scout',
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'Shell: ls',
+          status: 'in_progress',
+          content: [],
+        },
+      },
+    });
+
+    const agent = makeAgent({ status: 'busy', provider: 'kimi' });
+    const { container, root } = render(
+      <TerminalFooter
+        agent={agent}
+        provider="kimi"
+        repoPath="E:\\repos\\acp-desktop"
+        lineCount={0}
+        thinkingCount={0}
+        contextUsage={0}
+      />,
+    );
+
+    expect(container.textContent).toContain('Tool…');
+    expect(container.textContent).toContain('Kimi Code CLI 1.0.0');
+    cleanup(root, container);
+  });
+
+  it('falls back to agent status when no ACP session exists', () => {
+    const agent = makeAgent({ status: 'ready', provider: 'kimi' });
+    const { container, root } = render(
+      <TerminalFooter
+        agent={agent}
+        provider="kimi"
+        repoPath="E:\\repos\\acp-desktop"
+        lineCount={0}
+        thinkingCount={0}
+        contextUsage={0}
+      />,
+    );
+    expect(container.textContent).toContain('Ready');
     cleanup(root, container);
   });
 });

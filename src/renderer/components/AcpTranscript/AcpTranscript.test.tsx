@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -7,7 +7,10 @@ import { AcpTranscript } from './AcpTranscript';
 import { AssistantTurn } from './AssistantTurn';
 import { UserTurn } from './UserTurn';
 import { ToolCallCard } from './ToolCallCard';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import type { AcpTurn, AcpToolCall } from '@shared/acpTypes';
+
+const mockSendAcpPermissionResponse = vi.fn().mockResolvedValue(undefined);
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,10 +57,20 @@ function makeToolCall(overrides: Partial<AcpToolCall> = {}): AcpToolCall {
   };
 }
 
-describe('AcpTranscript', () => {
-  beforeEach(() => {
-    document.body.innerHTML = '';
+beforeEach(() => {
+  vi.stubGlobal('electronAPI', {
+    sendAcpPermissionResponse: mockSendAcpPermissionResponse,
   });
+  useAcpSessionStore.setState({ sessions: new Map() });
+  document.body.innerHTML = '';
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+});
+
+describe('AcpTranscript', () => {
 
   it('renders user and assistant turns', () => {
     const turns: AcpTurn[] = [
@@ -74,6 +87,112 @@ describe('AcpTranscript', () => {
     const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
     const { container, root } = render(<AcpTranscript turns={turns} activeTurnId="a1" />);
     expect(container.querySelector('[data-testid="activity-indicator"]')).not.toBeNull();
+    cleanup(root, container);
+  });
+
+  it('renders a permission request card and sends the selected response', async () => {
+    useAcpSessionStore.getState().startUserTurn('NextPert', 's1', 'Run dir');
+    useAcpSessionStore.getState().startAssistantTurn('NextPert', 's1');
+    useAcpSessionStore.getState().applyEvent({
+      agent: 'NextPert',
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'permission_request',
+        sessionId: 's1',
+        requestId: 7,
+        options: [
+          { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+          { optionId: 'approve_for_session', name: 'Approve for session', kind: 'allow_always' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+        ],
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'Shell: dir',
+          status: 'in_progress',
+          content: [],
+        },
+      },
+    });
+
+    const session = useAcpSessionStore.getState().getSession('NextPert')!;
+    const { container, root } = render(
+      <AcpTranscript
+        turns={session.turns}
+        activeTurnId={session.activeTurnId}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="permission-request-card"]')).not.toBeNull();
+    expect(container.textContent).toContain('Permission required');
+    expect(container.textContent).toContain('Shell: dir');
+
+    const approveBtn = container.querySelector('[data-testid="permission-option-approve"]') as HTMLButtonElement;
+    expect(approveBtn).not.toBeNull();
+
+    act(() => {
+      approveBtn.click();
+    });
+
+    expect(mockSendAcpPermissionResponse).toHaveBeenCalledWith({
+      agent: 'NextPert',
+      sessionId: 's1',
+      permissionRequestId: 7,
+      outcome: 'selected',
+      optionId: 'approve',
+    });
+
+    await act(async () => Promise.resolve());
+    expect(useAcpSessionStore.getState().getSession('NextPert')?.pendingPermission).toBeUndefined();
+
+    cleanup(root, container);
+  });
+
+  it('sends a reject permission response and clears the request', async () => {
+    useAcpSessionStore.getState().startUserTurn('NextPert', 's1', 'Run dir');
+    useAcpSessionStore.getState().startAssistantTurn('NextPert', 's1');
+    useAcpSessionStore.getState().applyEvent({
+      agent: 'NextPert',
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'permission_request',
+        sessionId: 's1',
+        requestId: 8,
+        options: [
+          { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+        ],
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'Shell: dir',
+          status: 'in_progress',
+          content: [],
+        },
+      },
+    });
+
+    const session = useAcpSessionStore.getState().getSession('NextPert')!;
+    const { container, root } = render(
+      <AcpTranscript turns={session.turns} activeTurnId={session.activeTurnId} />,
+    );
+
+    const rejectBtn = container.querySelector('[data-testid="permission-option-reject"]') as HTMLButtonElement;
+    act(() => {
+      rejectBtn.click();
+    });
+
+    expect(mockSendAcpPermissionResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: 'NextPert',
+        sessionId: 's1',
+        permissionRequestId: 8,
+        outcome: 'selected',
+        optionId: 'reject',
+      }),
+    );
+
+    await act(async () => Promise.resolve());
+    expect(useAcpSessionStore.getState().getSession('NextPert')?.pendingPermission).toBeUndefined();
+
     cleanup(root, container);
   });
 });

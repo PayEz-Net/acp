@@ -8,6 +8,7 @@ import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import type { AgentState } from '@shared/types';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -17,6 +18,9 @@ const mockResizeTerminal = vi.fn();
 const mockReadClipboardText = vi.fn();
 const mockTriggerPaste = vi.fn();
 const mockSendTerminalWithImages = vi.fn();
+const mockSendAcpPrompt = vi.fn().mockResolvedValue(undefined);
+const mockSendAcpCancel = vi.fn().mockResolvedValue(undefined);
+const mockSendAcpPermissionResponse = vi.fn().mockResolvedValue(undefined);
 
 class ResizeObserverMock {
   private callback: ResizeObserverCallback | null = null;
@@ -51,6 +55,9 @@ beforeEach(() => {
     readClipboardText: mockReadClipboardText,
     triggerPaste: mockTriggerPaste,
     sendTerminalWithImages: mockSendTerminalWithImages,
+    sendAcpPrompt: mockSendAcpPrompt,
+    sendAcpCancel: mockSendAcpCancel,
+    sendAcpPermissionResponse: mockSendAcpPermissionResponse,
   });
   vi.stubGlobal('ResizeObserver', ResizeObserverMock);
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
@@ -61,6 +68,7 @@ beforeEach(() => {
   useAgentOutputStore.setState({ lines: [] });
   useAgentStatusStore.setState({ statuses: {} });
   useProjectStore.setState({ activeProject: null, currentProjectTeam: [] });
+  useAcpSessionStore.setState({ sessions: new Map() });
 });
 
 afterEach(() => {
@@ -834,5 +842,138 @@ describe('UnifiedTerminal', () => {
     expect(container.textContent).toContain('const line19 = 19');
     expect(container.textContent).toContain('Show less');
     cleanup(root, container);
+  });
+
+  describe('ACP mode', () => {
+    it('renders the ACP transcript, permission card, and live status in the footer', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+
+      const store = useAcpSessionStore.getState();
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI', version: '1.0.0' },
+        },
+      });
+      store.startUserTurn('NextPert', 's1', 'List files');
+      store.startAssistantTurn('NextPert', 's1');
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'tool_call',
+          sessionId: 's1',
+          toolCall: {
+            toolCallId: 'tc1',
+            title: 'Shell: ls',
+            status: 'in_progress',
+            content: [],
+          },
+        },
+      });
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'permission_request',
+          sessionId: 's1',
+          requestId: 10,
+          options: [
+            { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+            { optionId: 'approve_for_session', name: 'Approve for session', kind: 'allow_always' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+          toolCall: {
+            toolCallId: 'tc1',
+            title: 'Shell: ls',
+            status: 'in_progress',
+            content: [],
+          },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+
+      expect(container.querySelector('[data-testid="acp-transcript"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="permission-request-card"]')).not.toBeNull();
+      expect(container.textContent).toContain('Tool…');
+      expect(container.textContent).toContain('Kimi Code CLI 1.0.0');
+
+      const approveBtn = container.querySelector('[data-testid="permission-option-approve"]') as HTMLButtonElement;
+      act(() => {
+        approveBtn.click();
+      });
+
+      expect(mockSendAcpPermissionResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: 'NextPert',
+          sessionId: 's1',
+          permissionRequestId: 10,
+          outcome: 'selected',
+          optionId: 'approve',
+        }),
+      );
+
+      cleanup(root, container);
+    });
+
+    it('sends ACP_PROMPT from the composer in ACP mode', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'List files' }),
+      );
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
   });
 });
