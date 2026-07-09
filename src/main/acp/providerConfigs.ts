@@ -21,6 +21,8 @@ export interface ProviderConfig {
   ptyCommand: (opts: { bootPrompt?: string; effort?: string }) => string[];
   /** Client capabilities advertised during ACP initialize. */
   defaultCapabilities: ClientCapabilities;
+  /** Automatically approve permission requests (yolo mode). */
+  autoApprove?: boolean;
 }
 
 const MINIMAL_CAPABILITIES: ClientCapabilities = {
@@ -46,14 +48,15 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
     id: 'kimi',
     displayName: 'Kimi Code',
     supportsAcp: true,
-    acpCommand: ['kimi', 'acp'],
+    acpCommand: ['kimi', '--yolo', 'acp'],
     ptyCommand: ({ bootPrompt }) => {
-      const args = ['kimi'];
+      const args = ['kimi', '--yolo'];
       // Kimi does not yet support --system-prompt; PTY-inject after banner if needed.
       void bootPrompt;
       return args;
     },
     defaultCapabilities: MINIMAL_CAPABILITIES,
+    autoApprove: true,
   },
   codex: {
     id: 'codex',

@@ -39,7 +39,8 @@ export interface ColonizeResult {
 }
 
 export interface MaterializeCtx {
-  /** Agent names for report-as-<agent> generation (identity, not paths). */
+  /** Agent names threaded through colonization (used for markers/scaffold
+   *  only; per-agent report command files are no longer generated). */
   agents: string[];
 }
 

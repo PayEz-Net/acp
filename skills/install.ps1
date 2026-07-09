@@ -15,11 +15,6 @@ $BackupDir = "$env:USERPROFILE\.kimi\skills.backup.$(Get-Date -Format 'yyyyMMddH
 $Commands = @(
     'agent-docs.md',
     'agent-mail.md',
-    'report-aurum.md',
-    'report-bapert.md',
-    'report-dotnetpert.md',
-    'report-nextpert.md',
-    'report-qapert.md',
     'vibe-sql.md'
 )
 
@@ -172,7 +167,7 @@ function Print-NextSteps {
     Write-Host "     kimi --list-skills"
     Write-Host ""
     Write-Host "  3. Start ACP and spawn an agent:"
-    Write-Host "     Type 'report as BAPert' in the agent terminal"
+    Write-Host "     Agents receive their onboarding instructions automatically at spawn time."
     Write-Host ""
     Write-Host "  Need help? Visit: https://docs.idealvibe.online/acp"
     Write-Host ""

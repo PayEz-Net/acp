@@ -61,6 +61,13 @@ export function useAcpSse() {
   // (useMail already does the initial fetch) to avoid a double-fetch.
   const hasConnectedRef = useRef(false);
 
+  // P0: don't let the initial transient backendAvailable=false (before App.tsx
+  // finishes the async IPC status handshake) permanently gate the first connect.
+  // The backend can already be listening on :3001 while the renderer state is
+  // still false; attempting once and letting the fetch fail/retry is safer than
+  // missing the first push window.
+  const hasAttemptedConnection = useRef(false);
+
   useEffect(() => {
     console.log(`[AcpSse] Effect fired — backendAvailable: ${backendAvailable}`);
 
@@ -87,7 +94,7 @@ export function useAcpSse() {
       useMailStore.getState().fetchAllInboxes(agents, projectId);
     };
 
-    if (!backendAvailable) {
+    if (!backendAvailable && hasAttemptedConnection.current) {
       console.log('[AcpSse] Skipping — backend not available');
       setConn('disconnected');
       return;
@@ -112,6 +119,9 @@ export function useAcpSse() {
 
     async function connect() {
       if (disposed) return;
+      // Mark that we've attempted a connection so subsequent effect runs with a
+      // transient backendAvailable=false will skip instead of retrying forever.
+      hasAttemptedConnection.current = true;
       // P3: No hard retry limit — exponential backoff with 30s cap, never give up
       const secret = await getSecret();
       const headers: Record<string, string> = {

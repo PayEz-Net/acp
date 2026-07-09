@@ -215,3 +215,77 @@ export async function acpApiGetToken(): Promise<string | null> {
     return null;
   }
 }
+
+interface AgentProfileResponse {
+  success?: boolean;
+  data?: {
+    name?: string;
+    displayName?: string;
+    role?: string;
+    profile?: string;
+  };
+}
+
+/**
+ * Fetch an agent's profile from the ACP API.
+ * Uses X-ACP-Agent header for agent identity; profile is returned as markdown.
+ */
+export async function acpApiGetAgentProfile(agentName: string): Promise<string | null> {
+  try {
+    const data = await acpApiCall(`/v1/agents/${encodeURIComponent(agentName)}/profile`, {
+      headers: { 'X-ACP-Agent': agentName },
+    });
+    const payload = (data as AgentProfileResponse)?.data ?? (data as { profile?: string });
+    return typeof payload.profile === 'string' ? payload.profile : null;
+  } catch (err: any) {
+    console.warn(`[ACP-API] profile fetch failed for ${agentName}:`, err.message);
+    return null;
+  }
+}
+
+interface MailInboxResponse {
+  success?: boolean;
+  data?: {
+    messages?: unknown[];
+    unread?: number;
+  };
+}
+
+/**
+ * Fetch an agent's unread mail count from the ACP API.
+ */
+export async function acpApiGetUnreadMailCount(agentName: string): Promise<number | null> {
+  try {
+    const data = await acpApiCall(
+      `/v1/mail/inbox/${encodeURIComponent(agentName)}?unread=true`,
+      {
+        headers: { 'X-ACP-Agent': agentName },
+      },
+    );
+    const payload = (data as MailInboxResponse)?.data ?? (data as { messages?: unknown[]; unread?: number });
+    if (typeof payload.unread === 'number') return payload.unread;
+    if (Array.isArray(payload.messages)) return payload.messages.length;
+    return 0;
+  } catch (err: any) {
+    console.warn(`[ACP-API] unread mail fetch failed for ${agentName}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Fetch an agent's unread mail count from ACP API.
+ * Returns the count, or null on failure.
+ */
+export async function acpApiGetAgentMailUnreadCount(agentName: string): Promise<number | null> {
+  try {
+    const data = await acpApiCall(`/v1/mail/inbox/${encodeURIComponent(agentName)}?unread=true`, {
+      headers: { 'X-ACP-Agent': agentName },
+    });
+    const messages = data?.data?.messages;
+    if (Array.isArray(messages)) return messages.length;
+    return null;
+  } catch (err: any) {
+    console.warn(`[ACP-API] Failed to fetch mail for ${agentName}:`, err.message);
+    return null;
+  }
+}

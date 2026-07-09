@@ -17,11 +17,6 @@ BACKUP_DIR="$HOME/.kimi/skills.backup.$(date +%Y%m%d%H%M%S)"
 COMMANDS=(
     "agent-docs.md"
     "agent-mail.md"
-    "report-aurum.md"
-    "report-bapert.md"
-    "report-dotnetpert.md"
-    "report-nextpert.md"
-    "report-qapert.md"
     "vibe-sql.md"
 )
 
@@ -161,7 +156,7 @@ print_next_steps() {
     echo "     kimi --list-skills"
     echo ""
     echo "  3. Start ACP and spawn an agent:"
-    echo "     Type 'report as BAPert' in the agent terminal"
+    echo "     Agents receive their onboarding instructions automatically at spawn time."
     echo ""
     echo "  Need help? Visit: https://docs.idealvibe.online/acp"
     echo ""

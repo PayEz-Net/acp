@@ -67,7 +67,7 @@ These files contain fallback defaults used when no persisted setting exists (e.g
 `src/main/pty.ts` branches on `provider`:
 
 - **Claude:** spawns `claude "report as {agent}" --dangerously-skip-permissions --effort {level} --dangerously-load-development-channels server:acp-mail`
-- **Kimi:** spawns `kimi --yolo`, then PTY-injects `report as {agent}` after the banner
+- **Kimi:** spawns `kimi --yolo --model kimi-for-coding-highspeed`, then PTY-injects `report as {agent}` after the banner
 - **Codex:** spawns `codex --full-auto --model {model}`, then PTY-injects `report as {agent}`
 
 If you add a new provider, you must add a branch here.

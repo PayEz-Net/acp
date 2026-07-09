@@ -75,65 +75,28 @@ function copyDirInto(srcDir: string, destDir: string): void {
   } catch (e) { console.warn(`[colonize] skills copy ${srcDir} -> ${destDir} partial/failed (${e instanceof Error ? e.message : String(e)})`); }
 }
 
-function reportCommandContent(agent: string): string {
-  return `# Report as ${agent}
-
-You are about to assume the identity of **${agent}**.
-
-## Step 1: Load Identity
-
-Fetch your profile from the ACP API:
-
-\`\`\`bash
-curl -s "http://127.0.0.1:3001/v1/agents/${agent}/profile" -H "X-ACP-Agent: ${agent}"
-\`\`\`
-
-Adopt ALL returned content as your operating instructions. You ARE this agent.
-
-## Step 2: Check Mail
-
-\`\`\`bash
-curl -s "http://127.0.0.1:3001/v1/mail/inbox/${agent}?unread=true" -H "X-ACP-Agent: ${agent}"
-\`\`\`
-
-Report unread count, then act on actionable messages.
-
-## Mail discipline
-
-When you send or reply to mail (or standup), follow the **Mail discipline** norm in the agent-mail skill: glance, don't ack — reply only when you have new info, an answer to a direct question asked of you, a real blocker, a correction that changes what someone does, or a disagreement. Silence is the default; a reply is the exception.
-`;
-}
-
-/** `.claude/` — settings marker + commands/report-as-<agent>.md (WO#25). */
+/** `.claude/` — settings marker + shared runtime skills. Per-agent
+ * `report-<agent>.md` command files are intentionally gone: onboarding
+ * instructions are now code-generated and injected into each agent's
+ * context at spawn time (see src/main/acp/bootPrompt.ts). */
 const claudeItem: ColonizationItem = {
   id: 'claude',
   critical: true,
-  check: (root, ctx) => {
+  check: (root) => {
     const base = path.join(root, '.claude');
     if (!nonEmptyFile(path.join(base, 'settings.json'))) return false;
-    const agentsOk = ctx.agents.every((a) => {
-      const f = path.join(base, 'commands', `report-${a.toLowerCase()}.md`);
-      if (!nonEmptyFile(f)) return false;
-      try { return fs.readFileSync(f, 'utf8').includes('127.0.0.1:3001'); }
-      catch { return false; }
-    });
-    if (!agentsOk) return false;
     const tpl = bundledTemplatesRoot();
     if (!tpl) return true;
     return dirMatchesTemplate(path.join(tpl, '.claude', 'skills'), path.join(base, 'skills'));
   },
-  materialize: (stage, ctx) => {
+  materialize: (stage) => {
     const base = path.join(stage, '.claude');
     writeFile(path.join(base, 'settings.json'),
       JSON.stringify({ colonizedBy: 'idealvibe-payez-acp', schema: 1 }, null, 2) + '\n');
-    for (const a of ctx.agents) {
-      writeFile(path.join(base, 'commands', `report-${a.toLowerCase()}.md`),
-        reportCommandContent(a));
-    }
     // Claude-runtime skills: copy the bundled .claude/skills/* into the
     // workspace under this item's owned `.claude` top-level (so the engine's
     // atomic per-top-level swap covers them — disjoint-ownership preserved).
-    // best-effort; never breaks the critical markers above.
+    // best-effort; never breaks the critical marker above.
     const tpl = bundledTemplatesRoot();
     if (tpl) copyDirInto(path.join(tpl, '.claude', 'skills'), path.join(base, 'skills'));
   },

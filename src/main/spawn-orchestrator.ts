@@ -23,6 +23,8 @@ import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, Runtime
 import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
+import { buildAgentBootPrompt } from './acp/bootPrompt';
+import { acpApiGetAgentProfile, acpApiGetUnreadMailCount } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
 
 const ACP_API_BASE = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -122,6 +124,25 @@ async function fetchTeam(projectId: number): Promise<ProjectTeamMember[]> {
   const inner = (body as { data?: { team?: ProjectTeamMember[] } }).data ?? body;
   const team = (inner as { team?: ProjectTeamMember[] })?.team;
   return Array.isArray(team) ? team : [];
+}
+
+async function buildLocalBootPrompt(agentName: string): Promise<string> {
+  // Pre-fetch the agent's canonical identity and unread mail count so the
+  // onboarding prompt can include them directly. This avoids making the agent
+  // fire a tool call during its initial turn, which was the root cause of the
+  // Kimi ACP state-machine race that left Nextpert-Scout (and any other
+  // dynamically-named agent) unable to start.
+  const [profile, unreadCount] = await Promise.all([
+    acpApiGetAgentProfile(agentName).catch((err) => {
+      console.warn(`[SpawnOrch] profile fetch failed for ${agentName}:`, err);
+      return null;
+    }),
+    acpApiGetUnreadMailCount(agentName).catch((err) => {
+      console.warn(`[SpawnOrch] unread mail fetch failed for ${agentName}:`, err);
+      return null;
+    }),
+  ]);
+  return buildAgentBootPrompt(agentName, { profile, unreadCount });
 }
 
 async function fetchBootPrompt(projectId: number, agentId: number): Promise<string | null> {
@@ -260,6 +281,24 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     console.error('[SpawnOrch] colonize unexpected error (non-fatal, spawn continues):', e);
   }
 
+  // Build data-driven boot prompts for the whole team up-front. A cloud
+  // Wave-D boot prompt still wins when present, but every agent is now
+  // guaranteed a code-generated onboarding prompt so we never depend on a
+  // per-agent markdown file or the "report as" skill.
+  let localBootPrompts: Map<string, string>;
+  try {
+    const prompts = await Promise.all(
+      team.map((m) => buildLocalBootPrompt(m.agent_name).catch((err) => {
+        console.warn(`[SpawnOrch] failed to build boot prompt for ${m.agent_name}:`, err);
+        return buildAgentBootPrompt(m.agent_name);
+      })),
+    );
+    localBootPrompts = new Map(team.map((m, i) => [m.agent_name, prompts[i]]));
+  } catch (err) {
+    console.warn('[SpawnOrch] unexpected error building boot prompts; falling back to synthesized-only:', err);
+    localBootPrompts = new Map(team.map((m) => [m.agent_name, buildAgentBootPrompt(m.agent_name)]));
+  }
+
   const records: SpawnedAgentRecord[] = [];
 
   for (const member of team) {
@@ -272,13 +311,18 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
       continue;
     }
 
-    // A missing boot-prompt must NOT gate the spawn — the agent still boots and
-    // gets identity from the "report as <name>" kickoff + colonized .claude
-    // (same as the renderer ▷ path, which sends none). Skipping here is what left
-    // Aurum (boot-prompt didn't assemble) un-spawned while the rest came up.
-    const bootPrompt = (await fetchBootPrompt(projectId, member.agent_id)) ?? undefined;
-    if (!bootPrompt) {
-      console.warn(`[SpawnOrch] no boot-prompt for ${member.agent_name} (agent_id=${member.agent_id}); spawning without it (report-as identity)`);
+    // A missing cloud boot-prompt must NOT gate the spawn. Prefer the Wave-D
+    // assembled prompt when the cloud provides one; otherwise use the locally
+    // synthesized onboarding prompt (profile + unread mail pre-fetched from the
+    // ACP API). This removes the dependency on per-agent markdown files and the
+    // "report as" skill kickoff.
+    const cloudBootPrompt = await fetchBootPrompt(projectId, member.agent_id);
+    const localBootPrompt = localBootPrompts.get(member.agent_name) ?? buildAgentBootPrompt(member.agent_name);
+    const bootPrompt = cloudBootPrompt?.trim() ? cloudBootPrompt.trim() : localBootPrompt;
+    if (cloudBootPrompt?.trim()) {
+      console.log(`[SpawnOrch] using cloud boot-prompt for ${member.agent_name}`);
+    } else {
+      console.log(`[SpawnOrch] using synthesized boot-prompt for ${member.agent_name}`);
     }
 
     // Workspace root = the colonized PROJECT root, period. Per-agent

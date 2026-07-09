@@ -41,8 +41,7 @@ describe('colonizeWorkspace — WO-COL-3 matrix vs S1–S5 (spec v2 §8)', () =>
     const res = colonizeWorkspace(consented, { resolveRoot: () => r, noticeSink: () => {}, agents: AGENTS });
     expect(res.status).toBe('colonized');
     expect(res.root).toBe(r);
-    for (const f of ['.claude/settings.json', '.claude/commands/report-bapert.md',
-      '.claude/commands/report-qapert.md', '.kimi/kimi.json',
+    for (const f of ['.claude/settings.json', '.kimi/kimi.json',
       '.inference-provider/config.json', '.acp/bootstrap.json']) {
       expect(statSync(join(r, f)).size, f).toBeGreaterThan(0);
     }
@@ -92,17 +91,15 @@ describe('colonizeWorkspace — WO-COL-3 matrix vs S1–S5 (spec v2 §8)', () =>
 
   it('REGRESSION (merge): re-materializing an owned top-level PRESERVES sibling files the item does not own', () => {
     const r = mkRoot();
-    // first colonize establishes .claude (settings + report-bapert.md)
+    // first colonize establishes .claude (settings + shared skills)
     colonizeWorkspace(consented, { resolveRoot: () => r, noticeSink: () => {}, agents: ['BAPert'] });
     // user/installer drops skills UNDER .claude that the claude item never owns
     mkdirSync(join(r, '.claude', 'skills', 'custom'), { recursive: true });
     writeFileSync(join(r, '.claude', 'skills', 'custom', 'SKILL.md'), 'CUSTOM-DO-NOT-LOSE');
-    // a NEW agent → claude.check fails (missing report-qapert.md) → the whole
-    // .claude top-level is re-materialized + swapped. Pre-fix this DELETED the
-    // sibling skills tree (and the only backup with it).
+    // re-run colonize with a new agent. The claude item no longer writes
+    // per-agent report files, but it must still preserve sibling skills.
     const res = colonizeWorkspace(consented, { resolveRoot: () => r, noticeSink: () => {}, agents: ['BAPert', 'QAPert'] });
-    expect(res.status).toBe('colonized');
-    expect(existsSync(join(r, '.claude', 'commands', 'report-qapert.md')), 'new report command landed').toBe(true);
+    expect(res.status).toBe('already-satisfied');
     expect(existsSync(join(r, '.claude', 'skills', 'custom', 'SKILL.md')), 'sibling skill survives re-materialize').toBe(true);
     expect(readFileSync(join(r, '.claude', 'skills', 'custom', 'SKILL.md'), 'utf8')).toBe('CUSTOM-DO-NOT-LOSE');
   });

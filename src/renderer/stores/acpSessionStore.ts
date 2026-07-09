@@ -162,7 +162,13 @@ function getLastUserTurn(session: AcpSessionState): AcpTurn | undefined {
   return undefined;
 }
 
-function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): AcpSessionState {
+function ensureAssistantTurn(session: AcpSessionState, agent: string, sessionId: string): AcpSessionState {
+  if (session.activeTurnId) return session;
+  const turn = createTurn(agent, sessionId, 'assistant', [], new Date().toISOString());
+  return { ...session, turns: [...session.turns, turn], activeTurnId: turn.id };
+}
+
+function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agent: string): AcpSessionState {
   switch (update.sessionUpdate) {
     case 'initialized': {
       return {
@@ -178,6 +184,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
     }
 
     case 'agent_thought_chunk': {
+      session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       const thoughtText = textFromContentBlock(update.content);
       if (!thoughtText || thoughtText.trim() === '') return session;
       return updateActiveTurn(session, (turn) => ({
@@ -188,6 +195,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
     }
 
     case 'agent_message_chunk': {
+      session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       if (isBlankTextBlock(update.content)) return session;
       const messageText = textFromContentBlock(update.content);
       // Some ACP providers echo the last user message as the first assistant
@@ -209,6 +217,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
     }
 
     case 'tool_call': {
+      session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       return updateActiveTurn(session, (turn) => {
         const toolCall = toolCallFromEvent(update.toolCall);
         const existingIndex = turn.toolCalls.findIndex((t) => t.toolCallId === toolCall.toolCallId);
@@ -225,6 +234,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate): Acp
     }
 
     case 'tool_call_update': {
+      session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       return updateActiveTurn(session, (turn) => {
         const updated = update.toolCall;
         const existingIndex = turn.toolCalls.findIndex((t) => t.toolCallId === updated.toolCallId);
@@ -340,7 +350,7 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
         if (payload.sessionId && session.sessionId !== payload.sessionId) {
           session.sessionId = payload.sessionId;
         }
-        sessions.set(payload.agent, applyAcpUpdate(session, payload.update));
+        sessions.set(payload.agent, applyAcpUpdate(session, payload.update, payload.agent));
         return { sessions };
       });
     },

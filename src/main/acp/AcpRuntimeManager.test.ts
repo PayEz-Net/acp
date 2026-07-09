@@ -3,8 +3,10 @@ import { EventEmitter } from 'events';
 import { AcpRuntimeManager } from './AcpRuntimeManager';
 import { getProviderConfig } from './providerConfigs';
 import type { AcpEventPayload } from '../../shared/acpTypes';
+import type { AcpProcessOptions } from './AcpProcess';
 
 interface MockAcpProcess {
+  options: AcpProcessOptions;
   started: boolean;
   requests: Array<{ method: string; params: unknown }>;
   notifications: Array<{ method: string; params: unknown }>;
@@ -30,14 +32,16 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock('./AcpProcess', () => ({
   AcpProcess: class extends EventEmitter {
+    options: AcpProcessOptions;
     started = false;
     requests: Array<{ method: string; params: unknown }> = [];
     notifications: Array<{ method: string; params: unknown }> = [];
     responses: Array<{ id: number | string; result: unknown }> = [];
     killed = false;
 
-    constructor() {
+    constructor(options: AcpProcessOptions) {
       super();
+      this.options = options;
       mockState.lastInstance = this as unknown as MockAcpProcess;
     }
 
@@ -122,6 +126,59 @@ describe('AcpRuntimeManager', () => {
     );
   });
 
+  it('spawns the Kimi ACP command with --yolo', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-cmd' });
+
+    await manager.start();
+
+    expect(getProcess().options).toMatchObject({
+      command: 'kimi',
+      args: ['--yolo', 'acp'],
+      cwd: '/repo',
+    });
+  });
+
+  it('sends the boot prompt after initialization when provided', async () => {
+    const bootPrompt = 'You are NextPert. Mission: fix renderer blockers.';
+    manager = new AcpRuntimeManager('rt-boot', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      bootPrompt,
+    });
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-boot' });
+
+    await manager.start();
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-boot',
+          prompt: [{ type: 'text', text: bootPrompt }],
+        }),
+      }),
+    );
+  });
+
+  it('synthesizes a code-generated onboarding prompt when no boot prompt is provided', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-report' });
+
+    await manager.start();
+
+    const promptRequest = getProcess().requests.find(
+      (r) => r.method === 'session/prompt' && r.params && (r.params as any).sessionId === 'sess-report',
+    );
+    expect(promptRequest).toBeDefined();
+    const text = ((promptRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
+    expect(text).not.toBe('report as NextPert');
+    expect(text).toContain('NextPert');
+    expect(text).toContain('Load Identity');
+  });
+
   it('sends a prompt via session/prompt', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-3' });
@@ -138,6 +195,23 @@ describe('AcpRuntimeManager', () => {
         }),
       }),
     );
+  });
+
+  it('emits turn_complete when session/prompt resolves with stopReason', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-complete' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('hello');
+
+    const complete = events.find((e) => e.update.sessionUpdate === 'turn_complete');
+    expect(complete).toBeDefined();
+    expect(complete?.update).toMatchObject({
+      sessionUpdate: 'turn_complete',
+      sessionId: 'sess-complete',
+      stopReason: 'end_turn',
+    });
   });
 
   it('cancels the active turn', async () => {
@@ -168,6 +242,7 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-6' });
     await manager.start();
+    manager.setAutoApprove(false);
 
     getProcess().emit('notification', 'session/request_permission', {
       options: [

@@ -12,6 +12,7 @@ import type { TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
+import { buildAgentBootPrompt } from './bootPrompt';
 
 export interface AcpRuntimeOptions {
   agentName: string;
@@ -83,6 +84,10 @@ export class AcpRuntimeManager extends EventEmitter {
       env: { NO_COLOR: '1', FORCE_COLOR: '0', TERM: 'dumb', CI: 'true' },
     });
 
+    if (this.provider.autoApprove) {
+      this.setAutoApprove(true);
+    }
+
     this.process.on('notification', (method: string, params: unknown, id?: number | string) => {
       this.handleNotification(method, params, id);
     });
@@ -128,6 +133,19 @@ export class AcpRuntimeManager extends EventEmitter {
       });
 
       this.process.notify('session/list_commands', { sessionId: this.sessionId });
+
+      // Restore the automatic onboarding kickoff that the PTY fallback path
+      // has always provided. The ACP path (e.g., `kimi acp`) no longer shows
+      // a banner, so the agent would otherwise sit idle until the user typed
+      // something manually. Prefer the Wave-D boot prompt when the orchestrator
+      // supplies one; otherwise synthesize a code-generated onboarding prompt
+      // so we never rely on per-agent markdown files or the "report as" skill.
+      const kickoff = this.options.bootPrompt?.trim()
+        ? this.options.bootPrompt.trim()
+        : buildAgentBootPrompt(this.options.agentName);
+      this.prompt(kickoff).catch((err) => {
+        console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
+      });
     } catch (err) {
       this.emitAcpEvent({
         sessionUpdate: 'error',
@@ -148,6 +166,20 @@ export class AcpRuntimeManager extends EventEmitter {
       .request('session/prompt', {
         sessionId: this.sessionId,
         prompt: [{ type: 'text', text }],
+      })
+      .then((result) => {
+        // Kimi signals turn completion by returning { stopReason } from the
+        // session/prompt request, not via a session/update notification. Convert
+        // that response into the canonical turn_complete event so the renderer
+        // clears its activity spinner.
+        const stopReason = (result as Record<string, unknown>)?.stopReason;
+        if (typeof stopReason === 'string') {
+          this.emitAcpEvent({
+            sessionUpdate: 'turn_complete',
+            sessionId: this.sessionId ?? '',
+            stopReason,
+          });
+        }
       })
       .catch((err) => {
         this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });

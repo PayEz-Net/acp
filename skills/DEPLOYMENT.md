@@ -34,11 +34,6 @@ acp-desktop/                    # ← Repository root
 ├── .agents/commands/           # Claude Code slash commands (canonical source)
 │   ├── agent-docs.md           # /agent-docs — agent doc lookup
 │   ├── agent-mail.md           # /agent-mail — mail API reference
-│   ├── report-aurum.md         # /report-aurum — load Aurum identity
-│   ├── report-bapert.md        # /report-bapert — load BAPert identity
-│   ├── report-dotnetpert.md    # /report-dotnetpert — load DotNetPert identity
-│   ├── report-nextpert.md      # /report-nextpert — load NextPert identity
-│   ├── report-qapert.md        # /report-qapert — load QAPert identity
 │   └── vibe-sql.md             # /vibe-sql — VibeSQL query helper
 ├── .kimi/skills/               # Kimi Code CLI specific skills
 │   ├── agent-onboarding/
@@ -107,7 +102,7 @@ acp-desktop/                         # Dev workspace
 | `skills/*` | `~/.kimi/skills/` or `~/.claude/skills/` | Production skill install | `install.ps1` / `install.sh` downloads from GitHub raw URLs |
 | `.agents/skills/agent-startup/` | `~/.claude/skills/agent-startup/` | Claude agent initialization | Copied by ACP on first run or manual install |
 | `.agents/skills/gitnexus/*` | `~/.claude/skills/gitnexus/*` | GitNexus code intelligence | Copied by ACP on first run or manual install |
-| `.agents/commands/*.md` | `~/.claude/commands/*.md` (user-level) **or** `<workspace>/.claude/commands/*.md` (project-level) | Claude Code slash commands (`/report-bapert`, `/agent-mail`, `/vibe-sql`, etc.) | Copied by ACP on first run, or `install.ps1`/`install.sh`, or manually. Project-level install scopes commands to one workspace; user-level makes them global. |
+| `.agents/commands/*.md` | `~/.claude/commands/*.md` (user-level) **or** `<workspace>/.claude/commands/*.md` (project-level) | Claude Code slash commands (`/agent-mail`, `/agent-docs`, `/vibe-sql`, etc.) | Copied by ACP on first run, or `install.ps1`/`install.sh`, or manually. Project-level install scopes commands to one workspace; user-level makes them global. |
 | `.kimi/skills/*` | `~/.kimi/skills/` | Kimi-specific skills | Copied by ACP on first run or manual install |
 | `agent-mail-cli/agent-mail.js` | `~/.acp/bin/agent-mail.js` or `resources/bin/` | Agent mail CLI | Copied at build time or by installer |
 

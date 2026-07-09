@@ -23,6 +23,7 @@ import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig } from './acp/providerConfigs';
+import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { buildImageInputCommand } from './lib/terminalInputAdapters';
 import { writePastedImages, cleanupOldPastedImages, ImagePasteError } from './lib/imagePaste';
 
@@ -184,6 +185,21 @@ function queuePtyWrite(managed: ManagedPty, data: string): void {
   if (!data) return;
   managed.writeBuf += data;
   if (!managed.writeDraining) drainPtyWrite(managed);
+}
+
+/**
+ * Inject a code-generated boot prompt into a PTY as a single pasted input.
+ * Multi-line prompts would otherwise be split at embedded newlines and
+ * interpreted as multiple commands; bracketed paste lets the receiving CLI
+ * consume the whole block as one user message.
+ */
+function injectBootPrompt(managed: ManagedPty, bootPrompt: string): void {
+  if (!bootPrompt) return;
+  if (bootPrompt.length > PTY_WRITE_CHUNK) {
+    console.warn(`[PTY] Boot prompt for ${managed.agentName} is ${bootPrompt.length} chars (> ${PTY_WRITE_CHUNK}); chunked paste may not land cleanly`);
+  }
+  const paste = `\x1b[200~${bootPrompt}\x1b[201~\r`;
+  queuePtyWrite(managed, paste);
 }
 
 function drainPtyWrite(managed: ManagedPty): void {
@@ -608,6 +624,14 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // terminal session starts. Only files older than 24 h are removed.
   cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
 
+  // Data-driven onboarding prompt. Per-agent `.claude/commands/report-*.md`
+  // files are gone; the agent receives its onboarding instructions injected
+  // directly into its context. A cloud-provided Wave-D boot prompt wins when
+  // present; otherwise we synthesize one from code using only the agent name.
+  const bootPrompt = opts?.bootPrompt?.trim()
+    ? opts.bootPrompt.trim()
+    : buildAgentBootPrompt(agentName);
+
   // ACP path (structured JSON-RPC). Kimi is the Phase 1 ACP provider;
   // Claude/Codex continue to use the PTY fallback below.
   const providerConfig = getProviderConfig(provider);
@@ -618,7 +642,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       agentName,
       workDir: resolvedWorkDir,
       projectId: opts?.projectId,
-      bootPrompt: opts?.bootPrompt,
+      bootPrompt,
       effort: opts?.effort,
     });
     // Phase 1: explicit renderer approval is coming later; until then stay
@@ -674,8 +698,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // Write boot-prompt to a tmp file up-front so the spawn command can
   // reference it via --system-prompt (Claude) and the orchestrator
   // can clean it up on PTY exit (any runtime).
-  const bootPromptTmpPath = opts?.bootPrompt
-    ? writeBootPromptTmpFile(agentName, opts.bootPrompt)
+  const bootPromptTmpPath = bootPrompt
+    ? writeBootPromptTmpFile(agentName, bootPrompt)
     : null;
 
   const managed: ManagedPty = {
@@ -748,7 +772,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     const KIMI_MAX_ATTEMPTS = 3;
     const kimiLaunch = () => {
       kimiAttempts++;
-      ptyProcess.write(`kimi --yolo\r`);
+      ptyProcess.write(`kimi --yolo --model kimi-for-coding-highspeed\r`);
       console.log(`[PTY] Starting Kimi (yolo mode) for ${agentName} — attempt ${kimiAttempts}/${KIMI_MAX_ATTEMPTS}`);
     };
     if (provider === 'claude') {
@@ -758,14 +782,12 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // through the spawn payload; until then this is identical to the global default.
       const effort = opts?.effort || settings.claudeEffort || 'high';
       // Boot-prompt path:
-      //   - Wave C orchestrator → `claude --system-prompt <file>` with
-      //     the assembled Wave D prompt. First positional arg stays
-      //     "report as <Agent>" as a kickoff message (Claude reads the
-      //     system prompt first, then takes the user message). This
-      //     also lets legacy renderer-driven spawns (no bootPrompt)
-      //     keep the original "report as X" behavior unchanged.
-      //   - Legacy path (no bootPrompt) → unchanged "report as <Agent>"
-      //     argv pattern, Claude infers from CLAUDE.md + report-skill.
+      //   - Wave C orchestrator / data-driven onboarding → the system
+      //     prompt file contains the full onboarding instructions. The
+      //     positional arg is just a minimal kickoff so Claude reads the
+      //     system prompt first, then takes the user message.
+      //   - Legacy path (no bootPrompt) no longer exists; we always
+      //     synthesize a code-generated boot prompt.
       const systemPromptFlag = bootPromptTmpPath
         ? ` --system-prompt "${bootPromptTmpPath}"`
         : '';
@@ -783,9 +805,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       );
       managed.mcpConfigTmpPath = mcpCfg;
       const mcpConfigFlag = mcpCfg ? ` --mcp-config "${mcpCfg}"` : '';
-      const cmd = `claude "report as ${agentName}"${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort} --dangerously-load-development-channels server:acp-mail${systemPromptFlag}\r`;
+      const cmd = `claude "Begin."${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort} --dangerously-load-development-channels server:acp-mail${systemPromptFlag}\r`;
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: ${mcpCfg ? 'registered via --mcp-config' : 'MISSING — channel script absent'}, initial prompt: "report as ${agentName}"${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: ${mcpCfg ? 'registered via --mcp-config' : 'MISSING — channel script absent'}, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -823,19 +845,22 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         // Codex uses ">" as prompt after startup
         if (!reportSent && (buffer.includes('Codex') || buffer.includes('>')) && buffer.length > 200) {
           reportSent = true;
-          console.log(`[PTY] Codex ready for ${agentName}, sending report command`);
+          console.log(`[PTY] Codex ready for ${agentName}, injecting boot prompt`);
           setTimeout(() => {
-            ptyProcess.write(`report as ${agentName}\r`);
+            injectBootPrompt(managed, bootPrompt);
           }, 1000);
           dataListener.dispose();
         }
       } else {
-        // Kimi: a completed banner means it's actually up → send the kickoff.
+        // Kimi: a completed banner means it's actually up → inject the
+        // code-generated onboarding prompt. We no longer send the bare
+        // "report as" string; the boot prompt carries the full identity
+        // and mail instructions, eliminating per-agent markdown files.
         if (!reportSent && buffer.includes('Session:') && buffer.includes('Tip:')) {
           reportSent = true;
-          console.log(`[PTY] Kimi banner complete for ${agentName}, sending report command`);
+          console.log(`[PTY] Kimi banner complete for ${agentName}, injecting boot prompt`);
           setTimeout(() => {
-            ptyProcess.write(`report as ${agentName}\r`);
+            injectBootPrompt(managed, bootPrompt);
           }, 1000);
           dataListener.dispose();
         } else if (
@@ -876,10 +901,10 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
           dataListener.dispose();
           return;
         }
-        // codex — unchanged
+        // codex — inject boot prompt as a last resort
         reportSent = true;
-        console.log(`[PTY] Fallback: sending report command for ${agentName}`);
-        ptyProcess.write(`report as ${agentName}\r`);
+        console.log(`[PTY] Fallback: injecting boot prompt for ${agentName}`);
+        injectBootPrompt(managed, bootPrompt);
         dataListener.dispose();
       }, fallbackDelay);
     }

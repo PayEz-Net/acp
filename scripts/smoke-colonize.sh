@@ -25,7 +25,7 @@ trap 'rm -rf "$TMPA" "$TMPB"' EXIT
 echo "== Scenario A: fresh colonize ($TMPA) =="
 run_colonize "$TMPA" "BAPert,QAPert"
 chk ".claude/settings.json"                  "[ -s '$TMPA/.claude/settings.json' ]"
-chk ".claude/commands/report-bapert.md"      "[ -s '$TMPA/.claude/commands/report-bapert.md' ]"
+chk ".claude/settings.json marker"            "[ -s '$TMPA/.claude/settings.json' ]"
 chk ".kimi/kimi.json"                        "[ -s '$TMPA/.kimi/kimi.json' ]"
 chk ".claude/skills/agent-mail/SKILL.md"     "[ -s '$TMPA/.claude/skills/agent-mail/SKILL.md' ]"
 chk ".kimi/skills/agent-mail/SKILL.md"       "[ -s '$TMPA/.kimi/skills/agent-mail/SKILL.md' ]"
@@ -40,8 +40,8 @@ echo "== Scenario B: merge preserves sibling on re-materialize ($TMPB) =="
 run_colonize "$TMPB" "BAPert"
 mkdir -p "$TMPB/.claude/skills/custom"
 echo "CUSTOM-DO-NOT-LOSE" > "$TMPB/.claude/skills/custom/SKILL.md"
-run_colonize "$TMPB" "BAPert,QAPert"   # new agent → claude.check fails → re-materialize
-chk "new report-qapert.md landed"            "[ -s '$TMPB/.claude/commands/report-qapert.md' ]"
+run_colonize "$TMPB" "BAPert,QAPert"   # new agent no longer triggers report-file churn
+chk "no per-agent report files remain"       "[ ! -e '$TMPB/.claude/commands/report-qapert.md' ]"
 chk "custom sibling SURVIVED"                "[ -f '$TMPB/.claude/skills/custom/SKILL.md' ]"
 chk "custom content intact"                  "grep -q 'CUSTOM-DO-NOT-LOSE' '$TMPB/.claude/skills/custom/SKILL.md'"
 
