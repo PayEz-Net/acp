@@ -66,6 +66,10 @@ curl -s "${mailEndpoint}" -H "X-ACP-Agent: ${agentName}"
 
 Report the unread count, then act on actionable messages.`;
 
+  const readyMessage = unreadCount !== null
+    ? `${agentName} ready. ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}. What's the mission?`
+    : `${agentName} ready. What's the mission?`;
+
   return `${identityHeader}
 
 ${profileSection}
@@ -78,12 +82,14 @@ When you send or reply to mail (or standup), follow the **Mail discipline** norm
 
 ## Ready
 
-Say:
+Say exactly:
 \`\`\`
-${agentName} ready.${unreadCount !== null ? ` ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}.` : ''} What's the mission?
+${readyMessage}
 \`\`\`
 
-Then wait for instructions.
+## CRITICAL: no tools on this turn
+
+Do NOT run any tools, shell commands, curl calls, mail checks, or API requests during this first turn. Your profile and mail status are already provided above. Just output the ready message and stop. Wait for the next user message before doing any work.
 `;
 }
 

@@ -142,6 +142,7 @@ async function buildLocalBootPrompt(agentName: string): Promise<string> {
       return null;
     }),
   ]);
+  console.log(`[SpawnOrch] boot prompt data for ${agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'missing'}`);
   return buildAgentBootPrompt(agentName, { profile, unreadCount });
 }
 

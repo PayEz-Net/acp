@@ -314,6 +314,12 @@ export function UnifiedTerminal({
   // clipboard round-trip on the critical input path.
   const handleTerminalPaste = useCallback(
     (e: React.ClipboardEvent) => {
+      if (e.defaultPrevented) return;
+      // Only handle pastes that actually landed on the scroll surface or its
+      // children. Events from the composer input must not be rerouted to the
+      // PTY (where ACP sessions silently no-op).
+      const target = e.target as Node | null;
+      if (!target || !scrollRef.current || !scrollRef.current.contains(target)) return;
       const tid = terminalIdRef.current;
       if (!tid) return;
       const text = e.clipboardData?.getData('text/plain') ?? '';
@@ -611,7 +617,6 @@ export function UnifiedTerminal({
 
   const handleInputPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLInputElement>) => {
-      if (!enableTerminalImagePaste) return;
       const input = e.currentTarget;
       const items = Array.from(e.clipboardData?.items ?? []);
       const files = Array.from(e.clipboardData?.files ?? []);
@@ -619,22 +624,26 @@ export function UnifiedTerminal({
       let textHandled = false;
       const composerWasEmpty = input.value === '';
 
-      // Prefer the files list (standard API) and fall back to items for
-      // environments where only items are populated (e.g. some jsdom setups).
-      if (files.length > 0) {
-        for (const file of files) {
-          if (file.type.startsWith('image/')) {
-            imageHandled = true;
-            await addImageFromFile(file);
-          }
-        }
-      } else {
-        for (const item of items) {
-          if (item.kind === 'file' && item.type.startsWith('image/')) {
-            const file = item.getAsFile();
-            if (file) {
+      // Image staging is gated by the feature flag; plain text paste is always
+      // supported in the composer.
+      if (enableTerminalImagePaste) {
+        // Prefer the files list (standard API) and fall back to items for
+        // environments where only items are populated (e.g. some jsdom setups).
+        if (files.length > 0) {
+          for (const file of files) {
+            if (file.type.startsWith('image/')) {
               imageHandled = true;
               await addImageFromFile(file);
+            }
+          }
+        } else {
+          for (const item of items) {
+            if (item.kind === 'file' && item.type.startsWith('image/')) {
+              const file = item.getAsFile();
+              if (file) {
+                imageHandled = true;
+                await addImageFromFile(file);
+              }
             }
           }
         }
@@ -649,9 +658,19 @@ export function UnifiedTerminal({
           });
         }
       }
+      // Some clipboard sources populate getData but leave items empty; fall
+      // back so the composer always receives the pasted text.
+      if (!textHandled) {
+        const plainText = e.clipboardData?.getData('text/plain') ?? '';
+        if (plainText) {
+          textHandled = true;
+          insertTextAtCursor(input, plainText);
+        }
+      }
 
       if (imageHandled || textHandled) {
         e.preventDefault();
+        e.stopPropagation();
       }
 
       // Phase 2 instant-send: only when the composer was empty, no text was

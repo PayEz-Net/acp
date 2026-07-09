@@ -69,6 +69,7 @@ beforeEach(() => {
   useAgentStatusStore.setState({ statuses: {} });
   useProjectStore.setState({ activeProject: null, currentProjectTeam: [] });
   useAcpSessionStore.setState({ sessions: new Map() });
+  useAppStore.setState({ settings: {} as any });
 });
 
 afterEach(() => {
@@ -132,6 +133,33 @@ function pasteFilesOnInput(input: HTMLInputElement, files: File[], text?: string
   };
 
   const event = new Event('paste', { bubbles: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: clipboardData,
+    configurable: true,
+  });
+  input.dispatchEvent(event);
+}
+
+function pasteTextOnInput(input: HTMLInputElement, text: string, items: DataTransferItem[] = []) {
+  // Simulates clipboard sources that expose plain text only via getData and
+  // leave clipboardData.items empty.
+  const emptyFileList = Object.setPrototypeOf(
+    {
+      length: 0,
+      item: () => null,
+      [Symbol.iterator]: function* () {},
+    },
+    FileList.prototype,
+  ) as FileList;
+
+  const clipboardData = {
+    items,
+    files: emptyFileList,
+    getData: (type: string) => (type === 'text/plain' ? text : ''),
+    setData: () => {},
+  };
+
+  const event = new Event('paste', { bubbles: true, cancelable: true });
   Object.defineProperty(event, 'clipboardData', {
     value: clipboardData,
     configurable: true,
@@ -519,6 +547,50 @@ describe('UnifiedTerminal', () => {
       });
 
       expect(input.value).toBe('pasted content');
+      cleanup(root, container);
+    });
+
+    it('pastes text into the composer when image paste is disabled', async () => {
+      useAppStore.setState({ settings: { enableTerminalImagePaste: false } as any });
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [], 'plain text');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('plain text');
+      cleanup(root, container);
+    });
+
+    it('falls back to getData when clipboardData.items has no text entry', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'fallback text');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('fallback text');
+      cleanup(root, container);
+    });
+
+    it('does not route composer paste to the terminal surface', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [], 'composer only');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('composer only');
+      expect(mockWriteTerminal).not.toHaveBeenCalled();
       cleanup(root, container);
     });
 
