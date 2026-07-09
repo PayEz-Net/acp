@@ -39,21 +39,23 @@ export function buildAgentBootPrompt(agentName: string, opts: BootPromptOptions 
     ? `You are **${agentName}** (${opts.displayName}).`
     : `You are **${agentName}**.`;
 
-  const profileSection = opts.profile?.trim()
+  const hasProfile = opts.profile?.trim() ?? false;
+  const unreadCount = typeof opts.unreadCount === 'number' ? opts.unreadCount : null;
+
+  const profileSection = hasProfile
     ? `## Identity
 
-${opts.profile.trim()}`
-    : `## Step 1: Load Identity
+${opts.profile!.trim()}`
+    : `## Step 1: Load Identity (REQUIRED)
 
-Fetch your profile from the ACP API:
+You MUST fetch your canonical profile before saying you are ready. Run:
 
 \`\`\`bash
 curl -s "${profileEndpoint}" -H "X-ACP-Agent: ${agentName}"
 \`\`\`
 
-Adopt ALL returned content as your operating instructions. You ARE this agent.`;
+Adopt ALL returned content as your operating instructions. You ARE this agent. Do NOT invent a role or pretend to be a generic assistant.`;
 
-  const unreadCount = typeof opts.unreadCount === 'number' ? opts.unreadCount : null;
   const mailSection = unreadCount !== null
     ? `## Mail
 
@@ -64,11 +66,21 @@ You have **${unreadCount}** unread message${unreadCount === 1 ? '' : 's'}.`
 curl -s "${mailEndpoint}" -H "X-ACP-Agent: ${agentName}"
 \`\`\`
 
-Report the unread count, then act on actionable messages.`;
+Report the unread count, then act on actionable messages.
+
+**You MAY run the curl command above to check mail.**`;
 
   const readyMessage = unreadCount !== null
     ? `${agentName} ready. ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}. What's the mission?`
     : `${agentName} ready. What's the mission?`;
+
+  const toolBan = hasProfile
+    ? `## Tool discipline
+
+Your profile and mail status are already provided above. Do NOT run any additional tools, shell commands, curl calls, mail checks, or API requests during this first turn. Just output the ready message and stop. Wait for the next user message before doing any work.`
+    : `## Tool discipline
+
+Run ONLY the curl command(s) above to load your identity (and optionally check mail). Once you have the real data, output the ready message and stop. Do NOT run any other tools during this first turn. Wait for the next user message before doing any work.`;
 
   return `${identityHeader}
 
@@ -87,9 +99,7 @@ Say exactly:
 ${readyMessage}
 \`\`\`
 
-## CRITICAL: no tools on this turn
-
-Do NOT run any tools, shell commands, curl calls, mail checks, or API requests during this first turn. Your profile and mail status are already provided above. Just output the ready message and stop. Wait for the next user message before doing any work.
+${toolBan}
 `;
 }
 

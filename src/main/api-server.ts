@@ -259,7 +259,8 @@ export async function startApiServer(): Promise<boolean> {
       if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
       
       // Only show critical lines in terminal
-      if (line.includes('Server running') || line.includes('error') || line.includes('Error')) {
+      if (line.includes('Server running') || line.includes('error') || line.includes('Error')
+        || line.startsWith('[SignalR]') || line.startsWith('[SSE]')) {
         console.log(`[ACP-API] ${line}`);
       }
     }

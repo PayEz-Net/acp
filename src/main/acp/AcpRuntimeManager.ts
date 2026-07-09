@@ -5,6 +5,7 @@ import {
   type AcpContentBlock,
   type AcpEventPayload,
   type AcpPermissionOption,
+  type AcpSendContentBlock,
   type AcpSessionUpdate,
   type AcpToolCall,
 } from '../../shared/acpTypes';
@@ -13,6 +14,7 @@ import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
 import { buildAgentBootPrompt } from './bootPrompt';
+import { acpApiGetAgentProfile, acpApiGetUnreadMailCount } from '../acp-api-client';
 
 export interface AcpRuntimeOptions {
   agentName: string;
@@ -33,6 +35,7 @@ export class AcpRuntimeManager extends EventEmitter {
   private initialized = false;
   private pendingPermissions = new Map<number | string, PendingPermission>();
   private autoApprove = false;
+  private capabilities: AcpAgentCapabilities | undefined = undefined;
 
   constructor(
     private readonly id: string,
@@ -124,11 +127,12 @@ export class AcpRuntimeManager extends EventEmitter {
 
       this.sessionId = (sessionResult.sessionId as string) ?? null;
       this.initialized = true;
+      this.capabilities = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
 
       this.emitAcpEvent({
         sessionUpdate: 'initialized',
         sessionId: this.sessionId ?? '',
-        capabilities: (initResult.agentCapabilities as AcpAgentCapabilities) ?? {},
+        capabilities: this.capabilities,
         agentInfo: (initResult.agentInfo as AcpAgentInfo) ?? { name: this.provider.displayName },
       });
 
@@ -140,9 +144,25 @@ export class AcpRuntimeManager extends EventEmitter {
       // something manually. Prefer the Wave-D boot prompt when the orchestrator
       // supplies one; otherwise synthesize a code-generated onboarding prompt
       // so we never rely on per-agent markdown files or the "report as" skill.
-      const kickoff = this.options.bootPrompt?.trim()
-        ? this.options.bootPrompt.trim()
-        : buildAgentBootPrompt(this.options.agentName);
+      //
+      // CRITICAL: pre-fetch identity/mail for ACP before the first turn. Kimi's
+      // ACP adapter crashes with -32603 if the agent emits a tool call before the
+      // session is fully initialized, so we must embed the data instead of asking
+      // the agent to curl it on turn one.
+      let kickoff = this.options.bootPrompt?.trim() ?? '';
+      if (!kickoff) {
+        try {
+          const [profile, unreadCount] = await Promise.all([
+            acpApiGetAgentProfile(this.options.agentName),
+            acpApiGetUnreadMailCount(this.options.agentName),
+          ]);
+          console.log(`[ACP] boot prompt data for ${this.options.agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'null'}`);
+          kickoff = buildAgentBootPrompt(this.options.agentName, { profile, unreadCount });
+        } catch (err) {
+          console.warn(`[ACP] failed to pre-fetch boot data for ${this.options.agentName}:`, err);
+          kickoff = buildAgentBootPrompt(this.options.agentName);
+        }
+      }
       this.prompt(kickoff).catch((err) => {
         console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
       });
@@ -157,6 +177,23 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   async prompt(text: string): Promise<void> {
+    const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
+    this.sendPrompt(prompt);
+  }
+
+  async sendMessage(content: AcpSendContentBlock[]): Promise<void> {
+    if (!this.process || !this.sessionId) {
+      throw new Error('ACP runtime not initialized');
+    }
+
+    const supportsImage = Boolean(this.capabilities?.promptCapabilities?.image);
+    const prompt: AcpSendContentBlock[] = supportsImage
+      ? content
+      : [{ type: 'text', text: this.buildMarkdownFallback(content) }];
+    this.sendPrompt(prompt);
+  }
+
+  private sendPrompt(prompt: AcpSendContentBlock[]): void {
     if (!this.process || !this.sessionId) {
       throw new Error('ACP runtime not initialized');
     }
@@ -165,7 +202,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.process
       .request('session/prompt', {
         sessionId: this.sessionId,
-        prompt: [{ type: 'text', text }],
+        prompt,
       })
       .then((result) => {
         // Kimi signals turn completion by returning { stopReason } from the
@@ -184,6 +221,21 @@ export class AcpRuntimeManager extends EventEmitter {
       .catch((err) => {
         this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });
       });
+  }
+
+  private buildMarkdownFallback(content: AcpSendContentBlock[]): string {
+    const hasImage = content.some((block) => block.type === 'image');
+    const parts: string[] = hasImage ? ['[Image pasted into chat context]', ''] : [];
+
+    for (const block of content) {
+      if (block.type === 'text') {
+        parts.push(block.text);
+      } else if (block.type === 'image') {
+        parts.push(`![Pasted image](data:${block.mimeType};base64,${block.data})`);
+      }
+    }
+
+    return parts.join('\n');
   }
 
   cancel(): void {

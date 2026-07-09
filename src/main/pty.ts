@@ -14,6 +14,7 @@ import {
 import {
   type AcpEventPayload,
   type AcpPromptPayload,
+  type AcpSendMessagePayload,
   type AcpCancelPayload,
   type AcpSetModePayload,
   type AcpKillPayload,
@@ -24,8 +25,7 @@ import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputRepor
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig } from './acp/providerConfigs';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
-import { buildImageInputCommand } from './lib/terminalInputAdapters';
-import { writePastedImages, cleanupOldPastedImages, ImagePasteError } from './lib/imagePaste';
+
 
 interface ManagedPty {
   id: string;
@@ -453,39 +453,6 @@ function cleanupBootPromptTmpFile(filepath: string | null): void {
 }
 
 /**
- * Send a user message with attached images to the active PTY.
- * Main writes each image to a temp PNG, builds the provider-specific input,
- * and queues it through the existing paced PTY writer.
- */
-export async function sendTerminalWithImages(
-  terminalId: string,
-  text: string,
-  images: Array<{ id: string; data: ArrayBuffer }>,
-): Promise<{ success: boolean; error?: string }> {
-  const terminal = terminals.get(terminalId);
-  if (!terminal) {
-    return { success: false, error: 'Terminal not found.' };
-  }
-
-  const supported: TerminalProvider[] = ['claude', 'kimi', 'codex'];
-  if (!supported.includes(terminal.provider)) {
-    return { success: false, error: `Provider ${terminal.provider} does not support image input.` };
-  }
-
-  try {
-    const paths = await writePastedImages(terminal.agentName, images);
-    const command = buildImageInputCommand(terminal.provider, paths, text);
-    queuePtyWrite(terminal, command);
-    return { success: true };
-  } catch (err) {
-    const code = err instanceof ImagePasteError ? err.code : 'TEMP_WRITE_FAILED';
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[PTY] sendTerminalWithImages failed for ${terminalId}:`, err);
-    return { success: false, error: code };
-  }
-}
-
-/**
  * Spawn a PTY for an agent. Returns the terminal UUID.
  * Called by IPC (renderer) or HTTP (lifecycle-server from acp-api) or
  * spawn-orchestrator (Wave C, when lifecycle flips to RUNNING).
@@ -620,10 +587,6 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   }
   console.log(`[PTY] Provider for ${agentName}: ${provider} — source: team-runtime`);
 
-  // Best-effort cleanup of stale pasted-image temp files whenever a new
-  // terminal session starts. Only files older than 24 h are removed.
-  cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
-
   // Data-driven onboarding prompt. Per-agent `.claude/commands/report-*.md`
   // files are gone; the agent receives its onboarding instructions injected
   // directly into its context. A cloud-provided Wave-D boot prompt wins when
@@ -748,8 +711,6 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
     cleanupBootPromptTmpFile(managed.mcpConfigTmpPath);
-    // Clean up pasted-image temp files older than 24h on terminal exit.
-    cleanupOldPastedImages().catch((err) => console.warn('[PTY] Pasted-image cleanup failed:', err));
     terminals.delete(id);
     // Report to acp-api via callback
     if (onPtyExit) {
@@ -1002,6 +963,20 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   });
 
   ipcMain.on(IPC_CHANNELS.PTY_WRITE, (_, terminalId: string, data: string) => {
+    // ACP runtimes (Kimi/Codex via ACP/Kimi CLI) share the same terminalId
+    // namespace as PTY terminals. Redirect writes aimed at an ACP runtime
+    // through the runtime's prompt channel so mail push and other injections
+    // land in the agent's chat context instead of being silently dropped.
+    const acpRuntime = acpRuntimes.get(terminalId);
+    if (acpRuntime) {
+      const text = data.replace(/\r?\n$/, '');
+      console.log(`[PTY] writeTerminal routed to ACP runtime for ${acpRuntime.getAgentName()}: ${text.substring(0, 120)}${text.length > 120 ? '...' : ''}`);
+      acpRuntime.prompt(text).catch((err) => {
+        console.warn(`[ACP] PTY-write routed as prompt failed for ${acpRuntime.getAgentName()}:`, err);
+      });
+      return;
+    }
+
     const terminal = terminals.get(terminalId);
     if (terminal) {
       // Paced + chunked (paste-truncation fix) — see queuePtyWrite. Keystrokes
@@ -1063,6 +1038,15 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       payload.optionId ?? 'reject',
       payload.outcome,
     );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_SEND_MESSAGE, async (_, payload: AcpSendMessagePayload) => {
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) {
+      console.warn(`[ACP] send-message for unknown agent: ${payload.agent}`);
+      return;
+    }
+    await runtime.sendMessage(payload.content);
   });
 }
 
