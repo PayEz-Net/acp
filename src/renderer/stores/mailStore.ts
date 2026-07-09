@@ -42,13 +42,11 @@ function extractAgentFromKey(key: string): string {
   return idx >= 0 ? key.slice(idx + 1) : key;
 }
 
-// TEMP-SHIM(agent-identity-overhaul): the cloud agentmail registry currently
-// contains spawned instances (e.g. Nextpert-Scout) but not the base archetype
-// persona (NextPert). Route mail addressed to the base persona to its primary
-// executor instance so task dispatch works until the registry is rebuilt.
-const AGENT_MAIL_ALIASES: Record<string, string> = {
-  NextPert: 'Nextpert-Scout',
-};
+// Agent mail aliases: map a UI-facing agent name to the name registered in the
+// cloud agentmail registry. Previously used to route NextPert mail through its
+// spawned instance Nextpert-Scout during the agent-identity overhaul; the
+// registry now resolves NextPert directly, so no aliases are currently needed.
+const AGENT_MAIL_ALIASES: Record<string, string> = {};
 
 export function resolveMailAlias(agent: string): string {
   return AGENT_MAIL_ALIASES[agent] || agent;

@@ -238,10 +238,15 @@ export function useAcpSse() {
                   if (agentState?.terminalId) {
                     const cmd = `[ACP mail] new mail from ${from}: "${subject}" (id: ${id}) — check your inbox`;
                     const tid = agentState.terminalId;
+                    console.log(`[AcpSse] Injecting mail notice to ${agentName} terminal ${tid} via writeTerminal`);
                     setTimeout(() => {
                       window.electronAPI.writeTerminal(tid, cmd + '\r\n');
                     }, 500);
+                  } else {
+                    console.warn(`[AcpSse] Cannot inject mail notice to ${agentName}: no terminalId (provider=${provider})`);
                   }
+                } else {
+                  console.log(`[AcpSse] Provider ${provider} for ${agentName} does not need PTY injection`);
                 }
 
                 const projectId = useProjectStore.getState().activeProject?.id;
