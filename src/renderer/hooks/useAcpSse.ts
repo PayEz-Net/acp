@@ -51,8 +51,12 @@ async function getSecret(): Promise<string | null> {
  */
 export function useAcpSse() {
   const abortRef = useRef<AbortController | null>(null);
-  // Only subscribe to backendAvailable — agent status changes must NOT reconnect SSE
   const backendAvailable = useAppStore(s => s.backendAvailable);
+  // Data-driven agent roster: reconnect SSE when the set of configured agents
+  // changes so the sidecar subscribes the upstream SignalR connection to the
+  // right recipients (and never to stale/removed agents like Aurum).
+  const agents = useAppStore(s => s.agents);
+  const agentNamesKey = agents.map(a => a.name).sort().join(',');
   const connectionStateRef = useRef<SseConnectionState>('disconnected');
   const lastPingRef = useRef<number>(0);
   // #225: once we've had a successful connection, a later transition back to
@@ -444,7 +448,7 @@ export function useAcpSse() {
       abortRef.current = null;
       setConn('disconnected');
     };
-  }, [backendAvailable]);
+  }, [backendAvailable, agentNamesKey]);
 
   return {
     connectionState: connectionStateRef,
