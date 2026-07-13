@@ -25,6 +25,7 @@ import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputRepor
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig } from './acp/providerConfigs';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
+import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 
 
 interface ManagedPty {
@@ -105,6 +106,9 @@ export interface SpawnAgentOptions {
   /** Project ID for namespace scoping. Prevents multi-project PTY
    *  collisions when two projects share agent names. */
   projectId?: number;
+  /** Numeric agent id from the project team table. Required to start a
+   *  PayEzVibe agent session while this terminal/runtime is alive. */
+  agentId?: number;
 }
 
 const terminals: Map<string, ManagedPty> = new Map();
@@ -607,6 +611,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       projectId: opts?.projectId,
       bootPrompt,
       effort: opts?.effort,
+      agentId: opts?.agentId,
     });
     // Phase 1: explicit renderer approval is coming later; until then stay
     // conservative and surface permission requests through ACP_EVENT.
@@ -616,17 +621,22 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       safeSend(IPC_CHANNELS.ACP_EVENT, payload);
     });
     // Reuse the PTY_SPAWNED channel so the renderer's agentName→terminalId
-    // mapping works the same way for ACP sessions.
-    safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id });
-    runtime.start().catch((err) => {
-      console.error(`[ACP] Runtime failed to start for ${agentName}:`, err);
-      safeSend(IPC_CHANNELS.ACP_EVENT, {
-        agent: agentName,
-        sessionId: runtime.getSessionId() ?? '',
-        update: { sessionUpdate: 'error', error: err instanceof Error ? err.message : String(err) },
+    // mapping works the same way for ACP sessions. Include the actual runtime
+    // provider so the renderer can resolve mail-injection behavior correctly
+    // even when agent.provider is stale.
+    safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id, provider });
+    runtime
+      .start()
+      .catch((err) => {
+        console.error(`[ACP] Runtime failed to start for ${agentName}:`, err);
+        safeSend(IPC_CHANNELS.ACP_EVENT, {
+          agent: agentName,
+          sessionId: runtime.getSessionId() ?? '',
+          update: { sessionUpdate: 'error', error: err instanceof Error ? err.message : String(err) },
+        });
+        void endAgentSession(id, 'normal');
+        acpRuntimes.delete(id);
       });
-      acpRuntimes.delete(id);
-    });
     return id;
   }
 
@@ -680,11 +690,31 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   };
   terminals.set(id, managed);
 
+  if (opts?.agentId != null) {
+    void (async () => {
+      const result = await startAgentSession(id, opts.agentId!, opts.projectId);
+      if (!result.ok) {
+        // Surface the non-fatal session-start failure in the UI so the user
+        // sees why the agent-output stream will fail, instead of a silent
+        // console warning. Drop pending PTY output for this terminal so the
+        // failed session does not keep POSTing to /v1/agent-output.
+        dropPtyOutput(id);
+        safeSend(IPC_CHANNELS.AGENT_SESSION_START_FAILED, {
+          agentName,
+          terminalId: id,
+          status: result.status,
+          message: result.message,
+        });
+      }
+    })();
+  }
+
   // Tell the renderer this agent now has a live terminal — covers the
   // spawn-orchestrator path (main spawned it; the renderer never called
   // pty:spawn so it has no terminalId and the pane sits idle). Renderer
   // maps agentName→terminalId and binds its UnifiedTerminal surface to the running PTY.
-  safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id });
+  // Include the actual runtime provider so mail-injection logic uses the real provider.
+  safeSend(IPC_CHANNELS.PTY_SPAWNED, { agentName, terminalId: id, provider });
 
   // Forward PTY output to renderer. Tap the stream just to notice when
   // Claude Code flips bracketed paste mode on/off — purely diagnostic
@@ -703,6 +733,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   });
 
   ptyProcess.onExit(({ exitCode }) => {
+    void endAgentSession(id, 'normal');
     safeSend(IPC_CHANNELS.PTY_EXIT, { terminalId: id, exitCode });
     flushPtyOutput(id);
     if (managed.mailPollTimer) {
@@ -876,6 +907,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
 
 /** Kill a terminal by terminal ID. Handles both PTY and ACP runtimes. */
 export function killTerminal(terminalId: string): boolean {
+  void endAgentSession(terminalId, 'killed');
   const terminal = terminals.get(terminalId);
   if (terminal) {
     dropPtyOutput(terminalId);
@@ -983,7 +1015,10 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       // take the immediate fast path; large pastes drain without overrunning
       // the ConPTY console-input buffer.
       queuePtyWrite(terminal, data);
+      return;
     }
+
+    console.warn(`[PTY] writeTerminal: no terminal or ACP runtime found for terminalId=${terminalId}`);
   });
 
   ipcMain.on(IPC_CHANNELS.PTY_RESIZE, (_, terminalId: string, cols: number, rows: number) => {
@@ -1022,14 +1057,7 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   ipcMain.handle(IPC_CHANNELS.ACP_KILL, (_, payload: AcpKillPayload) => {
     const runtime = getAcpRuntimeByAgent(payload.agent);
     if (!runtime) return;
-    // Find the runtime's id so we can remove it from the map.
-    for (const [id, r] of acpRuntimes.entries()) {
-      if (r === runtime) {
-        r.kill();
-        acpRuntimes.delete(id);
-        break;
-      }
-    }
+    killTerminal(runtime.getId());
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_PERMISSION_RESPONSE, (_, payload: AcpPermissionResponsePayload) => {
@@ -1072,6 +1100,7 @@ function treeKillPty(p: pty.IPty): void {
 
 export function killAllPty() {
   terminals.forEach((terminal) => {
+    void endAgentSession(terminal.id, 'normal');
     if (terminal.mailPollTimer) {
       clearInterval(terminal.mailPollTimer);
       terminal.mailPollTimer = null;
@@ -1079,6 +1108,9 @@ export function killAllPty() {
     treeKillPty(terminal.pty);
   });
   terminals.clear();
-  acpRuntimes.forEach((runtime) => runtime.kill());
+  acpRuntimes.forEach((runtime) => {
+    void endAgentSession(runtime.getId(), 'normal');
+    runtime.kill();
+  });
   acpRuntimes.clear();
 }

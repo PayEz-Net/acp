@@ -18,15 +18,15 @@ export function TitleBar() {
   const { layout, setLayout, showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, toggleStandup, backendAvailable } = useAppStore();
   const { unattended, stopUnattended } = useAutonomyStore();
   const [showConfig, setShowConfig] = useState(false);
-  const { user, authFlowState, loginWithOAuth } = useAuthStore();
+  const { user, authFlowState } = useAuthStore();
   // Auth-status indicator (WO: in-app re-login). 🔴 = session died mid-use
   // (SESSION_EXPIRED) or a re-login attempt failed (ERROR, with user still set);
-  // 🟡 = re-login in flight; 🟢 = live. The 🔴 state is a click-to-re-login CTA
-  // that runs the existing OAuth flow IN PLACE — agent panes are never unmounted.
+  // 🟡 = re-login in flight; 🟢 = live. When expired, App.tsx renders the
+  // SessionExpiredOverlay in-place so the user can sign back in without
+  // unmounting agent panes.
   const authExpired =
     authFlowState === AuthFlowState.SESSION_EXPIRED || authFlowState === AuthFlowState.ERROR;
   const authRefreshing = authFlowState === AuthFlowState.AUTHENTICATING;
-  const handleRelogin = () => { void loginWithOAuth('google'); };
   const { mailboxes } = useMailStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
   // setShowSettings removed — Project Settings (editing) is hidden (WO #47).
@@ -78,20 +78,17 @@ export function TitleBar() {
           <>
             <div className="w-px h-4 bg-slate-700" />
             {authExpired ? (
-              // 🔴 Session expired — in-place re-login CTA. Runs the existing OAuth
-              // flow (loginWithOAuth) → external-session re-seed → recovers live.
-              // Agent panes are NOT unmounted (app stays mounted via SESSION_EXPIRED).
-              <button
-                onClick={handleRelogin}
-                title="Session expired — click to re-login (your agent panes stay alive)"
-                className="flex items-center gap-1.5 text-xs font-medium text-red-400 hover:text-red-300 transition-colors"
+              // 🔴 Session expired — App.tsx mounts the in-place re-login overlay.
+              <div
+                title="Session expired — re-login overlay is open"
+                className="flex items-center gap-1.5 text-xs font-medium text-red-400"
               >
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-60" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
                 </span>
-                <span>Session expired — Re-login</span>
-              </button>
+                <span>Session expired — Re-login required</span>
+              </div>
             ) : (
               <div
                 className="flex items-center gap-1.5 text-xs text-slate-500"

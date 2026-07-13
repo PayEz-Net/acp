@@ -19,6 +19,10 @@ export interface AgentConfig {
 export interface AgentState extends AgentConfig {
   status: 'offline' | 'starting' | 'ready' | 'busy' | 'idle' | 'error';
   terminalId?: string;
+  // Runtime-detected provider from the live PTY spawn (main → renderer via PTY_SPAWNED).
+  // Kept separate from the user-level `provider` override so team-sync reconcile
+  // cannot accidentally wipe it and break mail PTY injection.
+  runtimeProvider?: TerminalProvider;
   lastOutput?: string;
 }
 
@@ -351,6 +355,11 @@ export const IPC_CHANNELS = {
   // BAPert WO #84034) so any direct listener matches verbatim.
   PTY_SPAWN_FAILED: 'PTY_SPAWN_FAILED',
 
+  // PayEzVibe agent session start failure (main → renderer). Surfaces a
+  // non-fatal session-start error (e.g. missing agent_mail capability) as a
+  // visible notification/error line instead of a silent console warning.
+  AGENT_SESSION_START_FAILED: 'agent-session:start-failed',
+
   // Settings
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
@@ -452,10 +461,6 @@ export const IPC_CHANNELS = {
   // channel BEFORE persisting (validate-before-save, never write a 2nd bad path).
   WORKDIR_VALIDATE: 'workdir:validate',
 
-  // Terminal image paste (renderer → main). The renderer stages clipboard image
-  // bytes; main writes them to temp PNGs and emits provider-specific PTY input.
-  TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
-
   // ACP (Agent Client Protocol) transport for Kimi and future structured providers.
   ACP_EVENT: 'acp:event',
   ACP_PROMPT: 'acp:prompt',
@@ -463,6 +468,7 @@ export const IPC_CHANNELS = {
   ACP_SET_MODE: 'acp:set-mode',
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
+  ACP_SEND_MESSAGE: 'acp:send-message',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event
@@ -483,17 +489,15 @@ export interface SpawnFailedPayload {
   message: string;
 }
 
-// Image paste payload (renderer → main). Image bytes are carried as ArrayBuffer;
-// main normalizes to PNG and writes to a temp file the renderer never sees.
-export interface TerminalImagePastePayload {
+// Payload for IPC_CHANNELS.AGENT_SESSION_START_FAILED (main → renderer).
+// Sent when PayEzVibe agent session startup fails so the renderer can surface
+// a visible error instead of leaving only a main-process console warning.
+export interface AgentSessionStartFailedPayload {
+  agentName: string;
   terminalId: string;
-  text: string;
-  images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
-}
-
-export interface TerminalImagePasteResult {
-  success: boolean;
-  error?: string;
+  /** HTTP status when available (e.g. 403 for missing capability). */
+  status?: number;
+  message: string;
 }
 
 // Auth types for IPC

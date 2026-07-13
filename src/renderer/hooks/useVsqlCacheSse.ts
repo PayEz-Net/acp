@@ -20,6 +20,7 @@ export function useVsqlCacheSse(): {
 
   const backendAvailable = useAppStore((s) => s.backendAvailable);
   const projectId = useProjectStore((s) => s.activeProject?.id);
+  const pickerHasStarted = useProjectStore((s) => s.pickerHasStarted);
   const agents = useAppStore((s) => s.agents.map((a) => a.name));
   const projectTeamAgents = useProjectStore((s) => s.currentProjectTeam.map((m) => m.agent_name));
   const agentsKey = agents.length > 0 ? agents.join(',') : projectTeamAgents.join(',');
@@ -52,7 +53,7 @@ export function useVsqlCacheSse(): {
       scheduleFlush();
     };
 
-    if (!backendAvailable) {
+    if (!backendAvailable || !pickerHasStarted || !agentsKey) {
       flushBatch();
       setConn('disconnected');
       return;
@@ -87,9 +88,8 @@ export function useVsqlCacheSse(): {
           throw new Error(`auth headers error: ${rawAuthHeaders.error}`);
         }
         if (rawAuthHeaders.disabled) {
-          // vsql-cache reporting is disabled in the main process (missing
-          // VIBESQL_CONTAINER_SECRET or empty VSQL_CACHE_URL). Stay disconnected
-          // and do not retry — otherwise we would spam the main-process log.
+          // vsql-cache reporting is disabled in the main process. Stay
+          // disconnected and do not retry — otherwise we would spam the log.
           setConn('disconnected');
           return;
         }
@@ -235,7 +235,7 @@ export function useVsqlCacheSse(): {
       abortRef.current = null;
       setConn('disconnected');
     };
-  }, [backendAvailable, projectId, agentsKey]);
+  }, [backendAvailable, projectId, agentsKey, pickerHasStarted]);
 
   return { connectionState: connectionStateRef };
 }

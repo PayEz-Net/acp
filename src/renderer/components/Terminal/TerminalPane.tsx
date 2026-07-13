@@ -1,13 +1,18 @@
-import { useEffect, useCallback, useMemo, useState } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { AgentState } from '@shared/types';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
+import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
 import { UnifiedTerminal } from './UnifiedTerminal';
 import { getStatusPill } from './TerminalFooter';
 import { Play, Square, RotateCcw } from 'lucide-react';
+
+// Global dedupe so two pane instances / StrictMode remounts cannot both spawn
+// the same agent. Keyed by agent name; coalesces concurrent attempts.
+const spawnPromiseMap = new Map<string, Promise<string>>();
 
 interface TerminalPaneProps {
   agent: AgentState;
@@ -23,6 +28,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const backendAvailable = useAppStore((s) => s.backendAvailable);
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
   const [isThinkingLive, setIsThinkingLive] = useState(false);
+  // Guard against duplicate spawn calls from React StrictMode double-invoke or
+  // rapid prop changes before the first async spawn resolves.
+  const spawnPendingRef = useRef(false);
 
   // Provider badge is only useful when the team mixes providers. Use the same
   // runtime_choice authority here so stale agent.provider values don't create a
@@ -46,8 +54,31 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   }, [agent.name, agent.terminalId]);
 
   const startAgent = useCallback(async () => {
+    if (spawnPendingRef.current) {
+      console.log(`[Agent] Spawn already in flight for ${agent.name}; skipping duplicate`);
+      return;
+    }
+    // Global dedupe: if another pane / StrictMode instance is already spawning
+    // this agent, await that promise instead of starting a second spawn.
+    const inFlight = spawnPromiseMap.get(agent.name);
+    if (inFlight) {
+      console.log(`[Agent] Coalescing with in-flight spawn for ${agent.name}`);
+      try {
+        const terminalId = await inFlight;
+        if (terminalId && !agent.terminalId) {
+          setAgentTerminalId(agent.id, terminalId);
+          updateAgentStatus(agent.id, 'ready');
+        }
+      } catch (err) {
+        console.error(`[Agent] Coalesced spawn failed for ${agent.name}:`, err);
+      }
+      return;
+    }
+
+    spawnPendingRef.current = true;
     updateAgentStatus(agent.id, 'starting');
-    try {
+
+    const spawnPromise = (async (): Promise<string> => {
       let terminalId: string;
 
       const activeProject = useProjectStore.getState().activeProject;
@@ -85,28 +116,45 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         throw new Error('Backend unavailable — cannot resolve the team runtime, so this agent cannot start. Reconnect the ACP backend and retry.');
       }
 
+      return terminalId;
+    })();
+
+    spawnPromiseMap.set(agent.name, spawnPromise);
+
+    try {
+      const terminalId = await spawnPromise;
       setAgentTerminalId(agent.id, terminalId);
       updateAgentStatus(agent.id, 'ready');
     } catch (err) {
       console.error('Failed to start agent:', err);
       emitErrorLine(err instanceof Error ? err.message : String(err));
       updateAgentStatus(agent.id, 'error');
+    } finally {
+      spawnPendingRef.current = false;
+      spawnPromiseMap.delete(agent.name);
     }
-  }, [agent.id, agent.name, backendAvailable, updateAgentStatus, setAgentTerminalId, emitErrorLine]);
+  }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus, setAgentTerminalId, emitErrorLine]);
 
   const stopAgent = useCallback(async () => {
     const tid = agent.terminalId;
     try {
       if (backendAvailable) {
         const secret = await window.electronAPI.getLocalSecret();
-        await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/kill`, {
+        const activeProject = useProjectStore.getState().activeProject;
+        const res = await fetch(`http://127.0.0.1:3001/v1/lifecycle/agents/${encodeURIComponent(agent.name)}/kill`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             [IDP_CLIENT_APP_HEADER]: IDP_CLIENT_APP,
             ...(secret ? { 'Authorization': `Bearer ${secret}` } : {}),
           },
-        }).catch(() => {});
+          body: JSON.stringify({
+            agentName: agent.name,
+            ...(tid ? { terminalId: tid } : {}),
+            ...(activeProject?.id != null ? { projectId: activeProject.id } : {}),
+          }),
+        });
+        console.log(`[Agent] Kill response for ${agent.name}:`, res.status, await res.json().catch(() => ({})));
       }
       if (tid) window.electronAPI.killTerminal(tid);
     } catch (err) {
@@ -117,7 +165,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       terminalStreamNormalizer.dropTerminal(tid);
       useAgentOutputStore.getState().clear(agent.name);
     }
+    useAcpSessionStore.getState().clearSession(agent.name);
     setAgentTerminalId(agent.id, undefined as any);
+    spawnPendingRef.current = false;
     updateAgentStatus(agent.id, 'offline');
   }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus, setAgentTerminalId]);
 

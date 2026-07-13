@@ -1,78 +1,31 @@
 /**
- * vsql-cache client helpers.
+ * Agent-output reporting client (PayEzVibe API mediated).
  *
- * vsql-cache is the .NET service that stores and streams normalized agent
- * terminal output. It lives at http://10.0.0.93:52424 and authenticates
- * internal callers with a shared container secret:
- *   Authorization: Secret <container-secret>
- *
- * User/project scope is carried in X-Vibe-* context headers so the backend
- * can resolve the authoritative context without parsing the payload.
+ * Raw PTY output is forwarded to the PayEzVibe API at VIBE_API_URL, which
+ * authenticates the user, resolves the active agent session, and forwards
+ * normalized output to the internal cache service. The desktop never holds
+ * the backend cache container secret.
  */
 
-import { getCurrentUserId } from './auth';
-
-const VSQL_CACHE_URL = process.env.VSQL_CACHE_URL || 'http://10.0.0.93:52424';
-const VIBESQL_CONTAINER_SECRET = process.env.VIBESQL_CONTAINER_SECRET || '';
-
-let reportingEnabled: boolean | null = null;
-let missingConfigWarningLogged = false;
+import { getAccessToken, getCurrentUserId } from './auth';
+import { VIBE_API_URL } from './env';
 
 /**
- * Determine whether vsql-cache agent-output reporting is enabled.
- *
- * Reporting is enabled only when:
- *   - VIBESQL_CONTAINER_SECRET is configured (required for auth), and
- *   - VSQL_CACHE_URL is not explicitly set to an empty string.
- *
- * When VSQL_CACHE_URL is unset, the compiled default URL is used. Setting it
- * to an empty string provides an explicit opt-out toggle.
- */
-export function isVsqlCacheReportingEnabled(): boolean {
-  if (reportingEnabled !== null) {
-    return reportingEnabled;
-  }
-
-  const hasSecret = VIBESQL_CONTAINER_SECRET.length > 0;
-  const urlExplicitlyEmpty = process.env.VSQL_CACHE_URL === '';
-
-  reportingEnabled = hasSecret && !urlExplicitlyEmpty;
-
-  if (!reportingEnabled && !missingConfigWarningLogged) {
-    const missing: string[] = [];
-    if (!hasSecret) missing.push('VIBESQL_CONTAINER_SECRET');
-    if (urlExplicitlyEmpty) missing.push('VSQL_CACHE_URL (empty)');
-    console.warn(
-      `[vsql-cache] Agent-output reporting is disabled: ${missing.join(', ')}. ` +
-        'Set VIBESQL_CONTAINER_SECRET to enable PTY output streaming to vsql-cache. ' +
-        'Set VSQL_CACHE_URL to override the default URL, or to an empty string to explicitly disable.',
-    );
-    missingConfigWarningLogged = true;
-  }
-
-  return reportingEnabled;
-}
-
-export function getVsqlCacheUrl(): string {
-  return VSQL_CACHE_URL;
-}
-
-/**
- * Build the auth/context headers for a vsql-cache request.
- * Uses the shared container secret. Returns user/project context headers
- * when the values are available.
+ * Build the auth/context headers for a PayEzVibe API agent-output request.
+ * Uses the current user's bearer token.
  */
 export async function buildVsqlCacheAuthHeaders(
   _method: string,
   _path: string,
   context?: { userId?: string; projectId?: string },
 ): Promise<Record<string, string>> {
-  if (!VIBESQL_CONTAINER_SECRET) {
-    throw new Error('VIBESQL_CONTAINER_SECRET is not configured');
+  const token = await getAccessToken();
+  if (!token) {
+    throw new Error('No authenticated user token available');
   }
 
   const headers: Record<string, string> = {
-    Authorization: `Secret ${VIBESQL_CONTAINER_SECRET}`,
+    Authorization: `Bearer ${token}`,
   };
 
   let userId = context?.userId;
@@ -88,6 +41,65 @@ export async function buildVsqlCacheAuthHeaders(
   return headers;
 }
 
+/**
+ * Default role-to-capability map used by the IDP. The desktop mirrors this so
+ * it can decide whether to start agent sessions even when the raw JWT's
+ * `capabilities` claim is stale/missing a role-derived capability.
+ */
+const DEFAULT_ROLE_CAPABILITIES: Record<string, string[]> = {
+  vibe_agents_user: ['agent_mail', 'agent_terminal_output'],
+  vibe_agent_system_user: ['agent_mail', 'agent_terminal_output'],
+  vibe_app_admin: ['agent_mail', 'vibe_admin', 'agent_terminal_output'],
+};
+
+function parseJwtClaimArray(payload: Record<string, unknown>, claim: string): string[] {
+  const raw = payload[claim];
+  if (Array.isArray(raw)) return raw.filter((r): r is string => typeof r === 'string');
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed.filter((r): r is string => typeof r === 'string');
+      } catch {
+        // fall through to CSV
+      }
+    }
+    return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * Check whether the current user's JWT contains a given capability claim.
+ * Capabilities are read directly from the token and also derived from the
+ * user's roles, matching the server-side RoleCapabilityResolver behavior.
+ */
+export async function hasCapability(capability: string): Promise<boolean> {
+  const token = await getAccessToken();
+  if (!token) return false;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as Record<string, unknown>;
+    const caps = new Set<string>();
+
+    // Direct claim (server-issued)
+    for (const c of parseJwtClaimArray(payload, 'capabilities')) {
+      caps.add(c);
+    }
+
+    // Role-derived (mirrors IdentityBearerTokenService / JwtClaimExtractor)
+    for (const role of parseJwtClaimArray(payload, 'roles')) {
+      for (const derived of DEFAULT_ROLE_CAPABILITIES[role] ?? []) {
+        caps.add(derived);
+      }
+    }
+
+    return caps.has(capability);
+  } catch {
+    return false;
+  }
+}
+
 export interface VsqlCacheOutputPayload {
   agentName: string;
   terminalId: string;
@@ -99,25 +111,20 @@ export interface VsqlCacheOutputPayload {
 }
 
 /**
- * POST raw PTY output to vsql-cache.
+ * POST raw PTY output to the PayEzVibe API.
  *
  * Returns normally on 503 Service Unavailable; the caller is expected to
  * count drops. Any other non-2xx response throws so unexpected failures
  * are still surfaced.
  */
 export async function postAgentOutput(payload: VsqlCacheOutputPayload): Promise<void> {
-  if (!isVsqlCacheReportingEnabled()) {
-    return;
-  }
-
   const path = '/v1/agent-output';
   const headers = await buildVsqlCacheAuthHeaders('POST', path, {
     userId: payload.userId,
     projectId: payload.projectId,
   });
-  const url = `${VSQL_CACHE_URL}${path}`;
+  const url = `${VIBE_API_URL}${path}`;
 
-  // Work order payload contract: only raw PTY metadata, no user/project/session.
   const body = JSON.stringify({
     agentName: payload.agentName,
     terminalId: payload.terminalId,
@@ -137,12 +144,12 @@ export async function postAgentOutput(payload: VsqlCacheOutputPayload): Promise<
   });
 
   if (res.status === 503) {
-    // Backend is overloaded or down. Drop the chunk; ptyOutputReporter logs
+    // Backend cache is overloaded or down. Drop the chunk; ptyOutputReporter logs
     // the drop count. Do not throw — PTY output must never crash the desktop.
     return;
   }
 
   if (!res.ok) {
-    throw new Error(`vsql-cache POST ${path} failed: ${res.status} ${res.statusText}`);
+    throw new Error(`vibe-api POST ${path} failed: ${res.status} ${res.statusText}`);
   }
 }

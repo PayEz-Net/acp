@@ -3,8 +3,7 @@
  *
  * The renderer never reads env files; it consumes env values through the
  * main-process IPC authority. This module loads a sibling `.env` file so the
- * installed app can configure secrets (e.g. VSQL_CACHE_URL,
- * VIBESQL_CONTAINER_SECRET) without relying on shell env vars.
+ * installed app can configure secrets without relying on shell env vars.
  *
  * For unpackaged dev runs the file is read from the project root. For packaged
  * installs it is read from the directory containing the executable, matching

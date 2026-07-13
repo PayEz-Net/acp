@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { MailSidebar } from './components/Mail';
-import { LoginScreen, TwoFactorScreen } from './components/Auth';
+import { LoginScreen, TwoFactorScreen, SessionExpiredOverlay } from './components/Auth';
 import { SplashScreen } from './components/SplashScreen';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
 import { TitleBar } from './components/Layout/TitleBar';
@@ -22,12 +22,15 @@ import { WorkdirCorrection } from './components/Layout/WorkdirCorrection';
 import { RuntimeReconcileDialog } from './components/Layout/RuntimeReconcileDialog';
 import { RuntimeNotSet } from './components/Layout/RuntimeNotSet';
 import { OverlayPanel } from './components/Layout/OverlayPanel';
+import { AgentConfig, AgentSessionStartFailedPayload } from '@shared/types';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useProjectStore } from './stores/projectStore';
 import { useAuthStore, AuthFlowState } from './stores/authStore';
 import { useTeamStore } from './stores/teamStore';
 import { useAcpSessionStore } from './stores/acpSessionStore';
+import { useAgentOutputStore } from './stores/agentOutputStore';
+import { useNotificationStore } from './stores/notificationStore';
 import { useAcpSse } from './hooks/useAcpSse';
 import { useVsqlCacheSse } from './hooks/useVsqlCacheSse';
 import { useTeamPoll } from './hooks/useTeamPoll';
@@ -185,12 +188,19 @@ export default function App() {
   // agentName→terminalId; map it onto the agent so TerminalPane's
   // terminalId-gated effects attach the UnifiedTerminal surface to the running PTY.
   useEffect(() => {
-    const unsub = window.electronAPI.onAgentSpawned(({ agentName, terminalId }) => {
+    const unsub = window.electronAPI.onAgentSpawned(({ agentName, terminalId, provider }) => {
       const st = useAppStore.getState();
       const agent = st.agents.find((a) => a.name === agentName);
-      if (agent && agent.terminalId !== terminalId) {
-        console.log(`[App] orchestrator spawned ${agentName} → terminal=${terminalId}; binding pane`);
-        st.setAgentTerminalId(agent.id, terminalId);
+      if (!agent) return;
+      const providerChanged = provider && agent.runtimeProvider !== provider;
+      if (agent.terminalId !== terminalId || providerChanged) {
+        console.log(`[App] orchestrator spawned ${agentName} → terminal=${terminalId} provider=${provider}; binding pane`);
+        if (agent.terminalId !== terminalId) {
+          st.setAgentTerminalId(agent.id, terminalId);
+        }
+        if (providerChanged) {
+          st.setAgentRuntimeProvider(agent.id, provider as AgentConfig['provider']);
+        }
       }
     });
     return unsub;
@@ -247,6 +257,28 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Surface PayEzVibe agent session start failures in the UI. The lifecycle
+  // call is non-fatal to the spawn, but a silent warning leaves the user
+  // wondering why the agent-output stream returns 400.
+  useEffect(() => {
+    const unsub = window.electronAPI.onAgentSessionStartFailed((payload: AgentSessionStartFailedPayload) => {
+      useNotificationStore.getState().addNotification({
+        type: 'system',
+        title: `Agent session failed — ${payload.agentName}`,
+        message: payload.message,
+        agent: payload.agentName,
+      });
+      useAgentOutputStore.getState().addLine({
+        agent: payload.agentName,
+        terminal_id: payload.terminalId,
+        line: payload.message,
+        ts: new Date().toISOString(),
+        source: 'info',
+      });
+    });
+    return unsub;
+  }, []);
+
   // Phase 4 — load current project once backend is available.
   // Auto-select-when-1 was deleted in Wave 2: the cloud now returns
   // current_project_state:'unset' when the developer has projects but no
@@ -257,10 +289,12 @@ export default function App() {
   // external-session handshake completes AFTER boot, so fetching pre-auth
   // 401s ("No active IDP session") and never recovered. isAuthenticated in
   // the deps makes this re-run once the sidecar actually has the session.
+  // force=true on the initial fetch so the picker reflects the cloud's
+  // current-project pointer, not a stale acp-api cache from a prior session.
   useEffect(() => {
     if (!isAuthenticated) return;
     if (!settingsLoaded) return;
-    fetchActiveProject();
+    fetchActiveProject({ force: true });
     fetchProjects();
   }, [isAuthenticated, settingsLoaded, fetchActiveProject, fetchProjects]);
 
@@ -331,6 +365,13 @@ export default function App() {
   // (WO: in-app re-login + auth indicator — panes survive.)
   if ((authFlowState === AuthFlowState.UNAUTHENTICATED || authFlowState === AuthFlowState.ERROR) && !user) {
     return <LoginScreen />;
+  }
+
+  // Session died mid-use (or a re-login attempt failed while the previous user
+  // object is still present). Show an in-place re-login overlay instead of
+  // unmounting to LoginScreen so agent panes + context survive.
+  if (authFlowState === AuthFlowState.SESSION_EXPIRED || (authFlowState === AuthFlowState.ERROR && user)) {
+    return <SessionExpiredOverlay />;
   }
 
   // Show 2FA screen if required

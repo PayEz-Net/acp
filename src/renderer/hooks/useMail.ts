@@ -31,30 +31,70 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   const activeProjectId = useProjectStore((s) => s.activeProject)?.id;
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const lastFetchedKeyRef = useRef<string>('');
+  const agentsRef = useRef(agents);
+  const activeProjectIdRef = useRef(activeProjectId);
+  const pollIntervalRef = useRef(pollInterval);
+  const fetchAllInboxesRef = useRef(fetchAllInboxes);
+  const getUnreadCountRef = useRef<(agent: string) => number>(() => 0);
+
+  agentsRef.current = agents;
+  activeProjectIdRef.current = activeProjectId;
+  pollIntervalRef.current = pollInterval;
+  fetchAllInboxesRef.current = fetchAllInboxes;
 
   const isAuthenticated = useIsAuthenticated();
   const effectiveEnabled = enabled && isAuthenticated;
 
+  // Stable fetch key so the effect only re-runs when the agent roster or project
+  // actually changes, not when a new array reference is passed.
+  const agentsKey = useMemo(() => agents.slice().sort().join(','), [agents]);
+  const fetchKey = useMemo(() => `${agentsKey}|${activeProjectId ?? 'none'}`, [agentsKey, activeProjectId]);
+
   // Initial fetch and polling
   useEffect(() => {
-    console.log(`[useMail] Effect — effectiveEnabled: ${effectiveEnabled} (enabled: ${enabled}, isAuthenticated: ${isAuthenticated}), agents: [${agents.join(', ')}]`);
-    if (!effectiveEnabled || agents.length === 0) return;
+    const currentAgents = agentsRef.current;
+    const currentProjectId = activeProjectIdRef.current;
+    const currentInterval = pollIntervalRef.current;
+    const currentFetchAllInboxes = fetchAllInboxesRef.current;
+
+    console.log(`[useMail] Effect — effectiveEnabled: ${effectiveEnabled} (enabled: ${enabled}, isAuthenticated: ${isAuthenticated}), agents: [${currentAgents.join(', ')}]`);
+    if (!effectiveEnabled || currentAgents.length === 0) return;
+
+    // Guard against duplicate initial fetches when dependencies settle or the
+    // component re-renders with the same agent roster + project.
+    if (fetchKey === lastFetchedKeyRef.current) {
+      console.log(`[useMail] Already fetched for ${fetchKey}; skipping duplicate initial fetch`);
+      return;
+    }
+    lastFetchedKeyRef.current = fetchKey;
+
+    // Abort any previous in-flight request before starting a new cycle.
+    abortRef.current?.abort();
+    const abortController = new AbortController();
+    abortRef.current = abortController;
 
     // Initial fetch
-    console.log(`[useMail] Starting initial fetch + ${pollInterval}ms polling for ${agents.length} agents, project=${activeProjectId ?? 'none'}`);
-    fetchAllInboxes(agents, activeProjectId);
+    console.log(`[useMail] Starting initial fetch + ${currentInterval}ms polling for ${currentAgents.length} agents, project=${currentProjectId ?? 'none'}`);
+    currentFetchAllInboxes(currentAgents, currentProjectId, abortController.signal);
 
     // Set up polling
     pollRef.current = setInterval(() => {
-      fetchAllInboxes(agents, activeProjectId);
-    }, pollInterval);
+      currentFetchAllInboxes(currentAgents, currentProjectId, abortController.signal);
+    }, currentInterval);
 
     return () => {
       if (pollRef.current) {
         clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      abortController.abort();
+      if (abortRef.current === abortController) {
+        abortRef.current = null;
       }
     };
-  }, [agents.join(','), pollInterval, effectiveEnabled, fetchAllInboxes]);
+  }, [fetchKey, effectiveEnabled]);
 
   // Window-focus catch-up (#225): when the app regains focus, pull a fresh
   // fetch so the sidebar is current the moment the user looks at it — covers
@@ -62,11 +102,11 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   // Event-driven, NOT a second poll. Gated on the same effectiveEnabled (auth)
   // so it can't hammer a terminal-dead session.
   useEffect(() => {
-    if (!effectiveEnabled || agents.length === 0) return;
-    const onFocus = () => fetchAllInboxes(agents, activeProjectId);
+    if (!effectiveEnabled || agentsRef.current.length === 0) return;
+    const onFocus = () => fetchAllInboxesRef.current(agentsRef.current, activeProjectIdRef.current);
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [agents.join(','), effectiveEnabled, fetchAllInboxes, activeProjectId]);
+  }, [effectiveEnabled]);
 
   // Handle message selection - fetch full message with actions
   const handleSelectMessage = useCallback(async (message: MailMessage | null) => {
@@ -93,8 +133,8 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
 
   // Refresh manually
   const refresh = useCallback(() => {
-    fetchAllInboxes(agents, activeProjectId);
-  }, [agents, fetchAllInboxes, activeProjectId]);
+    fetchAllInboxesRef.current(agentsRef.current, activeProjectIdRef.current);
+  }, []);
 
   // Scope mailboxes to active project (QAPert L2 landmine fix)
   const scopedMailboxes = useMemo(() => {
@@ -124,6 +164,8 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     return scopedMailboxes[agent]?.unreadCount || 0;
   }, [scopedMailboxes]);
 
+  getUnreadCountRef.current = getUnreadCount;
+
   // Get messages for specific agent
   const getMessages = useCallback((agent: string) => {
     return scopedMailboxes[agent]?.messages || [];
@@ -140,15 +182,16 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   // unread, then refresh so the badges reflect unread->0. Returns which agents
   // (if any) failed so the caller can surface it instead of failing silently.
   const markAllRead = useCallback(async (): Promise<{ ok: boolean; failed: string[] }> => {
-    const targets = agents.filter((a) => getUnreadCount(a) > 0);
+    const currentGetUnreadCount = getUnreadCountRef.current;
+    const targets = agentsRef.current.filter((a) => currentGetUnreadCount(a) > 0);
     if (targets.length === 0) return { ok: true, failed: [] };
     const results = await Promise.all(
       targets.map(async (a) => ({ agent: a, res: await markAllMessagesRead(a) })),
     );
     const failed = results.filter((r) => !r.res.success).map((r) => r.agent);
-    fetchAllInboxes(agents, activeProjectId);
+    fetchAllInboxesRef.current(agentsRef.current, activeProjectIdRef.current);
     return { ok: failed.length === 0, failed };
-  }, [agents, getUnreadCount, fetchAllInboxes, activeProjectId]);
+  }, []);
 
   return {
     // State

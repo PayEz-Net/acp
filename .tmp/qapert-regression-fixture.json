@@ -1,0 +1,105 @@
+[
+  {
+    "ts": "2026-07-08T21:30:00.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "content": {
+          "text": "The user wants to see formatting edge cases.",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T21:30:00.100Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "content": {
+          "text": " I will include a long URL, bullets, and some artifacts to verify sanitization.",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_thought_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T21:30:01.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "content": {
+          "text": "Here is a long URL that should not break mid-word:\n\nhttps://github.com/PayEz-Net/agent-collaboration-platform/blob/main/src/renderer/components/AcpTranscript/AssistantTurn.tsx\n\nAnd here is a list:\n\n- First item\n- Second item\n  - Nested item A\n  - Nested item B\n- Third item\n\nThis paragraph is repeated.\n\nThis paragraph is repeated.\n\nThis paragraph is unique.\n\n123 tokens :\n:47\n2:12\n\n[ACP mail] New message from BAPert\n\nFinal answer looks clean.",
+          "type": "text"
+        },
+        "sessionUpdate": "agent_message_chunk"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T21:30:02.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "Running a shell command for the regression test.",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "in_progress",
+        "title": "Shell: ls",
+        "toolCallId": "regression-tool-call-1",
+        "sessionUpdate": "tool_call"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T21:30:03.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "content": [
+          {
+            "content": {
+              "text": "README.md\npackage.json\ntsconfig.json",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ],
+        "status": "completed",
+        "title": "Shell: ls",
+        "toolCallId": "regression-tool-call-1",
+        "sessionUpdate": "tool_call_update"
+      }
+    }
+  },
+  {
+    "ts": "2026-07-08T21:30:04.000Z",
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "qapert-regression-session",
+      "update": {
+        "sessionUpdate": "turn_complete",
+        "stopReason": "end_turn"
+      }
+    }
+  }
+]

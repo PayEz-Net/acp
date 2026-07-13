@@ -28,13 +28,14 @@ import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { useAcpSessionStore } from '../../stores/acpSessionStore';
+import type { AcpSendContentBlock } from '@shared/acpTypes';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { TerminalFooter } from './TerminalFooter';
 import { CodeChangeCard } from './CodeChangeCard';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
 import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImages';
 import { useInputHistory } from '../../hooks/useInputHistory';
-import { CODE_PROVIDERS } from '../../lib/agentProviders';
+
 import { perfMark, perfMeasure } from '../../lib/perf';
 import { trackEvent } from '../../lib/telemetry';
 import { AcpTranscript } from '../AcpTranscript';
@@ -62,6 +63,8 @@ export const MIN_ROWS = 4;
 const SAMPLE_CHARS = 'MMMMMMMMMM';
 const AUTO_SCROLL_THRESHOLD_PX = 40;
 const FOOTER_DEBOUNCE_MS = 100;
+const PASTE_COLLAPSE_LINE_THRESHOLD = 5;
+const PASTE_COLLAPSE_CHAR_THRESHOLD = 1000;
 
 export function UnifiedTerminal({
   agentName: agentNameProp,
@@ -86,6 +89,7 @@ export function UnifiedTerminal({
   const measureRef = useRef<HTMLSpanElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pastedBlockRef = useRef<{ placeholder: string; fullText: string } | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const terminalIdRef = useRef(terminalId);
   const userScrolledRef = useRef(false);
@@ -130,7 +134,7 @@ export function UnifiedTerminal({
   // ACP transcript is authoritative once the session has been initialized
   // (sessionId assigned by the runtime). Until then, fall back to the PTY/bridge
   // surface so the pane never shows a stale or mixed stream.
-  const isAcpMode = effectiveProvider === 'kimi' && !!acpSession?.sessionId;
+  const isAcpMode = !!acpSession?.sessionId;
   const sessionKey = isAcpMode ? (acpSession?.sessionId ?? '') : (terminalId ?? '');
   const inputHistory = useInputHistory(agentName, sessionKey || undefined);
 
@@ -362,13 +366,34 @@ export function UnifiedTerminal({
   const insertTextAtCursor = useCallback((input: HTMLInputElement, text: string) => {
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? input.value.length;
-    const newValue = input.value.slice(0, start) + text + input.value.slice(end);
-    input.value = newValue;
-    const newCursor = start + text.length;
-    requestAnimationFrame(() => {
+    const lineCount = text.split('\n').length;
+    const shouldCollapse =
+      lineCount >= PASTE_COLLAPSE_LINE_THRESHOLD || text.length >= PASTE_COLLAPSE_CHAR_THRESHOLD;
+
+    const mark = perfMark('composer-insert-text');
+
+    if (shouldCollapse) {
+      // Large code/text pastes get collapsed into a placeholder so the single-line
+      // composer doesn't render hundreds of lines. The full text is preserved and
+      // sent as the actual message when the user hits Enter.
+      const placeholder = `[pasted code ${lineCount} lines]`;
+      pastedBlockRef.current = { placeholder, fullText: text };
+      input.value = placeholder;
+    } else if (typeof input.setRangeText === 'function') {
+      // Use the native setRangeText API when available: it performs the splice
+      // and selection update in one optimized browser operation, avoiding the
+      // O(n) string copies that happen when we slice and concatenate manually.
+      // This makes pasting small-to-medium prompts into the composer feel instant.
+      input.setRangeText(text, start, end, 'end');
+    } else {
+      const newValue = input.value.slice(0, start) + text + input.value.slice(end);
+      input.value = newValue;
+      const newCursor = start + text.length;
       input.setSelectionRange(newCursor, newCursor);
-      input.focus();
-    });
+    }
+
+    input.focus();
+    perfMeasure('composer-insert-text', mark, { length: text.length, collapsed: shouldCollapse });
   }, []);
 
   const handleContextMenu = useCallback(
@@ -459,44 +484,38 @@ export function UnifiedTerminal({
 
   const { images: stagedImages, error: imageError, addImageFromFile, removeImage, clearImages } = useTerminalImages();
 
-  const canSendImages = Boolean(effectiveProvider && (CODE_PROVIDERS as string[]).includes(effectiveProvider));
+  // Return focus to the composer after removing a preview so keyboard users stay
+  // in the input flow (PRD §9 accessibility).
+  const handleRemoveImage = useCallback(
+    (id: string) => {
+      removeImage(id);
+      inputRef.current?.focus();
+    },
+    [removeImage],
+  );
+
+  // Image paste/send is only supported in ACP mode now that the legacy PTY
+  // temp-file image path has been removed from the main process.
+  const canSendImages = isAcpMode;
 
   const sendInputLine = useCallback(() => {
     const tid = terminalIdRef.current;
     const input = inputRef.current;
     if (!input) return;
-    const value = input.value;
+    // If the composer is showing a collapsed paste placeholder, send the stored
+    // full text instead of the placeholder.
+    const value = pastedBlockRef.current?.fullText ?? input.value;
     setSendError(null);
 
     if (isAcpMode) {
-      if (stagedImages.length > 0) {
-        setSendError('Image input is not yet supported for ACP mode.');
-        return;
+      // If a previous assistant turn is still active, fail it before the user
+      // starts a new turn. Otherwise the old turn's spinner stays live forever
+      // when the new assistant turn takes over activeTurnId.
+      if (useAcpSessionStore.getState().getSession(agentName)?.activeTurnId) {
+        useAcpSessionStore.getState().failActiveTurn(agentName, 'Interrupted by new message');
       }
-      if (!value) return;
+
       const sessionId = acpSession?.sessionId ?? '';
-      useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value);
-      useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
-      window.electronAPI.sendAcpPrompt({ agent: agentName, sessionId, text: value });
-      inputHistory.commit(value);
-      input.value = '';
-      return;
-    }
-
-    if (!tid) return;
-
-    if (stagedImages.length > 0) {
-      if (!canSendImages) {
-        setSendError('Image input is not supported for this terminal provider.');
-        trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'PROVIDER_NOT_SUPPORTED' });
-        return;
-      }
-      if (value.trim()) {
-        const ts = new Date().toISOString();
-        useAgentOutputStore.getState().addLine({ agent: agentName, terminal_id: tid, line: value, source: 'user', ts });
-        terminalStreamNormalizer.suppressEcho(tid, value);
-        inputHistory.commit(value);
-      }
       const imagesToSend = stagedImages.map((img) => ({
         id: img.id,
         name: img.name,
@@ -504,31 +523,61 @@ export function UnifiedTerminal({
         data: img.data,
       }));
       const totalSizeBytes = stagedImages.reduce((sum, img) => sum + img.size, 0);
-      window.electronAPI
-        .sendTerminalWithImages({
-          terminalId: tid,
-          text: value,
-          images: imagesToSend,
+
+      if (!value && imagesToSend.length === 0) return;
+
+      useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value, imagesToSend);
+      useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
+
+      // No images: keep the original synchronous clear behavior for ACP text prompts.
+      if (imagesToSend.length === 0) {
+        window.electronAPI
+          .sendAcpPrompt({ agent: agentName, sessionId, text: value })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'Failed to send message.';
+            setSendError(message);
+            useAcpSessionStore.getState().failActiveTurn(agentName, message);
+          });
+        inputHistory.commit(value);
+        input.value = '';
+        pastedBlockRef.current = null;
+        return;
+      }
+
+      // Build the flat send content blocks expected by AcpSendMessagePayload.
+      // The store turn keeps the canonical nested AcpContentBlock shape; the
+      // IPC contract to the main process is flat AcpSendContentBlock[].
+      const contentBlocks = buildAcpSendBlocks(value, imagesToSend);
+
+      const sendPromise = window.electronAPI.sendAcpMessage({ agent: agentName, sessionId, content: contentBlocks });
+
+      sendPromise
+        .then(() => {
+          inputHistory.commit(value);
+          input.value = '';
+          pastedBlockRef.current = null;
+          clearImages();
+          trackEvent({ event: 'image_paste_sent', imageCount: imagesToSend.length, totalSizeBytes });
         })
-        .then((result) => {
-          if (result.success) {
-            input.value = '';
-            clearImages();
-            trackEvent({
-              event: 'terminal_image_paste_sent',
-              provider: effectiveProvider!,
-              imageCount: imagesToSend.length,
-              totalSizeBytes,
-            });
-          } else {
-            setSendError(result.error ?? 'Failed to send images.');
-            trackEvent({ event: 'terminal_image_paste_failed', errorCode: result.error ?? 'UNKNOWN' });
-          }
-        })
-        .catch(() => {
-          setSendError('Failed to send images.');
-          trackEvent({ event: 'terminal_image_paste_failed', errorCode: 'IPC_ERROR' });
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : 'Failed to send message.';
+          setSendError(message);
+          useAcpSessionStore.getState().failActiveTurn(agentName, message);
+          trackEvent({ event: 'image_paste_failed', errorCode: 'IPC_ERROR' });
         });
+      return;
+    }
+
+    if (!tid) return;
+
+    if (stagedImages.length > 0) {
+      if (!canSendImages) {
+        setSendError('Image input is only supported in ACP mode.');
+        trackEvent({ event: 'image_paste_failed', errorCode: 'UNSUPPORTED_PROVIDER' });
+        return;
+      }
+      // PTY image send was removed with the legacy temp-file path. ACP mode
+      // handles images earlier in this function, so this branch is unreachable.
       return;
     }
 
@@ -539,18 +588,24 @@ export function UnifiedTerminal({
     window.electronAPI.writeTerminal(tid, value + '\r');
     inputHistory.commit(value);
     input.value = '';
+    pastedBlockRef.current = null;
   }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName, inputHistory]);
 
   // Phase 2 instant-send: once images are staged and the composer is still
-  // empty, send the message automatically.
+  // empty, send the message automatically. Use a ref for the callback so the
+  // effect does not re-fire when sendInputLine is recreated by ACP store
+  // updates inside the send path.
+  const sendInputLineRef = useRef(sendInputLine);
+  sendInputLineRef.current = sendInputLine;
+
   useEffect(() => {
     if (!pendingInstantSend) return;
     setPendingInstantSend(false);
     const input = inputRef.current;
     if (!input || input.value !== '') return;
     if (stagedImages.length === 0) return;
-    sendInputLine();
-  }, [pendingInstantSend, stagedImages, sendInputLine]);
+    sendInputLineRef.current();
+  }, [pendingInstantSend, stagedImages.length]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -562,10 +617,30 @@ export function UnifiedTerminal({
         return;
       }
 
+      // If a collapsed paste placeholder is active, don't let the user edit the
+      // placeholder text. Backspace/Delete clears it fully; a printable key
+      // clears it before the character is inserted; other keys pass through.
+      if (pastedBlockRef.current) {
+        const input = e.currentTarget;
+        if (e.key === 'Backspace' || e.key === 'Delete') {
+          e.preventDefault();
+          pastedBlockRef.current = null;
+          input.value = '';
+          return;
+        }
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          pastedBlockRef.current = null;
+          input.value = '';
+        }
+      }
+
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         const input = inputRef.current;
         if (!input) return;
+        // Discard any collapsed paste block before recalling history so the
+        // stored full text doesn't override the recalled item on send.
+        pastedBlockRef.current = null;
         const next = inputHistory.cycle(e.key === 'ArrowUp' ? 'up' : 'down', input.value);
         if (next !== null) {
           input.value = next;
@@ -578,7 +653,10 @@ export function UnifiedTerminal({
 
       if (e.key === 'Escape') {
         e.preventDefault();
-        if (stagedImages.length > 0) {
+        if (pastedBlockRef.current) {
+          pastedBlockRef.current = null;
+          e.currentTarget.value = '';
+        } else if (stagedImages.length > 0) {
           clearImages();
           setSendError(null);
         } else if (!isAcpMode && tid) {
@@ -607,6 +685,7 @@ export function UnifiedTerminal({
             window.electronAPI.writeTerminal(tid, '\u0003');
           }
           input.value = '';
+          pastedBlockRef.current = null;
         }
         return;
       }
@@ -623,9 +702,30 @@ export function UnifiedTerminal({
       let imageHandled = false;
       let textHandled = false;
       const composerWasEmpty = input.value === '';
+      const pasteMark = perfMark('composer-paste');
 
-      // Image staging is gated by the feature flag; plain text paste is always
-      // supported in the composer.
+      // Insert plain text first so the composer stays responsive even when the
+      // clipboard also contains images that need async staging/decoding.
+      // Prefer the synchronous getData API for the common case; only fall back
+      // to the callback-based items API when getData is empty.
+      const plainText = e.clipboardData?.getData('text/plain') ?? '';
+      if (plainText) {
+        textHandled = true;
+        insertTextAtCursor(input, plainText);
+      } else {
+        for (const item of items) {
+          if (item.kind === 'string' && item.type === 'text/plain') {
+            textHandled = true;
+            item.getAsString((text) => {
+              insertTextAtCursor(input, text);
+            });
+          }
+        }
+      }
+
+      // Stage images after text so the composer stays responsive. Keep the
+      // sequential await so the max-images check inside useTerminalImages is
+      // evaluated against the latest state for each file.
       if (enableTerminalImagePaste) {
         // Prefer the files list (standard API) and fall back to items for
         // environments where only items are populated (e.g. some jsdom setups).
@@ -649,29 +749,16 @@ export function UnifiedTerminal({
         }
       }
 
-      // Text can be provided as a string item even when files are present.
-      for (const item of items) {
-        if (item.kind === 'string' && item.type === 'text/plain') {
-          textHandled = true;
-          item.getAsString((text) => {
-            insertTextAtCursor(input, text);
-          });
-        }
-      }
-      // Some clipboard sources populate getData but leave items empty; fall
-      // back so the composer always receives the pasted text.
-      if (!textHandled) {
-        const plainText = e.clipboardData?.getData('text/plain') ?? '';
-        if (plainText) {
-          textHandled = true;
-          insertTextAtCursor(input, plainText);
-        }
-      }
-
       if (imageHandled || textHandled) {
         e.preventDefault();
         e.stopPropagation();
       }
+
+      perfMeasure('composer-paste', pasteMark, {
+        text: textHandled,
+        images: imageHandled,
+        length: input.value.length,
+      });
 
       // Phase 2 instant-send: only when the composer was empty, no text was
       // pasted, and the input is still empty after staging images. Mixed
@@ -692,12 +779,26 @@ export function UnifiedTerminal({
     }
   }, [onFocus]);
 
+  const handleInputInput = useCallback((e: React.FormEvent<HTMLInputElement>) => {
+    const input = e.currentTarget;
+    if (pastedBlockRef.current && input.value !== pastedBlockRef.current.placeholder) {
+      pastedBlockRef.current = null;
+    }
+  }, []);
+
   const resumeFollow = useCallback(() => {
     setPaused(false);
     setShowNewOutput(false);
     userScrolledRef.current = false;
-    virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
-  }, [filteredLines.length, virtualizer]);
+    // Scroll the actual scroll container to the bottom. This works for both
+    // the PTY virtualized list and the ACP transcript, whereas
+    // virtualizer.scrollToIndex only targets the PTY line list and does
+    // nothing when the ACP transcript is rendered.
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, []);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -806,7 +907,6 @@ export function UnifiedTerminal({
           lineCount={footerLineCount}
           thinkingCount={footerThinkingCount}
           contextUsage={contextUsage}
-          isThinkingLive={isAcpMode ? acpIsThinkingLive : isThinkingLive}
         />
       )}
 
@@ -825,7 +925,7 @@ export function UnifiedTerminal({
                 key={img.id}
                 image={img}
                 index={idx}
-                onRemove={removeImage}
+                onRemove={handleRemoveImage}
               />
             ))}
           </div>
@@ -842,10 +942,10 @@ export function UnifiedTerminal({
           </div>
         )}
 
-        {/* Unsupported provider notice */}
+        {/* ACP-only notice */}
         {terminalId && stagedImages.length > 0 && !canSendImages && (
-          <div className="text-xs text-amber-400 px-1" data-testid="terminal-provider-mismatch">
-            Image input requires Claude Code, Kimi CLI, or Codex CLI.
+          <div className="text-xs text-amber-400 px-1" data-testid="terminal-acp-only">
+            Image paste is only supported in ACP mode.
           </div>
         )}
 
@@ -855,6 +955,7 @@ export function UnifiedTerminal({
             type="text"
             defaultValue=""
             onKeyDown={handleInputKeyDown}
+            onInput={handleInputInput}
             onPaste={handleInputPaste}
             onFocus={onFocus}
             disabled={!terminalId}
@@ -959,7 +1060,7 @@ function ImagePreviewChip({ image, index, onRemove }: ImagePreviewChipProps) {
     <div className="relative shrink-0 group rounded-lg border border-slate-700 bg-slate-800 overflow-hidden" role="listitem">
       <img
         src={image.previewUrl}
-        alt={`Pasted image ${index + 1}`}
+        alt="Pasted image"
         className="w-16 h-16 object-cover"
       />
       <div className="absolute inset-x-0 bottom-0 bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-slate-300 truncate">
@@ -969,7 +1070,7 @@ function ImagePreviewChip({ image, index, onRemove }: ImagePreviewChipProps) {
         type="button"
         onClick={() => onRemove(image.id)}
         className="absolute top-0.5 right-0.5 p-0.5 rounded bg-slate-900/80 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
-        aria-label={`Remove pasted image ${image.name || index + 1}`}
+        aria-label={`Remove pasted image ${index + 1}`}
         title="Remove"
       >
         <X className="w-3 h-3" />
@@ -982,4 +1083,27 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function buildAcpSendBlocks(
+  text: string,
+  images: Array<{ type: string; data: ArrayBuffer }>,
+): AcpSendContentBlock[] {
+  const blocks: AcpSendContentBlock[] = [];
+  if (text) {
+    blocks.push({ type: 'text', text });
+  }
+  for (const img of images) {
+    blocks.push({ type: 'image', data: arrayBufferToBase64(img.data), mimeType: img.type });
+  }
+  return blocks;
 }

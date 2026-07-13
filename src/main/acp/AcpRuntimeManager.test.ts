@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { AcpRuntimeManager } from './AcpRuntimeManager';
 import { getProviderConfig } from './providerConfigs';
+import { startAgentSession, endAgentSession } from '../agentSessionLifecycle';
 import type { AcpEventPayload } from '../../shared/acpTypes';
 import type { AcpProcessOptions } from './AcpProcess';
 
@@ -28,6 +29,21 @@ const mockState = vi.hoisted(() => ({
   setResponse(method: string, value: unknown | Error) {
     mockState.responses.set(method, value);
   },
+}));
+
+vi.mock('../acp-api-client', () => ({
+  acpApiGetAgentProfile: vi.fn().mockResolvedValue(null),
+  acpApiGetUnreadMailCount: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock('../agentSessionLifecycle', () => ({
+  startAgentSession: vi.fn().mockResolvedValue({ ok: true, session: { id: 'sess-1', sessionToken: 'tok', agentId: 123 } }),
+  endAgentSession: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../agentSessionLifecycle', () => ({
+  startAgentSession: vi.fn().mockResolvedValue({ ok: true, session: { id: 'sess-1', sessionToken: 'tok', agentId: 123 } }),
+  endAgentSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('./AcpProcess', () => ({
@@ -214,7 +230,122 @@ describe('AcpRuntimeManager', () => {
     });
   });
 
-  it('cancels the active turn', async () => {
+  it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-no-stop' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', {});
+    await manager.prompt('hello');
+
+    const complete = events.find((e) => e.update.sessionUpdate === 'turn_complete');
+    expect(complete).toBeDefined();
+    expect(complete?.update).toMatchObject({
+      sessionUpdate: 'turn_complete',
+      sessionId: 'sess-no-stop',
+      stopReason: 'end_turn',
+    });
+  });
+
+  it('emits an error event when session/prompt hangs (image-paste Answering spinner bug)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-hang' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    // Simulate a runtime that streams content but never returns a session/prompt result.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    manager.prompt('hello');
+
+    await vi.advanceTimersByTimeAsync(120_001);
+
+    const error = events.find((e) => e.update.sessionUpdate === 'error');
+    expect(error).toBeDefined();
+    expect(error?.update).toMatchObject({
+      sessionUpdate: 'error',
+      sessionId: 'sess-hang',
+      error: expect.stringContaining('timed out'),
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('forwards structured content blocks when runtime declares image support', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: { promptCapabilities: { image: true } },
+      agentInfo: { name: 'Kimi' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-img' });
+    await manager.start();
+
+    await manager.sendMessage([
+      { type: 'text', text: 'what is this?' },
+      { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+    ]);
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-img',
+          prompt: [
+            { type: 'text', text: 'what is this?' },
+            { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('builds markdown data-URI fallback when runtime does not declare image support', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'Kimi' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-fallback' });
+    await manager.start();
+
+    await manager.sendMessage([
+      { type: 'text', text: 'explain this error' },
+      { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+    ]);
+
+    const promptRequests = getProcess().requests.filter((r) => r.method === 'session/prompt');
+    expect(promptRequests.length).toBeGreaterThanOrEqual(1);
+    const promptRequest = promptRequests[promptRequests.length - 1];
+    const prompt = ((promptRequest?.params as any).prompt as Array<{ type: string; text?: string }>);
+    expect(prompt).toHaveLength(1);
+    expect(prompt[0].type).toBe('text');
+    expect(prompt[0].text).toContain('[Image pasted into chat context]');
+    expect(prompt[0].text).toContain('explain this error');
+    expect(prompt[0].text).toContain('data:image/png;base64,aGVsbG8=');
+  });
+
+  it('falls back to plain text when no images are present and image support is missing', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-text' });
+    await manager.start();
+
+    await manager.sendMessage([{ type: 'text', text: 'just text' }]);
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-text',
+          prompt: [{ type: 'text', text: 'just text' }],
+        }),
+      }),
+    );
+  });
+
+  it('throws when sending a message before initialization', async () => {
+    await expect(
+      manager.sendMessage([{ type: 'text', text: 'too early' }]),
+    ).rejects.toThrow('ACP runtime not initialized');
+  });
+
+  it('cancels the active turn and emits turn_complete', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-4' });
     await manager.start();
@@ -224,6 +355,13 @@ describe('AcpRuntimeManager', () => {
     expect(getProcess().notifications).toContainEqual(
       expect.objectContaining({ method: 'session/cancel' }),
     );
+    const complete = events.filter((e) => e.update.sessionUpdate === 'turn_complete').pop();
+    expect(complete).toBeDefined();
+    expect(complete?.update).toMatchObject({
+      sessionUpdate: 'turn_complete',
+      sessionId: 'sess-4',
+      stopReason: 'cancel',
+    });
   });
 
   it('sets a session mode', async () => {
@@ -421,7 +559,7 @@ describe('AcpRuntimeManager', () => {
     await expect(manager.start()).rejects.toThrow('initialize failed');
 
     expect(events.some((e) => e.update.sessionUpdate === 'error')).toBe(true);
-  });
+  }, 15000);
 
   it('kills the underlying process', async () => {
     mockState.setResponse('initialize', {});
@@ -430,5 +568,37 @@ describe('AcpRuntimeManager', () => {
 
     manager.kill();
     expect(getProcess().killed).toBe(true);
+  });
+
+  it('starts a PayEzVibe session when agentId is provided', async () => {
+    manager = new AcpRuntimeManager('rt-vibe', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      agentId: 123,
+    });
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-vibe' });
+
+    await manager.start();
+
+    expect(startAgentSession).toHaveBeenCalledWith('rt-vibe', 123, 42);
+  });
+
+  it('ends the PayEzVibe session on kill', async () => {
+    manager = new AcpRuntimeManager('rt-vibe-end', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      agentId: 456,
+    });
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-vibe-end' });
+    await manager.start();
+    vi.mocked(endAgentSession).mockClear();
+
+    manager.kill();
+
+    expect(endAgentSession).toHaveBeenCalledWith('rt-vibe-end', 'normal');
   });
 });

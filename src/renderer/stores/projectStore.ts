@@ -332,10 +332,35 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!useAppStore.getState().backendAvailable) return;
     set({ loading: true });
     try {
-      const res = await projectRequest('');
+      // force_refresh=true bypasses the acp-api read-through cache so the
+      // picker reflects cloud reality (new projects, renames, archived state).
+      const res = await projectRequest('?force_refresh=true');
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
+      console.log('[Projects] fetchProjects raw:', JSON.stringify(data.data));
       const projects: Project[] = data.data?.projects || data.data || [];
+
+      const { activeProject } = get();
+      if (activeProject && projects.length > 0 && !projects.some(p => p.id === activeProject.id)) {
+        // The stored current project is no longer in the active project list
+        // (deleted, archived, or cross-tenant). Clear the cloud pointer so the
+        // picker surfaces the real active projects instead of a ghost project.
+        console.warn('[Projects] Active project', activeProject.id, 'not in active list; clearing pointer');
+        try {
+          await projectRequest('/current', { method: 'POST', body: { project_id: null } });
+          set({
+            projects,
+            activeProject: null,
+            current_project_state: projects.length > 0 ? 'unset' : 'empty',
+            pickerMode: projects.length > 0 ? 'first-boot-prompt' : 'create-cta',
+            loading: false,
+          });
+          return;
+        } catch (clearErr) {
+          console.error('[Projects] Failed to clear stale current project:', clearErr);
+        }
+      }
+
       set({ projects, loading: false });
     } catch (err) {
       console.error('[Projects] Failed to fetch projects:', err);
@@ -371,9 +396,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const res = await projectRequest(path);
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      const project: Project | null = data.data?.project || null;
+      let project: Project | null = data.data?.project || null;
       const current_project_state: CurrentProjectState | null =
         data.data?.current_project_state ?? null;
+
+      console.log('[Projects] fetchActiveProject raw:', JSON.stringify(data.data));
+
+      // Never surface an inactive/archived/completed project as the startup
+      // project. If the cloud pointer drifted to an inactive row, clear it.
+      if (project && project.status !== 'active') {
+        console.warn('[Projects] Current project is inactive; clearing pointer', project.id, project.status);
+        try {
+          await projectRequest('/current', { method: 'POST', body: { project_id: null } });
+          project = null;
+        } catch (clearErr) {
+          console.error('[Projects] Failed to clear inactive current project:', clearErr);
+        }
+      }
 
       // Derive picker mode from cloud-authoritative state per BAPert msg
       // 1023 chrome. All three states map to a picker mode; no silent

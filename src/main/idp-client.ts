@@ -6,15 +6,11 @@
  */
 
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '../shared/idp-config';
-import { IDP_URL as CLOUD_IDP_URL, IDP_INTERNAL_URL } from './env';
+import { IDP_URL as CLOUD_IDP_URL } from './env';
 
 // Configuration
 const IDP_URL = CLOUD_IDP_URL;
-// IDP_INTERNAL_URL (the dev-only /dev/impersonate host) now comes from the single
-// env authority — it is `null` in a prod build (no `||` dev-93 fallback; WO #292).
-// The impersonate path is dev-only and guards on it being present (see below).
 const CLIENT_ID = 'idealvibe_online';
-const IS_DEV = !require('electron').app.isPackaged;
 
 interface IdpError {
   code: string;
@@ -63,19 +59,14 @@ interface Idp2FAResponse {
 }
 
 /**
- * Login with email/password
- * In dev mode, uses /dev/impersonate on internal IDP (no real password needed)
+ * Login with email/password against the real IDP.
+ * No dev impersonation — the signed-in user is always the user whose credentials
+ * were supplied.
  */
 export async function idpLogin(
   email: string,
   password: string
 ): Promise<IdpLoginResponse> {
-  // Dev mode: use impersonate endpoint on internal IDP
-  // Always impersonate as admin-user (available personas: free-user, premium-user, admin-user, merchant)
-  if (IS_DEV) {
-    return idpDevImpersonate('admin-user');
-  }
-
   console.log('[IDP] Login attempt for:', email);
 
   try {
@@ -121,76 +112,6 @@ export async function idpLogin(
         code: 'NETWORK_ERROR',
         message: 'Failed to connect to authentication service',
       },
-    };
-  }
-}
-
-/**
- * Dev-only: Impersonate a user via internal IDP TestHarness
- */
-async function idpDevImpersonate(persona: string): Promise<IdpLoginResponse> {
-  console.log('[IDP] Dev impersonate:', persona);
-
-  // dev-only capability: the /dev/impersonate host (IDP_INTERNAL_URL) is absent in
-  // prod by design. Guard loudly rather than fetch a garbage `${null}/...` URL —
-  // this path is already IS_DEV-gated upstream; this is defense-in-depth (WO #292).
-  if (!IDP_INTERNAL_URL) {
-    return {
-      success: false,
-      error: {
-        code: 'IMPERSONATE_DEV_ONLY',
-        message: 'Impersonation is a dev-only capability and is not available in this build.',
-      },
-    };
-  }
-
-  try {
-    // #133 (#61 sibling): the slug-hardened /dev/impersonate (:32774) now REQUIRES
-    // clientSlug and rejects numeric-only clientId with 400 CLIENT_SLUG_REQUIRED.
-    // Send the slug, scoped to CLIENT_ID (idealvibe_online) — matching every other
-    // path in this file (real login/refresh/2fa). The old numeric clientId:8
-    // (ideal_resume_website) was a latent wrong-tenant bug, not a spec (QA 2395).
-    // Dev-only path (IS_DEV); a packaged build never reaches here.
-    const response = await fetch(`${IDP_INTERNAL_URL}/dev/impersonate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ persona, clientSlug: CLIENT_ID }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[IDP] Impersonate failed:', response.status, errorText);
-      return {
-        success: false,
-        error: { code: `HTTP_${response.status}`, message: `Impersonate failed: ${response.status}` },
-      };
-    }
-
-    const data = await response.json();
-    console.log('[IDP] Impersonate success for:', persona);
-
-    const user = data.user || {};
-    return {
-      success: true,
-      result: {
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        expires_in: data.expires_in || 3600,
-        requires_2fa: false,
-        two_factor_complete: true,
-        user: {
-          userId: String(user.id || 'dev-user'),
-          email: user.email || persona,
-          fullName: user.userName || persona,
-          roles: user.roles || ['admin'],
-        },
-      },
-    };
-  } catch (error) {
-    console.error('[IDP] Impersonate request failed:', error);
-    return {
-      success: false,
-      error: { code: 'NETWORK_ERROR', message: 'Failed to connect to internal IDP for impersonation' },
     };
   }
 }

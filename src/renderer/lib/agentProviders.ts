@@ -46,6 +46,7 @@ export const providerLabel = (provider: CodeProvider | null | undefined): string
  * every component.
  */
 interface ProviderHolder {
+  runtimeProvider?: CodeProvider;
   provider?: CodeProvider;
 }
 
@@ -54,7 +55,7 @@ export function resolveAgentProvider(
   teamRuntime: CodeProvider | null | undefined,
   fallback: CodeProvider | null | undefined,
 ): CodeProvider {
-  return agent?.provider ?? teamRuntime ?? fallback ?? 'claude';
+  return agent?.runtimeProvider ?? agent?.provider ?? teamRuntime ?? fallback ?? 'claude';
 }
 
 /**

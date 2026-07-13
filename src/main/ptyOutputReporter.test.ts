@@ -1,14 +1,12 @@
 /**
  * PTY output reporter unit tests.
  *
- * Verifies batching, flushing, and the graceful-disable path that avoids
- * spamming the console when vsql-cache is not configured.
+ * Verifies batching, flushing, and drop handling.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isVsqlCacheReportingEnabled, postAgentOutput } from './vsql-cache-client';
+import { postAgentOutput } from './vsql-cache-client';
 
 vi.mock('./vsql-cache-client', () => ({
-  isVsqlCacheReportingEnabled: vi.fn(),
   postAgentOutput: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -21,7 +19,6 @@ describe('ptyOutputReporter', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers({ shouldAdvanceTime: false });
-    vi.mocked(isVsqlCacheReportingEnabled).mockReturnValue(true);
     vi.mocked(postAgentOutput).mockResolvedValue(undefined);
     vi.spyOn(console, 'warn').mockReturnValue(undefined);
   });
@@ -86,17 +83,6 @@ describe('ptyOutputReporter', () => {
 
     reportPtyOutput('DotNetPert', 't1', 'lost');
     dropPtyOutput('t1');
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(postAgentOutput).not.toHaveBeenCalled();
-  });
-
-  it('does not buffer or send when reporting is disabled', async () => {
-    vi.mocked(isVsqlCacheReportingEnabled).mockReturnValue(false);
-    const { reportPtyOutput, flushPtyOutput } = await loadReporter();
-
-    reportPtyOutput('DotNetPert', 't1', 'ignored');
-    flushPtyOutput('t1');
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(postAgentOutput).not.toHaveBeenCalled();

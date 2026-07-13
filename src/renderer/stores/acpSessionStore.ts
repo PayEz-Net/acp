@@ -10,14 +10,31 @@ import type {
   AcpTurnStatus,
 } from '@shared/acpTypes';
 
+export interface StagedImageInput {
+  id: string;
+  name: string;
+  type: string;
+  data: ArrayBuffer;
+}
+
 let nextTurnId = 1;
 
 function generateTurnId(): string {
   return `turn-${nextTurnId++}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function textFromContentBlock(block: AcpContentBlock): string {
-  if (block.type === 'content' && block.content.type === 'text') {
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function textFromContentBlock(block: AcpContentBlock | null | undefined): string {
+  if (!block) return '';
+  if (block.type === 'content' && block.content && block.content.type === 'text') {
     return stripAnsi(block.content.text);
   }
   return '';
@@ -34,9 +51,22 @@ function collapseRenderedWhitespace(text: string): string {
   return text.replace(/\n\s*\n/g, '\n').trim();
 }
 
-function isBlankTextBlock(block: AcpContentBlock): boolean {
+const MAX_THINKING_CHARS = 250;
+
+function truncateThinking(text: string): string {
+  if (text.length <= MAX_THINKING_CHARS) return text;
+  // Keep the tail so the user sees the most recent reasoning; slice at a word
+  // boundary so the preview doesn't start mid-token.
+  const tail = text.slice(-MAX_THINKING_CHARS);
+  const firstSpace = tail.indexOf(' ');
+  return firstSpace > 0 ? tail.slice(firstSpace + 1) : tail;
+}
+
+function isBlankTextBlock(block: AcpContentBlock | null | undefined): boolean {
+  if (!block) return true;
   return (
     block.type === 'content' &&
+    block.content &&
     block.content.type === 'text' &&
     block.content.text.trim() === ''
   );
@@ -52,12 +82,17 @@ function appendTextDedupe(existing: string, delta: string): string {
 }
 
 function mergeContentBlocks(existing: AcpContentBlock[], delta: AcpContentBlock[]): AcpContentBlock[] {
-  if (existing.length === 0) return delta.slice();
+  const safeDelta = delta.filter((b): b is AcpContentBlock => b != null);
+  if (existing.length === 0) return safeDelta.slice();
   const last = existing[existing.length - 1];
-  const first = delta[0];
+  const first = safeDelta[0];
   if (
+    first &&
+    last &&
     last.type === 'content' &&
     first.type === 'content' &&
+    last.content &&
+    first.content &&
     last.content.type === 'text' &&
     first.content.type === 'text'
   ) {
@@ -67,22 +102,31 @@ function mergeContentBlocks(existing: AcpContentBlock[], delta: AcpContentBlock[
     // beginning) or overlapping fragments. Detect and de-duplicate so the
     // rendered answer never repeats itself.
     if (next.startsWith(prev)) {
-      return [{ type: 'content', content: { type: 'text', text: next } }, ...delta.slice(1)];
+      return [{ type: 'content', content: { type: 'text', text: next } }, ...safeDelta.slice(1)];
     }
     if (prev.endsWith(next)) {
-      return [...existing, ...delta.slice(1)];
+      return [...existing, ...safeDelta.slice(1)];
     }
     return [
       ...existing.slice(0, -1),
       { type: 'content', content: { type: 'text', text: prev + next } },
-      ...delta.slice(1),
+      ...safeDelta.slice(1),
     ];
   }
-  return [...existing, ...delta];
+  return [...existing, ...safeDelta];
 }
 
-function toolCallFromEvent(toolCall: AcpToolCall): AcpToolCall {
-  return { ...toolCall, contentText: textFromBlocks(toolCall.content) };
+function toolCallFromEvent(toolCall: AcpToolCall | null | undefined): AcpToolCall {
+  if (!toolCall) {
+    return {
+      toolCallId: '',
+      title: '',
+      status: 'failed',
+      content: [],
+      contentText: '',
+    };
+  }
+  return { ...toolCall, contentText: textFromBlocks(toolCall.content ?? []) };
 }
 
 function mapToolCallStatus(status: AcpToolCall['status']): AcpTurnStatus {
@@ -105,8 +149,9 @@ interface AcpSessionStoreState {
 interface AcpSessionStoreActions {
   getSession(agent: string): AcpSessionState | undefined;
   setRuntimeMode(agent: string, mode: 'acp' | 'pty'): void;
-  startUserTurn(agent: string, sessionId: string, text: string, ts?: string): void;
+  startUserTurn(agent: string, sessionId: string, text: string, images?: StagedImageInput[], ts?: string): void;
   startAssistantTurn(agent: string, sessionId: string, ts?: string): void;
+  failActiveTurn(agent: string, error?: string): void;
   applyEvent(payload: AcpEventPayload): void;
   respondPermission(agent: string, optionId: string): void;
   clearSession(agent: string): void;
@@ -164,11 +209,23 @@ function getLastUserTurn(session: AcpSessionState): AcpTurn | undefined {
 
 function ensureAssistantTurn(session: AcpSessionState, agent: string, sessionId: string): AcpSessionState {
   if (session.activeTurnId) return session;
+  // Don't create a new active assistant turn from stray chunks that arrive
+  // after the previous assistant turn already completed (e.g., a final
+  // message chunk delivered after turn_complete). Without this guard, the
+  // transcript shows an eternal "Answering..." spinner for a turn that has
+  // no matching turn_complete event. The boot-prompt case is still covered:
+  // there is either no prior turn or the prior turn is the user turn.
+  const lastTurn = session.turns[session.turns.length - 1];
+  if (lastTurn?.role === 'assistant' && lastTurn.status === 'done') return session;
   const turn = createTurn(agent, sessionId, 'assistant', [], new Date().toISOString());
   return { ...session, turns: [...session.turns, turn], activeTurnId: turn.id };
 }
 
-function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agent: string): AcpSessionState {
+function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | null | undefined, agent: string): AcpSessionState {
+  if (!update || typeof update !== 'object') {
+    console.warn(`[acpSessionStore] Ignoring malformed update for ${agent}: update is null or not an object`);
+    return session;
+  }
   switch (update.sessionUpdate) {
     case 'initialized': {
       return {
@@ -184,17 +241,29 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agen
     }
 
     case 'agent_thought_chunk': {
+      if (!update.content || typeof update.content !== 'object') {
+        console.warn(`[acpSessionStore] Ignoring agent_thought_chunk for ${agent}: missing or invalid content`);
+        return session;
+      }
       session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       const thoughtText = textFromContentBlock(update.content);
       if (!thoughtText || thoughtText.trim() === '') return session;
       return updateActiveTurn(session, (turn) => ({
         ...turn,
         status: 'thinking',
-        thinking: collapseRenderedWhitespace(appendTextDedupe(turn.thinking, thoughtText)),
+        // Keep thinking compact: cap at ~250 chars (roughly 3-4 wrapped lines)
+        // so live reasoning doesn't balloon and push useful output off-screen.
+        thinking: truncateThinking(
+          collapseRenderedWhitespace(appendTextDedupe(turn.thinking, thoughtText)),
+        ),
       }));
     }
 
     case 'agent_message_chunk': {
+      if (!update.content || typeof update.content !== 'object') {
+        console.warn(`[acpSessionStore] Ignoring agent_message_chunk for ${agent}: missing or invalid content`);
+        return session;
+      }
       session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       if (isBlankTextBlock(update.content)) return session;
       const messageText = textFromContentBlock(update.content);
@@ -217,6 +286,10 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agen
     }
 
     case 'tool_call': {
+      if (!update.toolCall) {
+        console.warn(`[acpSessionStore] Ignoring tool_call update for ${agent}: toolCall is missing`);
+        return session;
+      }
       session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       return updateActiveTurn(session, (turn) => {
         const toolCall = toolCallFromEvent(update.toolCall);
@@ -234,6 +307,10 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agen
     }
 
     case 'tool_call_update': {
+      if (!update.toolCall) {
+        console.warn(`[acpSessionStore] Ignoring tool_call_update for ${agent}: toolCall is missing`);
+        return session;
+      }
       session = ensureAssistantTurn(session, agent, session.sessionId ?? '');
       return updateActiveTurn(session, (turn) => {
         const updated = update.toolCall;
@@ -276,14 +353,45 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate, agen
       if (!session.activeTurnId) return session;
       const turns = session.turns.map((turn) =>
         turn.id === session.activeTurnId
-          ? { ...turn, status: 'done' as AcpTurnStatus, stopReason: update.stopReason }
+          ? {
+              ...turn,
+              status: 'done' as AcpTurnStatus,
+              stopReason: update.stopReason,
+              // If the runtime finishes the turn without sending a completed
+              // tool_call_update for every tool, mark remaining in-progress
+              // tools as completed so their spinners don't spin forever.
+              toolCalls: turn.toolCalls.map((t) =>
+                t.status === 'in_progress' ? { ...t, status: 'completed' as const } : t,
+              ),
+            }
           : turn,
       );
       return { ...session, turns, activeTurnId: null };
     }
 
     case 'error': {
-      return { ...session, error: update.error };
+      // An error while a turn is active means the assistant turn will never
+      // receive a matching turn_complete. Fail it now so the activity spinner,
+      // live thinking block, and any in-progress tool spinners all stop.
+      if (!session.activeTurnId) {
+        return { ...session, error: update.error };
+      }
+      const turns = session.turns.map((turn) =>
+        turn.id === session.activeTurnId
+          ? {
+              ...turn,
+              status: 'error' as AcpTurnStatus,
+              // TODO: evaluate whether to show timeout/transport errors in the UI and how (toast? inline? ignore?)
+              // contentText: update.error ? `[Send failed] ${update.error}` : turn.contentText,
+              contentText: turn.contentText,
+              // Mark any still-running tools as failed so their spinners stop.
+              toolCalls: turn.toolCalls.map((t) =>
+                t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
+              ),
+            }
+          : turn,
+      );
+      return { ...session, turns, activeTurnId: null, error: update.error };
     }
 
     case 'stderr': {
@@ -314,17 +422,24 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
       });
     },
 
-    startUserTurn(agent: string, sessionId: string, text: string, ts = new Date().toISOString()) {
+    startUserTurn(
+      agent: string,
+      sessionId: string,
+      text: string,
+      images: StagedImageInput[] = [],
+      ts = new Date().toISOString(),
+    ) {
       set((state) => {
         const sessions = new Map(state.sessions);
         const session = getOrCreateSession(sessions, agent);
-        const turn = createTurn(
-          agent,
-          sessionId,
-          'user',
-          [{ type: 'content', content: { type: 'text', text } }],
-          ts,
-        );
+        const contentBlocks: AcpContentBlock[] = [{ type: 'content', content: { type: 'text', text } }];
+        for (const image of images) {
+          contentBlocks.push({
+            type: 'content',
+            content: { type: 'image', data: arrayBufferToBase64(image.data), mimeType: image.type },
+          });
+        }
+        const turn = createTurn(agent, sessionId, 'user', contentBlocks, ts);
         sessions.set(agent, { ...session, turns: [...session.turns, turn], activeTurnId: null });
         return { sessions };
       });
@@ -336,6 +451,31 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
         const session = getOrCreateSession(sessions, agent);
         const turn = createTurn(agent, sessionId, 'assistant', [], ts);
         sessions.set(agent, { ...session, turns: [...session.turns, turn], activeTurnId: turn.id });
+        return { sessions };
+      });
+    },
+
+    failActiveTurn(agent: string, error?: string) {
+      set((state) => {
+        const sessions = new Map(state.sessions);
+        const session = sessions.get(agent);
+        if (!session?.activeTurnId) return state;
+        const turns = session.turns.map((turn) =>
+          turn.id === session.activeTurnId
+            ? {
+                ...turn,
+                status: 'error' as AcpTurnStatus,
+                // TODO: evaluate whether to show timeout/transport errors in the UI and how
+                // contentText: error ? `[Send failed] ${error}` : turn.contentText,
+                contentText: turn.contentText,
+                // Mark any still-running tools as failed so their spinners stop.
+                toolCalls: turn.toolCalls.map((t) =>
+                  t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
+                ),
+              }
+            : turn,
+        );
+        sessions.set(agent, { ...session, turns, activeTurnId: null, error });
         return { sessions };
       });
     },

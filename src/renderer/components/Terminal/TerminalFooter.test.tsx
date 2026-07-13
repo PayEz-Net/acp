@@ -54,7 +54,6 @@ describe('TerminalFooter', () => {
         contextUsage={33.3}
       />,
     );
-    expect(container.textContent).toContain('Busy');
     expect(container.textContent).toContain('claude');
     expect(container.textContent).toContain('repos\\acp-desktop');
     expect(container.textContent).toContain('42 lines');
@@ -112,23 +111,6 @@ describe('TerminalFooter', () => {
     cleanup(root, container);
   });
 
-  it('shows a Thinking… pill when isThinkingLive is true', () => {
-    const { container, root } = render(
-      <TerminalFooter
-        agent={makeAgent({ status: 'busy' })}
-        provider="claude"
-        repoPath="E:\\repos"
-        lineCount={5}
-        thinkingCount={0}
-        contextUsage={12}
-        isThinkingLive
-      />,
-    );
-    expect(container.textContent).toContain('Thinking…');
-    expect(container.textContent).not.toContain('Busy');
-    cleanup(root, container);
-  });
-
   it('falls back to repoPath when store cwd is missing', () => {
     const { container, root } = render(
       <TerminalFooter
@@ -183,24 +165,8 @@ describe('TerminalFooter', () => {
       />,
     );
 
-    expect(container.textContent).toContain('Tool…');
     expect(container.textContent).toContain('Kimi Code CLI 1.0.0');
     cleanup(root, container);
   });
 
-  it('falls back to agent status when no ACP session exists', () => {
-    const agent = makeAgent({ status: 'ready', provider: 'kimi' });
-    const { container, root } = render(
-      <TerminalFooter
-        agent={agent}
-        provider="kimi"
-        repoPath="E:\\repos\\acp-desktop"
-        lineCount={0}
-        thinkingCount={0}
-        contextUsage={0}
-      />,
-    );
-    expect(container.textContent).toContain('Ready');
-    cleanup(root, container);
-  });
 });

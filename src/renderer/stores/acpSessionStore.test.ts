@@ -20,6 +20,26 @@ describe('acpSessionStore', () => {
     expect(session?.activeTurnId).toBeNull();
   });
 
+  it('creates a user turn with image content blocks', () => {
+    const data = new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer;
+    useAcpSessionStore.getState().startUserTurn('NextPert', 's1', 'Look at this', [
+      { id: 'img-1', name: 'test.png', type: 'image/png', data },
+    ]);
+    const session = useAcpSessionStore.getState().getSession('NextPert');
+    expect(session?.turns).toHaveLength(1);
+    expect(session?.turns[0].role).toBe('user');
+    expect(session?.turns[0].content).toHaveLength(2);
+    expect(session?.turns[0].content[0]).toEqual({
+      type: 'content',
+      content: { type: 'text', text: 'Look at this' },
+    });
+    expect(session?.turns[0].content[1]).toEqual({
+      type: 'content',
+      content: { type: 'image', data: 'iVBORw==', mimeType: 'image/png' },
+    });
+    expect(session?.turns[0].contentText).toBe('Look at this');
+  });
+
   it('records initialized event details', () => {
     const store = useAcpSessionStore.getState();
     store.applyEvent(
@@ -138,6 +158,70 @@ describe('acpSessionStore', () => {
     expect(session?.turns[0].status).toBe('done');
     expect(session?.turns[0].stopReason).toBe('end_turn');
     expect(session?.activeTurnId).toBeNull();
+  });
+
+  it('marks in-progress tools as completed on turn_complete', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'WriteFile',
+          status: 'in_progress',
+          content: [],
+        },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc2',
+          title: 'WriteFile',
+          status: 'in_progress',
+          content: [],
+        },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'turn_complete',
+        sessionId: 's1',
+        stopReason: 'end_turn',
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].toolCalls).toHaveLength(2);
+    expect(session?.turns[0].toolCalls[0].status).toBe('completed');
+    expect(session?.turns[0].toolCalls[1].status).toBe('completed');
+    expect(session?.turns[0].status).toBe('done');
+  });
+
+  it('marks in-progress tools as failed on failActiveTurn', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'WriteFile',
+          status: 'in_progress',
+          content: [],
+        },
+      }),
+    );
+    store.failActiveTurn('NextPert', 'connection lost');
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].toolCalls[0].status).toBe('failed');
+    expect(session?.turns[0].status).toBe('error');
   });
 
   it('stores pending permission requests', () => {
@@ -328,5 +412,170 @@ describe('acpSessionStore', () => {
 
     const session = store.getSession('NextPert');
     expect(session?.turns[0].contentText).toBe('Line 1\nLine 2');
+  });
+
+  it('fails the active assistant turn and clears activeTurnId', () => {
+    const store = useAcpSessionStore.getState();
+    store.startUserTurn('NextPert', 's1', 'Hello');
+    store.startAssistantTurn('NextPert', 's1');
+    store.failActiveTurn('NextPert', 'IPC failure');
+
+    const session = store.getSession('NextPert');
+    expect(session?.activeTurnId).toBeNull();
+    expect(session?.error).toBe('IPC failure');
+    const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
+    expect(assistantTurn?.status).toBe('error');
+    expect(assistantTurn?.contentText).toContain('IPC failure');
+  });
+
+  it('fails the active assistant turn on an error update', () => {
+    const store = useAcpSessionStore.getState();
+    store.startUserTurn('NextPert', 's1', 'Hello');
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'Shell',
+          status: 'in_progress',
+          content: [],
+        },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'error',
+        sessionId: 's1',
+        error: 'ACP process exited',
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.activeTurnId).toBeNull();
+    expect(session?.error).toBe('ACP process exited');
+    const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
+    expect(assistantTurn?.status).toBe('error');
+    expect(assistantTurn?.contentText).toContain('ACP process exited');
+    expect(assistantTurn?.toolCalls[0].status).toBe('failed');
+  });
+
+  it('records an error update when no assistant turn is active', () => {
+    const store = useAcpSessionStore.getState();
+    store.startUserTurn('NextPert', 's1', 'Hello');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'error',
+        sessionId: 's1',
+        error: 'runtime not initialized',
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.activeTurnId).toBeNull();
+    expect(session?.error).toBe('runtime not initialized');
+    const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
+    expect(assistantTurn).toBeUndefined();
+  });
+
+  it('does not resurrect an active assistant turn from chunks after turn_complete', () => {
+    const store = useAcpSessionStore.getState();
+    store.startUserTurn('NextPert', 's1', 'Look at this image');
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'I see it.' } },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'turn_complete',
+        sessionId: 's1',
+        stopReason: 'end_turn',
+      }),
+    );
+
+    // Simulate a stray chunk delivered after the runtime already signaled
+    // turn completion. This reproduces the image-paste "Answering..." hang
+    // where a late session/update chunk creates a new active turn with no
+    // matching turn_complete event.
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'late fragment' } },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns).toHaveLength(2);
+    expect(session?.activeTurnId).toBeNull();
+    expect(session?.turns[1].status).toBe('done');
+    expect(session?.turns[1].contentText).toBe('I see it.');
+  });
+
+  it('tolerates malformed ACP events with missing content blocks', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+
+    // Missing content should not throw.
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: undefined,
+      } as any),
+    );
+
+    // Null content in an array should be filtered out.
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Hello' } },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].contentText).toBe('Hello');
+    expect(session?.turns[0].status).toBe('answering');
+  });
+
+  it('tolerates malformed ACP events with missing toolCall', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: undefined,
+      } as any),
+    );
+
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call_update',
+        sessionId: 's1',
+        toolCall: undefined,
+      } as any),
+    );
+
+    const session = useAcpSessionStore.getState().getSession('NextPert');
+    expect(session?.turns[0].toolCalls).toHaveLength(0);
+  });
+
+  it('tolerates a completely null/undefined update payload', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+
+    store.applyEvent({ agent: 'NextPert', sessionId: 's1', update: undefined as unknown as AcpEventPayload['update'] });
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns).toHaveLength(1);
+    expect(session?.activeTurnId).not.toBeNull();
   });
 });

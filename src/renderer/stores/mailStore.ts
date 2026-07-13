@@ -81,7 +81,7 @@ const RATE_LIMIT_BACKOFF_MS = 8000;
  * Throws if not authenticated (WO-2B: don't talk to a terminal-dead sidecar).
  * On 401, clears cached secret and retries once with fresh secret (Phase 5: secret rotation).
  */
-async function mailRequest(endpoint: string, options: { method?: string; body?: unknown; agentName?: string } = {}) {
+async function mailRequest(endpoint: string, options: { method?: string; body?: unknown; agentName?: string; signal?: AbortSignal } = {}) {
   if (!isBackendAvailable()) {
     throw new Error('Mail unavailable: backend not connected');
   }
@@ -110,6 +110,7 @@ async function mailRequest(endpoint: string, options: { method?: string; body?: 
       method,
       headers,
       ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   }
 
@@ -173,7 +174,7 @@ interface MailStore {
 
   // API actions
   fetchInbox: (agent: string, projectId?: number) => Promise<void>;
-  fetchAllInboxes: (agents: string[], projectId?: number) => Promise<void>;
+  fetchAllInboxes: (agents: string[], projectId?: number, signal?: AbortSignal) => Promise<void>;
   fetchMessage: (messageId: number) => Promise<void>;
   sendMessage: (from: string, to: string, subject: string, body: string) => Promise<boolean>;
   executeAction: (action: PanelAction) => Promise<void>;
@@ -356,7 +357,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
     }
   },
 
-  fetchAllInboxes: async (agents, projectId) => {
+  fetchAllInboxes: async (agents, projectId, signal) => {
     // P0 fix (task #11): ONE aggregated request (DnP acp-api 3b6878f), NOT a
     // per-agent fan-out — server-side fan-out kills the client burst that 429s.
     // Coalesce the 5 stacking triggers (poll/focus/mount/SSE/post-read) into one
@@ -380,7 +381,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
         const aliasToAgent = new Map(agents.map((a) => [resolveMailAlias(a), a]));
         const apiAgents = agents.map((a) => resolveMailAlias(a));
         const qs = `?agents=${encodeURIComponent(apiAgents.join(','))}${pid != null ? `&project_id=${pid}` : ''}`;
-        const res = await mailRequest(`/inboxes${qs}`);
+        const res = await mailRequest(`/inboxes${qs}`, { signal });
         if (res.status === 429) { _rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS; return; }
         if (!res.ok) throw new Error(`Failed to fetch inboxes: ${res.status}`);
         const response = await res.json();

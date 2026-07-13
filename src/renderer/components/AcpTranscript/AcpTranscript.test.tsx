@@ -244,6 +244,22 @@ describe('AssistantTurn', () => {
     expect(container.textContent).toContain('I should help.');
     cleanup(root, container);
   });
+
+  it('renders image content blocks returned by the runtime', () => {
+    const turn = makeTurn({
+      contentText: 'Here is the image you asked for.',
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Here is the image you asked for.' } },
+        { type: 'content', content: { type: 'image', data: 'iVBORw0=', mimeType: 'image/png' } },
+      ],
+    });
+    const { container, root } = render(<AssistantTurn turn={turn} />);
+    expect(container.querySelector('[data-testid="assistant-turn-images"]')).not.toBeNull();
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0=');
+    cleanup(root, container);
+  });
 });
 
 describe('UserTurn', () => {
@@ -255,6 +271,37 @@ describe('UserTurn', () => {
     const turn = makeTurn({ role: 'user', contentText: 'Do this' });
     const { container, root } = render(<UserTurn turn={turn} />);
     expect(container.textContent).toContain('Do this');
+    cleanup(root, container);
+  });
+
+  it('renders image content blocks', () => {
+    const turn = makeTurn({
+      role: 'user',
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Look' } },
+        { type: 'content', content: { type: 'image', data: 'iVBORw0=', mimeType: 'image/png' } },
+      ],
+      contentText: 'Look',
+    });
+    const { container, root } = render(<UserTurn turn={turn} />);
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0=');
+    expect(img?.getAttribute('alt')).toBe('Pasted image');
+    cleanup(root, container);
+  });
+
+  it('renders markdown data-URI images in contentText', () => {
+    const turn = makeTurn({
+      role: 'user',
+      contentText: 'Look:\n\n![Pasted image](data:image/png;base64,iVBORw0=)\n\nthanks',
+    });
+    const { container, root } = render(<UserTurn turn={turn} />);
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0=');
+    expect(container.textContent).toContain('Look:');
+    expect(container.textContent).toContain('thanks');
     cleanup(root, container);
   });
 });

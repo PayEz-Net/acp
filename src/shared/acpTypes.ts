@@ -28,6 +28,9 @@ export interface AcpNestedContentBlock {
 
 export type AcpContentBlock = AcpNestedContentBlock;
 
+/** Flat content blocks used for outgoing ACP prompts (session/prompt). */
+export type AcpSendContentBlock = AcpTextContent | AcpImageContent;
+
 export type AcpToolCallStatus = 'in_progress' | 'completed' | 'failed';
 
 export interface AcpToolCall {
@@ -93,6 +96,12 @@ export interface AcpPromptPayload {
   agent: string;
   sessionId: string;
   text: string;
+}
+
+export interface AcpSendMessagePayload {
+  agent: string;
+  sessionId: string;
+  content: AcpSendContentBlock[];
 }
 
 export interface AcpCancelPayload {

@@ -27,21 +27,6 @@ export function getStatusPill(status: AgentState['status']): StatusPill {
   }
 }
 
-function getAcpStatusPill(status?: string): StatusPill {
-  switch (status) {
-    case 'thinking':
-      return { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true };
-    case 'tool':
-      return { label: 'Tool…', color: 'bg-acp-status-busy', animate: true };
-    case 'answering':
-      return { label: 'Answering…', color: 'bg-acp-accent', animate: true };
-    case 'error':
-      return { label: 'Error', color: 'bg-acp-status-error' };
-    default:
-      return { label: 'Busy', color: 'bg-acp-status-busy', animate: true };
-  }
-}
-
 export function ContextBar({ usage }: { usage: number }) {
   const clamped = Math.max(0, Math.min(100, usage));
   let color = 'bg-emerald-500';
@@ -69,7 +54,6 @@ export function TerminalFooter({
   lineCount,
   thinkingCount,
   contextUsage,
-  isThinkingLive,
 }: {
   agent: AgentState;
   provider: string | null;
@@ -77,20 +61,10 @@ export function TerminalFooter({
   lineCount: number;
   thinkingCount: number;
   contextUsage: number;
-  isThinkingLive?: boolean;
 }) {
   const status = useAgentStatusStore((s) => s.statuses[agent.name]);
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agent.name));
   const isAcpMode = acpSession?.runtimeMode === 'acp';
-
-  const activeTurn = isAcpMode
-    ? acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId)
-    : undefined;
-  const statusPill = isAcpMode
-    ? getAcpStatusPill(activeTurn?.status)
-    : isThinkingLive
-      ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
-      : getStatusPill(agent.status);
 
   // The provider prop is the single source of truth (agent.provider with the
   // team-runtime fallback already applied by the caller). Do not let the status
@@ -119,10 +93,6 @@ export function TerminalFooter({
   return (
     <div className="h-6 shrink-0 flex items-center justify-between px-2.5 border-t border-acp-border bg-acp-surface text-[10px] text-acp-text-muted">
       <div className="flex items-center gap-2.5 min-w-0">
-        <span className="flex items-center gap-1">
-          <span className={`w-1.5 h-1.5 rounded-full ${statusPill.color} ${statusPill.animate ? 'animate-pulse' : ''}`} />
-          <span className="capitalize">{statusPill.label}</span>
-        </span>
         {effectiveProvider && (
           <span className="uppercase tracking-wide text-acp-text-secondary" title={effectiveModel ?? ''}>
             {effectiveProvider}

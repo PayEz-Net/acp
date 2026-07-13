@@ -21,10 +21,10 @@
  */
 const ENVIRONMENTS = {
   dev93: {
-    idpUrl: 'http://127.0.0.1:32785',
-    idpInternalUrl: 'http://127.0.0.1:32774', // dev-only: /dev/impersonate harness
-    vibeApiUrl: 'http://127.0.0.1:32786',
-    hubUrl: 'http://127.0.0.1:32786/hubs/agentmail',
+    idpUrl: 'http://10.0.0.93:32785',
+    idpInternalUrl: 'http://10.0.0.93:32774', // dev-only: /dev/impersonate harness
+    vibeApiUrl: 'http://10.0.0.93:32786',
+    hubUrl: 'http://10.0.0.93:32786/hubs/agentmail',
   },
   prod: {
     idpUrl: 'https://idp.payez.net',

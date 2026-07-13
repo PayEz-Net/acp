@@ -1,0 +1,196 @@
+import { useEffect, useState } from 'react';
+import { useAuthStore } from '../../stores/authStore';
+import { getEnabledOAuthProviders } from '../../services/oauth';
+import type { OAuthProviderConfig } from '../../services/oauth';
+import { Loader2, Mail, Lock, AlertCircle, Eye, EyeOff, Minus, Square, X, User } from 'lucide-react';
+
+const PROVIDER_META: Record<string, { label: string }> = {
+  google: { label: 'Continue with Google' },
+  microsoft: { label: 'Continue with Microsoft' },
+  github: { label: 'Continue with GitHub' },
+  facebook: { label: 'Continue with Facebook' },
+  apple: { label: 'Continue with Apple' },
+};
+
+export function SessionExpiredOverlay() {
+  const { user, login, loginWithOAuth, error, isLoading } = useAuthStore();
+  const [email, setEmail] = useState(user?.email ?? '');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [providers, setProviders] = useState<OAuthProviderConfig[]>([]);
+  const [oauthBusy, setOauthBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getEnabledOAuthProviders()
+      .then((list) => {
+        if (!cancelled) setProviders(list);
+      })
+      .catch((err) => {
+        console.warn('[SessionExpiredOverlay] OAuth providers unavailable:', err);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await login(email, password);
+    } catch {
+      // Error handled in store
+    }
+  };
+
+  const handleOAuth = async (provider: string) => {
+    setOauthBusy(provider);
+    try {
+      await loginWithOAuth(provider);
+    } catch {
+      // Error handled in store
+    } finally {
+      setOauthBusy(null);
+    }
+  };
+
+  const anyBusy = isLoading || oauthBusy !== null;
+
+  // If the user somehow cleared while this overlay is mounted, don't render.
+  if (!user) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-slate-900/95 backdrop-blur-sm flex items-center justify-center p-4">
+      {/* Window controls */}
+      <div className="fixed top-0 left-0 right-0 h-10 flex items-center justify-end px-2 titlebar">
+        <button
+          onClick={() => window.electronAPI?.minimizeWindow()}
+          className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
+        >
+          <Minus className="w-4 h-4" />
+        </button>
+        <button
+          onClick={() => window.electronAPI?.maximizeWindow()}
+          className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
+        >
+          <Square className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => window.electronAPI?.closeWindow()}
+          className="p-2 text-slate-400 hover:text-white hover:bg-red-600 rounded transition-colors"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-4">
+            <User className="w-8 h-8 text-red-400" />
+          </div>
+          <h2 className="text-2xl font-bold text-white">Session expired</h2>
+          <p className="text-slate-400 mt-2">
+            Sign in again as{' '}
+            <span className="font-medium text-slate-200">
+              {user.name || user.email}
+            </span>
+            . Your agent panes stay open in the background.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="bg-slate-800 rounded-2xl p-6 border border-slate-700">
+          {error && (
+            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-2 text-red-400">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span className="text-sm">{error}</span>
+            </div>
+          )}
+
+          {providers.length > 0 && (
+            <>
+              <div className="space-y-2 mb-4">
+                {providers.map((p) => {
+                  const meta = PROVIDER_META[p.provider.toLowerCase()] || { label: `Continue with ${p.provider}` };
+                  const busy = oauthBusy === p.provider;
+                  return (
+                    <button
+                      key={p.provider}
+                      type="button"
+                      onClick={() => handleOAuth(p.provider)}
+                      disabled={anyBusy}
+                      className="w-full py-3 px-4 bg-slate-900 border border-slate-600 hover:border-slate-500 hover:bg-slate-700 rounded-lg text-white font-medium transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+                      {meta.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center gap-3 my-4">
+                <div className="flex-1 h-px bg-slate-700" />
+                <span className="text-xs uppercase tracking-wider text-slate-500">or</span>
+                <div className="flex-1 h-px bg-slate-700" />
+              </div>
+            </>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-2">Email</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
+                  placeholder="you@example.com"
+                  required
+                  disabled={anyBusy}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-2">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full pl-10 pr-10 py-3 bg-slate-900 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
+                  placeholder="********"
+                  required
+                  disabled={anyBusy}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 focus:outline-none"
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={anyBusy || !email || !password}
+            className="w-full mt-6 py-3 bg-gradient-to-r from-violet-600 to-cyan-600 text-white font-semibold rounded-lg hover:from-violet-500 hover:to-cyan-500 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 focus:ring-offset-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Signing in...
+              </>
+            ) : (
+              'Sign In'
+            )}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}

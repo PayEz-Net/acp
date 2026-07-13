@@ -111,9 +111,13 @@ function setupHandlers(conn: signalR.HubConnection): void {
   // SignalR logs "No client method with the name 'Connected' found"
   // if no handler exists. We swallow it (could later use as a
   // session-attached UX signal — server payload is HubConnectionInfo
-  // shape). Capital-C event name matches the server's literal.
+  // shape). Register both capitalizations to silence either server
+  // convention.
   conn.on('Connected', (_info: unknown) => {
     // intentional no-op; satisfies SignalR's handler-presence check
+  });
+  conn.on('connected', (_info: unknown) => {
+    // intentional no-op; lowercase variant sent by some hub builds
   });
   conn.on('agent-status-changed', (e: AgentStatusChangedEvent) => {
     emitter.emit('agent-status-changed', e);

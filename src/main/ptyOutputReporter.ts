@@ -1,8 +1,9 @@
 /**
  * PTY output reporter.
  *
- * Taps raw node-pty output from acp-desktop and forwards it to the vsql-cache
- * backend at http://10.0.0.93:52424. vsql-cache normalizes the stream (strip
+ * Taps raw node-pty output from acp-desktop and forwards it to the PayEzVibe
+ * API (VIBE_API_URL), which authenticates the user and forwards to the internal
+ * cache service. The cache service normalizes the stream (strip
  * ANSI, scrub secrets) and re-emits it as `agent-output` SSE events that the
  * renderer consumes for the unified agent-overview UI.
  *
@@ -11,7 +12,7 @@
  * This keeps the HTTP overhead negligible without adding perceptible latency.
  */
 
-import { isVsqlCacheReportingEnabled, postAgentOutput } from './vsql-cache-client';
+import { postAgentOutput } from './vsql-cache-client';
 
 interface PendingOutput {
   agentName: string;
@@ -64,10 +65,6 @@ function flushEntry(key: string): void {
 
   if (!data) return;
 
-  if (!isVsqlCacheReportingEnabled()) {
-    return;
-  }
-
   postAgentOutput({
     agentName: entry.agentName,
     terminalId: entry.terminalId,
@@ -88,7 +85,7 @@ export function reportPtyOutput(
   projectId?: string,
   sessionId?: string,
 ): void {
-  if (!data || !isVsqlCacheReportingEnabled()) return;
+  if (!data) return;
 
   const key = makeKey(terminalId);
   let entry = pending.get(key);

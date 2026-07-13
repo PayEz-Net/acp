@@ -140,7 +140,7 @@ export function setupAuthHandlers(mainWindow: BrowserWindow | null): void {
     return handleRefresh();
   });
 
-  // Send 2FA - not implemented (desktop dev mode uses impersonate)
+  // Send 2FA - not implemented
   ipcMain.handle(IPC_CHANNELS.AUTH_SEND_2FA, async () => {
     return { success: true };
   });

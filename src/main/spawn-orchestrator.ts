@@ -20,6 +20,7 @@
 
 import * as fs from 'fs';
 import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed } from './pty';
+import { endAgentSession } from './agentSessionLifecycle';
 import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
@@ -368,7 +369,7 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // an unnecessary stagger before the block fires.
     const effectiveProvider = runtime;
     try {
-      const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, projectId });
+      const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, projectId, agentId: member.agent_id });
       records.push({
         projectId,
         agentId: member.agent_id,
@@ -437,6 +438,7 @@ function orchestrateTeardown(projectId: number): void {
   console.log(`[SpawnOrch] tearing down ${records.length} agents for project=${projectId}`);
   for (const rec of records) {
     try {
+      void endAgentSession(rec.terminalId, 'teardown');
       killTerminal(rec.terminalId);
       console.log(`[SpawnOrch] killed ${rec.agentName} terminal=${rec.terminalId}`);
     } catch (err) {

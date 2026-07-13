@@ -1,5 +1,5 @@
-import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload } from '@shared/types';
-import type { AcpEventPayload, AcpPromptPayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
+import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload, AgentSessionStartFailedPayload } from '@shared/types';
+import type { AcpEventPayload, AcpPromptPayload, AcpSendMessagePayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
 
 export {};
 
@@ -15,12 +15,13 @@ declare global {
       // (SPEC-team-runtime §3.2). Backs reconcile-on-switch.
       listTerminals: () => Promise<Array<{ id: string; agentName: string; projectId?: number; provider: 'claude' | 'kimi' | 'codex' }>>;
       onTerminalData: (callback: (data: TerminalData) => void) => () => void;
-      onAgentSpawned: (callback: (data: { agentName: string; terminalId: string }) => void) => () => void;
+      onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void) => () => void;
       onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void) => () => void;
       // Main → renderer: a spawn failed with a typed cause (WORKDIR_INVALID).
       // The orchestrator path has no renderer fetch to catch the throw, so this
       // carries it to the shared WorkdirCorrection surface (SPEC-workdir §3.4).
       onPtySpawnFailed: (callback: (payload: SpawnFailedPayload) => void) => () => void;
+      onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
 
       // Settings
       getSettings: () => Promise<AppSettings>;
@@ -56,18 +57,13 @@ declare global {
       openExternal: (url: string) => Promise<void>;
       readClipboardText: () => Promise<string>;
       triggerPaste: () => Promise<void>;
-      sendTerminalWithImages: (payload: {
-        terminalId: string;
-        text: string;
-        images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
-      }) => Promise<{ success: boolean; error?: string }>;
-
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
       sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
+      sendAcpMessage: (payload: AcpSendMessagePayload) => Promise<void>;
       onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
 
       // ACP backend

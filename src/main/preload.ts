@@ -16,6 +16,7 @@ const IPC_CHANNELS = {
   PTY_LIST: 'pty:list',
   PTY_SPAWNED: 'pty:spawned',
   PTY_SPAWN_FAILED: 'PTY_SPAWN_FAILED',
+  AGENT_SESSION_START_FAILED: 'agent-session:start-failed',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
   CLOUD_ENDPOINTS: 'cloud:endpoints',
@@ -54,15 +55,14 @@ const IPC_CHANNELS = {
   TRIGGER_PASTE: 'clipboard:trigger-paste',
   // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5).
   WORKDIR_VALIDATE: 'workdir:validate',
-  // Terminal image paste (renderer → main).
-  TERMINAL_SEND_WITH_IMAGES: 'terminal:send-with-images',
-  // ACP (Agent Client Protocol) transport.
+    // ACP (Agent Client Protocol) transport.
   ACP_EVENT: 'acp:event',
   ACP_PROMPT: 'acp:prompt',
   ACP_CANCEL: 'acp:cancel',
   ACP_SET_MODE: 'acp:set-mode',
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
+  ACP_SEND_MESSAGE: 'acp:send-message',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -77,12 +77,16 @@ type LoginResult = { success: boolean; error?: string; requires2FA?: boolean; av
 type TwoFactorRequest = { code: string; method: 'email' | 'sms' };
 type TwoFactorResult = { success: boolean; error?: string };
 
+// Agent session start failure payload (mirrors ../shared/types).
+type AgentSessionStartFailedPayload = { agentName: string; terminalId: string; status?: number; message: string };
+
 // ACP transport type aliases (mirrors ../shared/acpTypes).
 type AcpPromptPayload = { agent: string; sessionId: string; text: string };
 type AcpCancelPayload = { agent: string; sessionId: string };
 type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
 type AcpKillPayload = { agent: string; sessionId: string };
 type AcpPermissionResponsePayload = { agent: string; sessionId: string; permissionRequestId: number | string; outcome: string; optionId?: string };
+type AcpSendMessagePayload = { agent: string; sessionId: string; content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> };
 type AcpEventPayload = { agent: string; sessionId: string; update: unknown };
 
 
@@ -111,19 +115,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onTerminalData: (callback: (data: TerminalData) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: TerminalData) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: TerminalData) => {
+      if (!isValidPayload<TerminalData>(data, ['terminalId', 'data'])) {
+        console.warn('[preload] Dropping malformed terminal-data payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.PTY_DATA, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_DATA, handler);
   },
 
-  onAgentSpawned: (callback: (data: { agentName: string; terminalId: string }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { agentName: string; terminalId: string }) => callback(data);
+  onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, data: { agentName: string; terminalId: string; provider?: string }) => {
+      if (!isValidPayload<{ agentName: string; terminalId: string }>(data, ['agentName', 'terminalId'])) {
+        console.warn('[preload] Dropping malformed agent-spawned payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.PTY_SPAWNED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_SPAWNED, handler);
   },
 
   onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { terminalId: string; exitCode: number }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { terminalId: string; exitCode: number }) => {
+      if (!isValidPayload<{ terminalId: string; exitCode: number }>(data, ['terminalId', 'exitCode'])) {
+        console.warn('[preload] Dropping malformed terminal-exit payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.PTY_EXIT, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_EXIT, handler);
   },
@@ -132,9 +154,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Carries the orchestrator-path failure to the renderer surface
   // (SPEC-workdir-invalid §3.4). Returns an unsubscribe fn.
   onPtySpawnFailed: (callback: (payload: SpawnFailedPayload) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, payload: SpawnFailedPayload) => callback(payload);
+    const handler = (_: Electron.IpcRendererEvent, payload: SpawnFailedPayload) => {
+      if (!isValidPayload<SpawnFailedPayload>(payload, ['code', 'agent_name', 'message'])) {
+        console.warn('[preload] Dropping malformed spawn-failed payload:', payload);
+        return;
+      }
+      callback(payload);
+    };
     ipcRenderer.on(IPC_CHANNELS.PTY_SPAWN_FAILED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_SPAWN_FAILED, handler);
+  },
+
+  onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, payload: AgentSessionStartFailedPayload) => {
+      if (!isValidPayload<AgentSessionStartFailedPayload>(payload, ['agentName', 'terminalId', 'message'])) {
+        console.warn('[preload] Dropping malformed agent-session-start-failed payload:', payload);
+        return;
+      }
+      callback(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.AGENT_SESSION_START_FAILED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_SESSION_START_FAILED, handler);
   },
 
   // Settings
@@ -218,7 +258,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onAuthSessionDead: (callback: (data: { error: string }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { error: string }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { error: string }) => {
+      if (!isValidPayload<{ error: string }>(data, ['error'])) {
+        console.warn('[preload] Dropping malformed auth-session-dead payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.AUTH_SESSION_DEAD, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.AUTH_SESSION_DEAD, handler);
   },
@@ -229,7 +275,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => {
+      if (!isValidPayload<{ success: boolean }>(data, ['success'])) {
+        console.warn('[preload] Dropping malformed OAuth callback payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.OAUTH_CALLBACK, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.OAUTH_CALLBACK, handler);
   },
@@ -247,14 +299,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Trigger the native paste editing command on the focused element.
   triggerPaste: (): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.TRIGGER_PASTE);
-  },
-
-  sendTerminalWithImages: (payload: {
-    terminalId: string;
-    text: string;
-    images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
-  }): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_SEND_WITH_IMAGES, payload);
   },
 
   // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
@@ -278,8 +322,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_PERMISSION_RESPONSE, payload);
   },
 
+  sendAcpMessage: (payload: AcpSendMessagePayload): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_SEND_MESSAGE, payload);
+  },
+
   onAcpEvent: (callback: (payload: AcpEventPayload) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, payload: AcpEventPayload) => callback(payload);
+    const handler = (_: Electron.IpcRendererEvent, payload: AcpEventPayload) => {
+      if (!isValidPayload<AcpEventPayload>(payload, ['agent', 'sessionId', 'update'])) {
+        console.warn('[preload] Dropping malformed ACP event payload:', payload);
+        return;
+      }
+      callback(payload);
+    };
     ipcRenderer.on(IPC_CHANNELS.ACP_EVENT, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ACP_EVENT, handler);
   },
@@ -306,7 +360,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { available: boolean; message?: string }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { available: boolean; message?: string }) => {
+      if (!isValidPayload<{ available: boolean }>(data, ['available'])) {
+        console.warn('[preload] Dropping malformed backend-status payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.ACP_BACKEND_STATUS_CHANGED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ACP_BACKEND_STATUS_CHANGED, handler);
   },
@@ -345,7 +405,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.sendSync(IPC_CHANNELS.BOOT_CLEAR_NEXT_OVERLAY);
   },
   onProjectSwitchProgress: (callback: (data: { phase: 'cloud-pending' | 'restarting' | 'error'; targetProjectId: number; errorCode?: string; errorMessage?: string }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { phase: 'cloud-pending' | 'restarting' | 'error'; targetProjectId: number; errorCode?: string; errorMessage?: string }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { phase: 'cloud-pending' | 'restarting' | 'error'; targetProjectId: number; errorCode?: string; errorMessage?: string }) => {
+      if (!isValidPayload<{ phase: string; targetProjectId: number }>(data, ['phase', 'targetProjectId'])) {
+        console.warn('[preload] Dropping malformed project-switch-progress payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.PROJECT_SWITCH_PROGRESS, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PROJECT_SWITCH_PROGRESS, handler);
   },
@@ -354,12 +420,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Renderer can render a state-of-the-fleet pill, current-project
   // change banner, cloud-unreachable warning, etc.
   onLifecycleProjectChanged: (callback: (data: { oldId: number | null; newId: number | null }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { oldId: number | null; newId: number | null }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { oldId: number | null; newId: number | null }) => {
+      if (!isValidPayload<{ oldId: unknown; newId: unknown }>(data, ['oldId', 'newId'])) {
+        console.warn('[preload] Dropping malformed lifecycle-project-changed payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.LIFECYCLE_PROJECT_CHANGED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.LIFECYCLE_PROJECT_CHANGED, handler);
   },
   onLifecycleStateChanged: (callback: (data: { projectId: number; oldState: string | null; newState: string | null }) => void): () => void => {
-    const handler = (_: Electron.IpcRendererEvent, data: { projectId: number; oldState: string | null; newState: string | null }) => callback(data);
+    const handler = (_: Electron.IpcRendererEvent, data: { projectId: number; oldState: string | null; newState: string | null }) => {
+      if (!isValidPayload<{ projectId: number; oldState: unknown; newState: unknown }>(data, ['projectId', 'oldState', 'newState'])) {
+        console.warn('[preload] Dropping malformed lifecycle-state-changed payload:', data);
+        return;
+      }
+      callback(data);
+    };
     ipcRenderer.on(IPC_CHANNELS.LIFECYCLE_STATE_CHANGED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.LIFECYCLE_STATE_CHANGED, handler);
   },
@@ -375,6 +453,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 });
 
+/** Validate a forwarded IPC payload is a non-null object with the expected keys.
+ *  Prevents renderer-side dereference crashes (e.g. Cannot read properties of
+ *  undefined (reading 'type')) when main or the sandbox bridge emits a malformed
+ *  or empty message. */
+function isValidPayload<T extends Record<string, unknown>>(
+  payload: unknown,
+  requiredKeys: (keyof T)[],
+): payload is T {
+  if (!payload || typeof payload !== 'object') return false;
+  return requiredKeys.every((key) => key in payload);
+}
+
 // Type declaration for renderer
 declare global {
   interface Window {
@@ -384,9 +474,10 @@ declare global {
       killTerminal: (terminalId: string) => void;
       listTerminals: () => Promise<Array<{ id: string; agentName: string; projectId?: number; provider: 'claude' | 'kimi' | 'codex' }>>;
       onTerminalData: (callback: (data: TerminalData) => void) => () => void;
-      onAgentSpawned: (callback: (data: { agentName: string; terminalId: string }) => void) => () => void;
+      onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void) => () => void;
       onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void) => () => void;
       onPtySpawnFailed: (callback: (payload: SpawnFailedPayload) => void) => () => void;
+      onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
       reseedLifecycle: () => Promise<void>;
@@ -414,17 +505,13 @@ declare global {
       onOAuthCallback: (callback: (data: { success: boolean; code?: string; state?: string; error?: { code: string; message: string } }) => void) => () => void;
       readClipboardText: () => Promise<string>;
       triggerPaste: () => Promise<void>;
-      sendTerminalWithImages: (payload: {
-        terminalId: string;
-        text: string;
-        images: Array<{ id: string; name: string; type: string; data: ArrayBuffer }>;
-      }) => Promise<{ success: boolean; error?: string }>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
       sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
+      sendAcpMessage: (payload: AcpSendMessagePayload) => Promise<void>;
       onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;

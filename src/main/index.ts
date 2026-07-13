@@ -1,6 +1,5 @@
 // Load sibling .env before any module reads process.env. This lets the installed
-// app configure secrets (VSQL_CACHE_URL, VIBESQL_CONTAINER_SECRET, etc.) without
-// relying on shell env vars (WO terminal-provider-unification upstream config).
+// app configure secrets without relying on shell env vars.
 import './loadEnv';
 
 import { app, BrowserWindow, ipcMain, shell, session, dialog, clipboard } from 'electron';
@@ -8,7 +7,7 @@ import { autoUpdater } from 'electron-updater';
 import net from 'net';
 import { execSync } from 'child_process';
 import path from 'path';
-import { setupPtyHandlers, killAllPty, sendTerminalWithImages } from './pty';
+import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus } from './acp-api-client';
@@ -20,10 +19,10 @@ import { startSpawnOrchestrator, stopSpawnOrchestrator } from './spawn-orchestra
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
-import { IPC_CHANNELS, type TerminalImagePastePayload } from '../shared/types';
+import { IPC_CHANNELS } from '../shared/types';
 import { colonizeWorkspace } from './colonize';
-import { cloudEndpointsSnapshot } from './env';
-import { buildVsqlCacheAuthHeaders, getVsqlCacheUrl, isVsqlCacheReportingEnabled } from './vsql-cache-client';
+import { VIBE_API_URL, cloudEndpointsSnapshot } from './env';
+import { buildVsqlCacheAuthHeaders } from './vsql-cache-client';
 
 // --- Install-time / headless colonization (NSIS customInstall) -------------
 // The installer invokes the just-installed exe headless:
@@ -196,7 +195,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false, // Desktop app — no CORS/same-origin restrictions needed
+      // Dev-only: disable CORS/same-origin so the renderer can reach the local
+      // Vite dev server (localhost:40020) and the acp-api sidecar. This is
+      // intentional for local development and produces console warnings about
+      // disabled webSecurity.
+      //
+      // Risk: renderer can load remote/insecure content. Mitigation: in
+      // packaged production builds the renderer loads file:// resources and
+      // runs with webSecurity: true. Dev builds intentionally keep it false.
+      // allowRunningInsecureContent stays false in all configurations.
+      webSecurity: !isDev,
+      allowRunningInsecureContent: false,
     },
   });
 
@@ -304,13 +313,6 @@ function setupIpcHandlers() {
     mainWindow?.webContents.paste();
   });
 
-  // Terminal image paste: renderer stages clipboard image bytes; main writes
-  // them to temp PNGs and emits provider-specific PTY input.
-  ipcMain.handle(IPC_CHANNELS.TERMINAL_SEND_WITH_IMAGES, async (_, payload: TerminalImagePastePayload) => {
-    const { terminalId, text, images } = payload;
-    return sendTerminalWithImages(terminalId, text, images);
-  });
-
   // Start OAuth callback server
   if (mainWindow) {
     startOAuthServer(mainWindow);
@@ -356,21 +358,15 @@ function setupIpcHandlers() {
     return getApiLogs();
   });
 
-  // vsql-cache auth/context headers (main-process container secret + user/project context)
+  // Agent-output auth/context headers (PayEzVibe API mediated)
   ipcMain.handle(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, async (_, method: string, path: string) => {
-    if (!isVsqlCacheReportingEnabled()) {
-      // Silently report that vsql-cache is disabled so the renderer can stop
-      // trying to connect instead of retrying and spamming the main-process log.
-      return { disabled: true };
-    }
-
     try {
       const headers = await buildVsqlCacheAuthHeaders(method, path);
-      // Include the configured base URL so the renderer honors VSQL_CACHE_URL
-      // instead of using a compiled default (WO terminal-provider-unification).
-      return { url: getVsqlCacheUrl(), ...headers };
+      // Return the active PayEzVibe API base URL and bearer token. The desktop
+      // never holds the backend cache container secret.
+      return { url: VIBE_API_URL, ...headers };
     } catch (e) {
-      console.error('[vsql-cache] auth headers error:', e);
+      console.error('[vibe-api] agent-output auth headers error:', e);
       return { error: String(e) };
     }
   });
@@ -411,10 +407,6 @@ app.whenReady().then(async () => {
   // Startup summary (quiet mode - agents can query logs via API)
   console.log(`[ACP] Platform ready on port ${cbPort || '?'}`);
   console.log(`[ACP] API: ${backendAvailable ? '✓' : '✗'} | Logs: GET /v1/platform/logs`);
-
-  // Clean up pasted-image temp files older than 24h on every boot.
-  const { cleanupOldPastedImages } = await import('./lib/imagePaste');
-  cleanupOldPastedImages().catch((err) => console.warn('[ACP] Pasted-image cleanup failed:', err));
 
   // Wave C lifecycle poller — runs once backend is confirmed up,
   // talks to acp-api which proxies to cloud. Emits project-changed /

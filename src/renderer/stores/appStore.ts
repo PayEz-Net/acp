@@ -47,6 +47,7 @@ interface AppStore {
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
   setAgentTerminalId: (agentId: string, terminalId: string) => void;
+  setAgentRuntimeProvider: (agentId: string, provider: AgentConfig['provider']) => void;
   setSettings: (settings: AppSettings) => void;
   setAgentProvider: (provider: AgentConfig['provider']) => void;
   setBackendAvailable: (available: boolean) => void;
@@ -90,11 +91,28 @@ export const useAppStore = create<AppStore>((set) => ({
   toggleLogs: () => set((s) => ({ showLogs: !s.showLogs })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
-  setAgents: (configs) => set({
-    agents: configs.map((config) => ({
-      ...config,
-      status: 'offline' as const,
-    })),
+  setAgents: (configs) => set((state) => {
+    const existingById = new Map(state.agents.map((a) => [a.id, a]));
+    const preserved = configs.filter((c) => {
+      const existing = existingById.get(c.id);
+      return existing && (existing.terminalId || existing.runtimeProvider);
+    });
+    if (preserved.length > 0) {
+      console.log(`[appStore] setAgents preserving PTY bindings for: ${preserved.map((c) => c.name).join(', ')}`);
+    }
+    return {
+      agents: configs.map((config) => {
+        const existing = existingById.get(config.id);
+        return {
+          ...config,
+          status: 'offline' as const,
+          // Preserve live PTY bindings across team-sync reconcile so mail
+          // PTY injection and terminal surfaces keep working after polls.
+          terminalId: existing?.terminalId,
+          runtimeProvider: existing?.runtimeProvider,
+        };
+      }),
+    };
   }),
 
   updateAgentStatus: (id, status) => set((state) => ({
@@ -106,6 +124,12 @@ export const useAppStore = create<AppStore>((set) => ({
   setAgentTerminalId: (agentId, terminalId) => set((state) => ({
     agents: state.agents.map((a) =>
       a.id === agentId ? { ...a, terminalId } : a
+    ),
+  })),
+
+  setAgentRuntimeProvider: (agentId, provider) => set((state) => ({
+    agents: state.agents.map((a) =>
+      a.id === agentId ? { ...a, runtimeProvider: provider } : a
     ),
   })),
 

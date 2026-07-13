@@ -6,8 +6,8 @@
  */
 
 export type TelemetryEvent =
-  | { event: 'terminal_image_paste_sent'; provider: string; imageCount: number; totalSizeBytes: number }
-  | { event: 'terminal_image_paste_failed'; errorCode: string };
+  | { event: 'image_paste_sent'; imageCount: number; totalSizeBytes: number }
+  | { event: 'image_paste_failed'; errorCode: string };
 
 const queue: TelemetryEvent[] = [];
 

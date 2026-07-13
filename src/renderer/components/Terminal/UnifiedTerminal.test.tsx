@@ -9,6 +9,7 @@ import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAcpSessionStore } from '../../stores/acpSessionStore';
+import { getTelemetryQueue, clearTelemetryQueue } from '../../lib/telemetry';
 import type { AgentState } from '@shared/types';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -17,8 +18,9 @@ const mockWriteTerminal = vi.fn();
 const mockResizeTerminal = vi.fn();
 const mockReadClipboardText = vi.fn();
 const mockTriggerPaste = vi.fn();
-const mockSendTerminalWithImages = vi.fn();
+
 const mockSendAcpPrompt = vi.fn().mockResolvedValue(undefined);
+const mockSendAcpMessage = vi.fn().mockResolvedValue(undefined);
 const mockSendAcpCancel = vi.fn().mockResolvedValue(undefined);
 const mockSendAcpPermissionResponse = vi.fn().mockResolvedValue(undefined);
 
@@ -54,8 +56,8 @@ beforeEach(() => {
     resizeTerminal: mockResizeTerminal,
     readClipboardText: mockReadClipboardText,
     triggerPaste: mockTriggerPaste,
-    sendTerminalWithImages: mockSendTerminalWithImages,
     sendAcpPrompt: mockSendAcpPrompt,
+    sendAcpMessage: mockSendAcpMessage,
     sendAcpCancel: mockSendAcpCancel,
     sendAcpPermissionResponse: mockSendAcpPermissionResponse,
   });
@@ -75,6 +77,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  clearTelemetryQueue();
 });
 
 function createImageFile(name = 'test.png', type = 'image/png'): File {
@@ -202,7 +205,14 @@ function setMeasuredSizes(host: HTMLElement, measure: HTMLElement, scroll?: HTML
   Object.defineProperty(target, 'clientWidth', { configurable: true, value: 584 }); // 600 - 16px padding
   Object.defineProperty(target, 'clientHeight', { configurable: true, value: 284 }); // 300 - 16px padding
   Object.defineProperty(target, 'scrollHeight', { configurable: true, value: 10000 });
-  Object.defineProperty(target, 'scrollTop', { configurable: true, value: 0 });
+  let currentScrollTop = 0;
+  Object.defineProperty(target, 'scrollTop', {
+    configurable: true,
+    get: () => currentScrollTop,
+    set: (value) => {
+      currentScrollTop = value;
+    },
+  });
   Object.defineProperty(target, 'getBoundingClientRect', {
     configurable: true,
     value: () => ({ width: 584, height: 284, x: 0, y: 0, top: 0, left: 0, bottom: 284, right: 584, toJSON: () => ({}) }),
@@ -259,12 +269,10 @@ describe('UnifiedTerminal', () => {
     // Live placeholders do not stack inside the scroll surface.
     expect(container.querySelector('[data-testid="thinking-live"]')).toBeNull();
     expect(container.querySelector('[data-testid="thinking-block"]')).toBeNull();
-    // The footer shows the compact Thinking… status pill.
-    expect(container.textContent).toContain('Thinking…');
     cleanup(root, container);
   });
 
-  it('keeps the footer thinking indicator current as live thinking updates', async () => {
+  it('keeps the stream free of live-thinking placeholders as thinking updates', async () => {
     useAppStore.setState({ settings: { showThinking: true } as any });
     const t1 = new Date().toISOString();
     useAgentOutputStore.setState({
@@ -285,7 +293,6 @@ describe('UnifiedTerminal', () => {
     };
 
     const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
-    expect(container.textContent).toContain('Thinking…');
 
     act(() => {
       useAgentOutputStore.setState({
@@ -295,12 +302,8 @@ describe('UnifiedTerminal', () => {
       });
     });
 
-    // Footer drops the live indicator; stream now shows the finalized answer.
+    // Stream now shows the finalized answer instead of a live placeholder.
     expect(container.textContent).toContain('Here is the answer');
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 150));
-    });
-    expect(container.textContent).toContain('Busy');
     cleanup(root, container);
   });
 
@@ -579,6 +582,98 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
+    it('collapses a large multi-line paste into a placeholder', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const largeText = 'line1\nline2\nline3\nline4\nline5\nline6';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, largeText);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('[pasted code 6 lines]');
+      cleanup(root, container);
+    });
+
+    it('collapses a very long single-line paste into a placeholder', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const longText = 'x'.repeat(1001);
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, longText);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('[pasted code 1 lines]');
+      cleanup(root, container);
+    });
+
+    it('sends the full text when a collapsed paste placeholder is submitted', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const largeText = 'a\nb\nc\nd\ne\nf';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, largeText);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('[pasted code 6 lines]');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', `${largeText}\r`);
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('clears a collapsed paste with Escape', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('[pasted code 6 lines]');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('clears a collapsed paste with Backspace', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('[pasted code 6 lines]');
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      });
+
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
     it('does not route composer paste to the terminal surface', async () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
@@ -608,39 +703,6 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('sends staged images via sendTerminalWithImages on Enter', async () => {
-      mockSendTerminalWithImages.mockResolvedValue({ success: true });
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      act(() => {
-        input.value = 'what is this?';
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      });
-
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 100));
-      });
-
-      expect(mockSendTerminalWithImages).toHaveBeenCalledTimes(1);
-      const payload = mockSendTerminalWithImages.mock.lastCall?.[0];
-      expect(payload.terminalId).toBe('t1');
-      expect(payload.text).toBe('what is this?');
-      expect(payload.images).toHaveLength(1);
-      expect(input.value).toBe('');
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
-      cleanup(root, container);
-    });
-
     it('clears staged images when Escape is pressed', async () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
@@ -661,7 +723,7 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('shows a provider mismatch notice for unsupported runtimes', async () => {
+    it('shows an ACP-only notice for non-ACP mode', async () => {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: null } as any,
       });
@@ -674,31 +736,7 @@ describe('UnifiedTerminal', () => {
         await new Promise((r) => setTimeout(r, 50));
       });
 
-      expect(container.querySelector('[data-testid="terminal-provider-mismatch"]')).not.toBeNull();
-      cleanup(root, container);
-    });
-
-    it('sends pasted images immediately when instant-send is enabled and the composer is empty', async () => {
-      mockSendTerminalWithImages.mockResolvedValue({ success: true });
-      useAppStore.setState({ settings: { instantSendPastedImages: true } as any });
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 100));
-      });
-
-      expect(mockSendTerminalWithImages).toHaveBeenCalledTimes(1);
-      const payload = mockSendTerminalWithImages.mock.lastCall?.[0];
-      expect(payload.terminalId).toBe('t1');
-      expect(payload.text).toBe('');
-      expect(payload.images).toHaveLength(1);
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+      expect(container.querySelector('[data-testid="terminal-acp-only"]')).not.toBeNull();
       cleanup(root, container);
     });
 
@@ -737,6 +775,30 @@ describe('UnifiedTerminal', () => {
       });
 
       expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+      expect(document.activeElement).toBe(input);
+      cleanup(root, container);
+    });
+
+    it('emits image_paste_failed telemetry when sending images in unsupported provider mode', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: null } as any,
+      });
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      const failedEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_failed');
+      expect(failedEvent).toBeDefined();
+      expect((failedEvent as any).errorCode).toBe('UNSUPPORTED_PROVIDER');
       cleanup(root, container);
     });
 
@@ -1023,7 +1085,6 @@ describe('UnifiedTerminal', () => {
 
       expect(container.querySelector('[data-testid="acp-transcript"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="permission-request-card"]')).not.toBeNull();
-      expect(container.textContent).toContain('Tool…');
       expect(container.textContent).toContain('Kimi Code CLI 1.0.0');
 
       const approveBtn = container.querySelector('[data-testid="permission-option-approve"]') as HTMLButtonElement;
@@ -1083,6 +1144,117 @@ describe('UnifiedTerminal', () => {
         expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'List files' }),
       );
       expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('fails an active assistant turn when the user sends a new message', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      const store = useAcpSessionStore.getState();
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      store.startUserTurn('NextPert', 's1', 'First');
+      store.startAssistantTurn('NextPert', 's1');
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          sessionId: 's1',
+          content: { type: 'content', content: { type: 'text', text: 'Working…' } },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'Second';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      const session = useAcpSessionStore.getState().getSession('NextPert');
+      expect(session?.turns).toHaveLength(4);
+      expect(session?.turns[1].role).toBe('assistant');
+      expect(session?.turns[1].status).toBe('error');
+      expect(session?.activeTurnId).toBe(session?.turns[3].id);
+      expect(session?.turns[3].role).toBe('assistant');
+      expect(session?.turns[3].status).toBe('thinking');
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'Second' }),
+      );
+
+      cleanup(root, container);
+    });
+
+    it('fails the active assistant turn when sendAcpPrompt rejects', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      mockSendAcpPrompt.mockRejectedValueOnce(new Error('IPC timeout'));
+
+      const store = useAcpSessionStore.getState();
+      store.applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        // Flush the sendAcpPrompt rejection and failActiveTurn update.
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const session = useAcpSessionStore.getState().getSession('NextPert');
+      const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
+      expect(assistantTurn?.status).toBe('error');
+      expect(assistantTurn?.contentText).toContain('IPC timeout');
+      expect(container.textContent).toContain('IPC timeout');
+
       cleanup(root, container);
     });
 
@@ -1192,6 +1364,397 @@ describe('UnifiedTerminal', () => {
       expect(container.textContent).toContain('raw PTY line');
       cleanup(root, container);
     });
+
+    it('stages an image pasted into the composer in ACP mode', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+      cleanup(root, container);
+    });
+
+    it('sends structured content blocks via sendAcpMessage when exposed', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      act(() => {
+        input.value = 'what is this?';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
+      const payload = mockSendAcpMessage.mock.lastCall?.[0];
+      expect(payload.agent).toBe('NextPert');
+      expect(payload.sessionId).toBe('s1');
+      expect(payload.content).toHaveLength(2);
+      expect(payload.content[0]).toEqual({ type: 'text', text: 'what is this?' });
+      expect(payload.content[1].type).toBe('image');
+      expect(payload.content[1].mimeType).toBe('image/png');
+      expect(payload.content[1].data).toMatch(/^[A-Za-z0-9+/=]+$/);
+      expect(input.value).toBe('');
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+
+      const sentEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_sent');
+      expect(sentEvent).toBeDefined();
+      expect(sentEvent).not.toHaveProperty('provider');
+
+      cleanup(root, container);
+    });
+
+    it('allows image paste in ACP mode regardless of provider name', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'custom-acp-harness' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Custom ACP' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'custom-acp-harness' as any,
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="terminal-acp-only"]')).toBeNull();
+
+      act(() => {
+        input.value = 'what is this?';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
+      const payload = mockSendAcpMessage.mock.lastCall?.[0];
+      expect(payload.agent).toBe('NextPert');
+      expect(payload.sessionId).toBe('s1');
+      expect(payload.content).toHaveLength(2);
+      expect(payload.content[0]).toEqual({ type: 'text', text: 'what is this?' });
+      expect(payload.content[1].type).toBe('image');
+
+      cleanup(root, container);
+    });
+
+    it('clears staged images when Escape is pressed in ACP mode', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    it('emits image_paste_failed telemetry when ACP send rejects', async () => {
+      mockSendAcpMessage.mockRejectedValueOnce(new Error('IPC failure'));
+
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      const failedEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_failed');
+      expect(failedEvent).toBeDefined();
+      expect((failedEvent as any).errorCode).toBe('IPC_ERROR');
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+
+      const session = useAcpSessionStore.getState().getSession('NextPert');
+      expect(session?.activeTurnId).toBeNull();
+      const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
+      expect(assistantTurn?.status).toBe('error');
+      expect(assistantTurn?.contentText).toContain('IPC failure');
+      cleanup(root, container);
+    });
+
+    it('stages both image and text when the clipboard contains both in ACP mode', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()], 'look at this');
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+      expect(input.value).toBe('look at this');
+      cleanup(root, container);
+    });
+
+    it('shows a validation error for oversized images in ACP mode', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        const file = new File(['x'], 'huge.png', { type: 'image/png' });
+        Object.defineProperty(file, 'size', { value: 11 * 1024 * 1024 });
+        pasteFilesOnInput(input, [file]);
+        await new Promise((r) => setTimeout(r, 50));
+      });
+
+      const errorEl = container.querySelector('[data-testid="terminal-image-error"]');
+      expect(errorEl).not.toBeNull();
+      expect(errorEl?.textContent).toContain('max 10.0 MB');
+      cleanup(root, container);
+    });
+
+    it('instant-sends a pasted image in ACP mode when the composer is empty', async () => {
+      useAppStore.setState({ settings: { instantSendPastedImages: true } as any });
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, [createImageFile()]);
+        await new Promise((r) => setTimeout(r, 100));
+      });
+
+      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
+      const payload = mockSendAcpMessage.mock.lastCall?.[0];
+      expect(payload.content).toHaveLength(1);
+      expect(payload.content[0].type).toBe('image');
+      expect(input.value).toBe('');
+      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+      cleanup(root, container);
+    });
   });
 
   it('injects a deterministic user-source line when sending input in PTY mode', () => {
@@ -1267,6 +1830,67 @@ describe('UnifiedTerminal', () => {
     expect(userSpan).not.toBeNull();
     expect(userSpan?.classList.contains('break-words')).toBe(true);
     expect(userSpan?.classList.contains('overflow-x-auto')).toBe(false);
+    cleanup(root, container);
+  });
+
+  it('scrolls to bottom when the New output button is clicked in ACP mode', () => {
+    // Initialize an ACP session so the transcript surface is active.
+    useAcpSessionStore.getState().applyEvent({
+      agent: 'NextPert',
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'initialized',
+        sessionId: 's1',
+        capabilities: {},
+        agentInfo: { name: 'Kimi', version: '1.0.0' },
+      },
+    });
+
+    // Seed enough PTY lines that the button logic has something to track.
+    useAgentOutputStore.setState({
+      lines: Array.from({ length: 5 }, (_, i) => ({
+        id: `line-${i}`,
+        agent: 'NextPert',
+        terminal_id: 't1',
+        line: `Line ${i}`,
+        source: 'agent' as const,
+        ts: new Date().toISOString(),
+      })),
+    });
+
+    const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+    const host = container.querySelector('[data-testid="terminal-host"]') as HTMLElement;
+    const measure = container.querySelector('[data-testid="terminal-measure"]') as HTMLElement;
+    const scroll = container.querySelector('[role="log"]') as HTMLElement;
+    setMeasuredSizes(host, measure, scroll);
+
+    // Scroll up so the surface pauses following.
+    act(() => {
+      scroll.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+
+    // Add another line while paused to trigger the "New output" button.
+    act(() => {
+      useAgentOutputStore.getState().addLine({
+        agent: 'NextPert',
+        terminal_id: 't1',
+        line: 'New line',
+        source: 'agent',
+        ts: new Date().toISOString(),
+      });
+    });
+
+    const button = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('New output'),
+    );
+    expect(button).toBeDefined();
+
+    act(() => {
+      button!.click();
+    });
+
+    expect(scroll.scrollTop + scroll.clientHeight).toBe(scroll.scrollHeight);
+
     cleanup(root, container);
   });
 });

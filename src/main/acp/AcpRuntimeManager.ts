@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { BrowserWindow } from 'electron';
 import {
   type AcpAgentCapabilities,
   type AcpAgentInfo,
@@ -9,12 +10,13 @@ import {
   type AcpSessionUpdate,
   type AcpToolCall,
 } from '../../shared/acpTypes';
-import type { TerminalProvider } from '../../shared/types';
+import { IPC_CHANNELS, type AgentSessionStartFailedPayload, type TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import { getProviderConfig, type ProviderConfig } from './providerConfigs';
 import { buildAgentBootPrompt } from './bootPrompt';
 import { acpApiGetAgentProfile, acpApiGetUnreadMailCount } from '../acp-api-client';
+import { startAgentSession, endAgentSession } from '../agentSessionLifecycle';
 
 export interface AcpRuntimeOptions {
   agentName: string;
@@ -22,11 +24,28 @@ export interface AcpRuntimeOptions {
   projectId?: number;
   bootPrompt?: string;
   effort?: string;
+  /** Numeric agent id from the project team table. Used to start a PayEzVibe
+   *  agent session while this runtime is alive. */
+  agentId?: number;
 }
 
 interface PendingPermission {
   requestId: number | string;
   resolve: (optionId: string) => void;
+}
+
+// Global serialization lock for ACP provider initialization. Kimi's CLI has
+// shared global state (~/.kimi config, lock files, etc.) that races when N
+// processes initialize in parallel, producing -32603 internal errors. Running
+// initialize/session.new one-at-a-time eliminates that contention.
+let initLock = Promise.resolve();
+
+async function acquireInitLock(): Promise<() => void> {
+  const oldLock = initLock;
+  let release: () => void;
+  initLock = new Promise<void>((resolve) => { release = resolve; });
+  await oldLock;
+  return release!;
 }
 
 export class AcpRuntimeManager extends EventEmitter {
@@ -76,6 +95,43 @@ export class AcpRuntimeManager extends EventEmitter {
   async start(): Promise<void> {
     if (this.process) return;
 
+    const maxAttempts = 3;
+    let lastErr: Error | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.startOnce();
+        return;
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        console.warn(`[ACP] start attempt ${attempt}/${maxAttempts} failed for ${this.options.agentName}: ${lastErr.message}`);
+        this.cleanupProcess();
+        if (attempt < maxAttempts) {
+          const delay = attempt * 2000;
+          console.log(`[ACP] retrying ${this.options.agentName} in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+    const finalErr = lastErr ?? new Error(`ACP runtime failed to start for ${this.options.agentName}`);
+    this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: finalErr.message });
+    throw finalErr;
+  }
+
+  private cleanupProcess(): void {
+    if (this.process) {
+      try {
+        this.process.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+      this.process = null;
+    }
+    this.sessionId = null;
+    this.initialized = false;
+    void endAgentSession(this.id, 'normal');
+  }
+
+  private async startOnce(): Promise<void> {
     const [command, ...args] = this.provider.acpCommand;
     this.process = new AcpProcess({
       command,
@@ -96,6 +152,11 @@ export class AcpRuntimeManager extends EventEmitter {
     });
 
     this.process.on('stderr', (text: string) => {
+      // Log startup stderr to console so Kimi internal errors (-32603 etc.) are
+      // visible without relying on the renderer ACP event surface.
+      if (!this.initialized) {
+        console.error(`[ACP] stderr from ${this.options.agentName}: ${text.trim()}`);
+      }
       this.emitAcpEvent({ sessionUpdate: 'stderr', sessionId: this.sessionId ?? undefined, text });
     });
 
@@ -104,6 +165,7 @@ export class AcpRuntimeManager extends EventEmitter {
     });
 
     this.process.on('exit', (code: number | null, signal: string | null) => {
+      void endAgentSession(this.id, 'normal');
       this.emitAcpEvent({
         sessionUpdate: 'error',
         sessionId: this.sessionId ?? undefined,
@@ -113,67 +175,76 @@ export class AcpRuntimeManager extends EventEmitter {
 
     this.process.start();
 
+    // Serialize the initialize handshake across all ACP runtimes to avoid Kimi
+    // shared-global-state races that surface as -32603 internal errors.
+    const releaseLock = await acquireInitLock();
+    let initResult: Record<string, unknown>;
+    let sessionResult: Record<string, unknown>;
     try {
-      const initResult = (await this.process.request('initialize', {
+      initResult = (await this.process.request('initialize', {
         protocolVersion: 1,
         capabilities: this.provider.defaultCapabilities,
         clientInfo: { name: 'acp-desktop', version: '1.0.0' },
       })) as Record<string, unknown>;
 
-      const sessionResult = (await this.process.request('session/new', {
+      sessionResult = (await this.process.request('session/new', {
         mcpServers: [],
         cwd: this.options.workDir,
       })) as Record<string, unknown>;
-
-      this.sessionId = (sessionResult.sessionId as string) ?? null;
-      this.initialized = true;
-      this.capabilities = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
-
-      this.emitAcpEvent({
-        sessionUpdate: 'initialized',
-        sessionId: this.sessionId ?? '',
-        capabilities: this.capabilities,
-        agentInfo: (initResult.agentInfo as AcpAgentInfo) ?? { name: this.provider.displayName },
-      });
-
-      this.process.notify('session/list_commands', { sessionId: this.sessionId });
-
-      // Restore the automatic onboarding kickoff that the PTY fallback path
-      // has always provided. The ACP path (e.g., `kimi acp`) no longer shows
-      // a banner, so the agent would otherwise sit idle until the user typed
-      // something manually. Prefer the Wave-D boot prompt when the orchestrator
-      // supplies one; otherwise synthesize a code-generated onboarding prompt
-      // so we never rely on per-agent markdown files or the "report as" skill.
-      //
-      // CRITICAL: pre-fetch identity/mail for ACP before the first turn. Kimi's
-      // ACP adapter crashes with -32603 if the agent emits a tool call before the
-      // session is fully initialized, so we must embed the data instead of asking
-      // the agent to curl it on turn one.
-      let kickoff = this.options.bootPrompt?.trim() ?? '';
-      if (!kickoff) {
-        try {
-          const [profile, unreadCount] = await Promise.all([
-            acpApiGetAgentProfile(this.options.agentName),
-            acpApiGetUnreadMailCount(this.options.agentName),
-          ]);
-          console.log(`[ACP] boot prompt data for ${this.options.agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'null'}`);
-          kickoff = buildAgentBootPrompt(this.options.agentName, { profile, unreadCount });
-        } catch (err) {
-          console.warn(`[ACP] failed to pre-fetch boot data for ${this.options.agentName}:`, err);
-          kickoff = buildAgentBootPrompt(this.options.agentName);
-        }
-      }
-      this.prompt(kickoff).catch((err) => {
-        console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
-      });
-    } catch (err) {
-      this.emitAcpEvent({
-        sessionUpdate: 'error',
-        sessionId: this.sessionId ?? undefined,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      throw err;
+    } finally {
+      releaseLock();
     }
+
+    this.sessionId = (sessionResult.sessionId as string) ?? null;
+    this.initialized = true;
+    this.capabilities = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
+
+    if (this.options.agentId != null) {
+      void (async () => {
+        const result = await startAgentSession(this.id, this.options.agentId!, this.options.projectId);
+        if (!result.ok) {
+          this.notifySessionStartFailed(result.status, result.message);
+        }
+      })();
+    }
+
+    this.emitAcpEvent({
+      sessionUpdate: 'initialized',
+      sessionId: this.sessionId ?? '',
+      capabilities: this.capabilities,
+      agentInfo: (initResult.agentInfo as AcpAgentInfo) ?? { name: this.provider.displayName },
+    });
+
+    this.process.notify('session/list_commands', { sessionId: this.sessionId });
+
+    // Restore the automatic onboarding kickoff that the PTY fallback path
+    // has always provided. The ACP path (e.g., `kimi acp`) no longer shows
+    // a banner, so the agent would otherwise sit idle until the user typed
+    // something manually. Prefer the Wave-D boot prompt when the orchestrator
+    // supplies one; otherwise synthesize a code-generated onboarding prompt
+    // so we never rely on per-agent markdown files or the "report as" skill.
+    //
+    // CRITICAL: pre-fetch identity/mail for ACP before the first turn. Kimi's
+    // ACP adapter crashes with -32603 if the agent emits a tool call before the
+    // session is fully initialized, so we must embed the data instead of asking
+    // the agent to curl it on turn one.
+    let kickoff = this.options.bootPrompt?.trim() ?? '';
+    if (!kickoff) {
+      try {
+        const [profile, unreadCount] = await Promise.all([
+          acpApiGetAgentProfile(this.options.agentName),
+          acpApiGetUnreadMailCount(this.options.agentName),
+        ]);
+        console.log(`[ACP] boot prompt data for ${this.options.agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'null'}`);
+        kickoff = buildAgentBootPrompt(this.options.agentName, { profile, unreadCount });
+      } catch (err) {
+        console.warn(`[ACP] failed to pre-fetch boot data for ${this.options.agentName}:`, err);
+        kickoff = buildAgentBootPrompt(this.options.agentName);
+      }
+    }
+    this.prompt(kickoff).catch((err) => {
+      console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
+    });
   }
 
   async prompt(text: string): Promise<void> {
@@ -198,28 +269,46 @@ export class AcpRuntimeManager extends EventEmitter {
       throw new Error('ACP runtime not initialized');
     }
 
+    const sessionId = this.sessionId;
+    const PROMPT_TIMEOUT_MS = 120_000;
+    let settled = false;
+
+    // Defensive timeout: if the runtime streams all content but never returns a
+    // session/prompt result (the image-paste "Answering…" hang), fail the turn
+    // so the activity spinner clears instead of spinning forever.
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`session/prompt timed out after ${PROMPT_TIMEOUT_MS}ms`));
+      }, PROMPT_TIMEOUT_MS);
+    });
+
     // Send prompt without awaiting — the response arrives as streaming notifications.
-    this.process
-      .request('session/prompt', {
-        sessionId: this.sessionId,
-        prompt,
-      })
+    Promise.race([
+      this.process.request('session/prompt', { sessionId, prompt }),
+      timeoutPromise,
+    ])
       .then((result) => {
+        if (settled) return;
+        settled = true;
         // Kimi signals turn completion by returning { stopReason } from the
         // session/prompt request, not via a session/update notification. Convert
         // that response into the canonical turn_complete event so the renderer
-        // clears its activity spinner.
-        const stopReason = (result as Record<string, unknown>)?.stopReason;
-        if (typeof stopReason === 'string') {
-          this.emitAcpEvent({
-            sessionUpdate: 'turn_complete',
-            sessionId: this.sessionId ?? '',
-            stopReason,
-          });
-        }
+        // clears its activity spinner. If no stopReason is provided, default to
+        // 'end_turn' so the turn never hangs in an answering/thinking state.
+        const stopReason =
+          typeof (result as Record<string, unknown>)?.stopReason === 'string'
+            ? ((result as Record<string, unknown>).stopReason as string)
+            : 'end_turn';
+        this.emitAcpEvent({
+          sessionUpdate: 'turn_complete',
+          sessionId,
+          stopReason,
+        });
       })
       .catch((err) => {
-        this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });
+        if (settled) return;
+        settled = true;
+        this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: err.message });
       });
   }
 
@@ -241,6 +330,13 @@ export class AcpRuntimeManager extends EventEmitter {
   cancel(): void {
     if (!this.process || !this.sessionId) return;
     this.process.notify('session/cancel', { sessionId: this.sessionId });
+    // Defensively emit turn_complete so the renderer clears the activity spinner
+    // even if the runtime doesn't respond with its own completion event.
+    this.emitAcpEvent({
+      sessionUpdate: 'turn_complete',
+      sessionId: this.sessionId,
+      stopReason: 'cancel',
+    });
   }
 
   setMode(mode: string): void {
@@ -254,6 +350,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.process = null;
     this.sessionId = null;
     this.initialized = false;
+    void endAgentSession(this.id, 'normal');
   }
 
   respondToPermission(requestId: number | string, optionId: string, outcome = 'selected'): void {
@@ -365,6 +462,20 @@ export class AcpRuntimeManager extends EventEmitter {
         outcome,
         optionId,
       },
+    });
+  }
+
+  private notifySessionStartFailed(status: number | undefined, message: string): void {
+    const payload: AgentSessionStartFailedPayload = {
+      agentName: this.options.agentName,
+      terminalId: this.id,
+      status,
+      message,
+    };
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send(IPC_CHANNELS.AGENT_SESSION_START_FAILED, payload);
+      }
     });
   }
 

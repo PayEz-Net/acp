@@ -9,6 +9,8 @@ import { useChatStore } from '../stores/chatStore';
 import { useContractorStore } from '../stores/contractorStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useCheckinStore } from '../stores/checkinStore';
+import { useAgentOutputStore } from '../stores/agentOutputStore';
+import { useAcpSessionStore } from '../stores/acpSessionStore';
 import { resolveAgentProvider, shouldInjectMailToPty } from '../lib/agentProviders';
 
 /**
@@ -71,9 +73,32 @@ export function useAcpSse() {
   // still false; attempting once and letting the fetch fail/retry is safer than
   // missing the first push window.
   const hasAttemptedConnection = useRef(false);
+  // StrictMode/idempotence guard: prevents a second effect invocation from
+  // starting another connect while the first is still in flight, and prevents
+  // the (aborted) first StrictMode connect from flipping hasConnectedRef after
+  // cleanup has already reset it.
+  const connectingRef = useRef(false);
 
   useEffect(() => {
     console.log(`[AcpSse] Effect fired — backendAvailable: ${backendAvailable}`);
+
+    // Reset on every fresh mount so the first successful connect of THIS
+    // lifecycle is always treated as a first connect, never a reconnect.
+    hasConnectedRef.current = false;
+
+    // Idempotency guard: only one active SSE connection at a time. React's
+    // cleanup runs before the next effect invocation, so in normal lifecycles
+    // abortRef is null here. This catches pathological cases (e.g. rapid
+    // re-renders before cleanup) and prevents duplicate connections.
+    if (abortRef.current && !abortRef.current.signal.aborted) {
+      console.log('[AcpSse] Connection already active; skipping duplicate connect');
+      return;
+    }
+
+    if (connectingRef.current) {
+      console.log('[AcpSse] Connect already in flight; skipping duplicate connect');
+      return;
+    }
 
     // #225: surface connection state to the mail store so MailSidebar can show
     // a reconnecting/offline indicator (the silent-freeze fix, on the LIVE SSE
@@ -101,9 +126,11 @@ export function useAcpSse() {
     if (!backendAvailable && hasAttemptedConnection.current) {
       console.log('[AcpSse] Skipping — backend not available');
       setConn('disconnected');
+      connectingRef.current = false;
       return;
     }
 
+    connectingRef.current = true;
     let disposed = false;
     abortRef.current = new AbortController();
     let retryCount = 0;
@@ -181,11 +208,15 @@ export function useAcpSse() {
         setConn('connected');
         // #225: if we'd connected before, this is a RE-connect → catch up on
         // anything missed while down. First connect skips (useMail does it).
-        if (hasConnectedRef.current) {
+        // Guard on disposed/connectingRef to prevent a cleaned-up StrictMode
+        // invocation from flipping this flag after cleanup.
+        if (!disposed && hasConnectedRef.current) {
           console.log('[AcpSse] Reconnected — catch-up fetch');
           catchUp();
         }
-        hasConnectedRef.current = true;
+        if (!disposed) {
+          hasConnectedRef.current = true;
+        }
         retryCount = 0;
         lastPingRef.current = Date.now(); // treat connect as implicit ping
 
@@ -233,18 +264,47 @@ export function useAcpSse() {
                 // Per-agent provider overrides take precedence over the team
                 // runtime, which takes precedence over the global fallback.
                 const agentState = useAppStore.getState().agents.find(a => a.name === agentName);
+                const noticeText = `[ACP Mail] You have a message from ${from}: "${subject}" (id: ${id})`;
+
+                // Surface the alert visibly in the active transcript/output surface
+                // BEFORE the agent starts thinking, so the user knows what triggered it.
+                // Isolated try/catch: a visual-rendering bug must NEVER stop the actual mail push.
+                try {
+                  const acpSession = useAcpSessionStore.getState().sessions.get(agentName);
+                  console.log(`[AcpSse] Mail visual path for ${agentName}: sessionId=${acpSession?.sessionId ?? 'none'} terminalId=${agentState?.terminalId ?? 'none'}`);
+                  if (acpSession?.sessionId) {
+                    // ACP transcript mode: add a user turn so it renders in the structured transcript.
+                    console.log(`[AcpSse] Adding ACP user-turn notice for ${agentName}: ${noticeText}`);
+                    useAcpSessionStore.getState().startUserTurn(agentName, acpSession.sessionId, noticeText);
+                  } else if (agentState?.terminalId) {
+                    // PTY/bridge mode: add a raw info line to the terminal stream.
+                    console.log(`[AcpSse] Adding PTY info-line notice for ${agentName}: ${noticeText}`);
+                    useAgentOutputStore.getState().addLine({
+                      agent: agentName,
+                      terminal_id: agentState.terminalId,
+                      line: noticeText,
+                      ts: new Date().toISOString(),
+                      source: 'info',
+                    });
+                  } else {
+                    console.warn(`[AcpSse] No visual surface available for ${agentName}; cannot render mail notice`);
+                  }
+                } catch (visualErr) {
+                  console.error(`[AcpSse] Visual notice failed for ${agentName}; continuing with push:`, visualErr);
+                }
+
                 const provider = resolveAgentProvider(
                   agentState,
                   useProjectStore.getState().activeProject?.runtime_choice,
                   useAppStore.getState().settings?.agentProvider,
                 );
+                console.log(`[AcpSse] Resolved provider for ${agentName}: ${provider} (runtime=${agentState?.runtimeProvider ?? '-'} user=${agentState?.provider ?? '-'} team=${useProjectStore.getState().activeProject?.runtime_choice ?? '-'} global=${useAppStore.getState().settings?.agentProvider ?? '-'})`);
                 if (shouldInjectMailToPty(provider)) {
                   if (agentState?.terminalId) {
-                    const cmd = `[ACP mail] new mail from ${from}: "${subject}" (id: ${id}) — check your inbox`;
                     const tid = agentState.terminalId;
                     console.log(`[AcpSse] Injecting mail notice to ${agentName} terminal ${tid} via writeTerminal`);
                     setTimeout(() => {
-                      window.electronAPI.writeTerminal(tid, cmd + '\r\n');
+                      window.electronAPI.writeTerminal(tid, noticeText + '\r\n');
                     }, 500);
                   } else {
                     console.warn(`[AcpSse] Cannot inject mail notice to ${agentName}: no terminalId (provider=${provider})`);
@@ -443,9 +503,14 @@ export function useAcpSse() {
     return () => {
       console.log('[AcpSse] Disconnecting');
       disposed = true;
+      connectingRef.current = false;
       clearInterval(pingWatchdog);
       abortRef.current?.abort();
       abortRef.current = null;
+      // Reset first-connect flag on teardown so a remount (React StrictMode or
+      // a later reconnect after a clean disconnect) is treated as a first
+      // connect, not a reconnect that needs a catch-up fetch.
+      hasConnectedRef.current = false;
       setConn('disconnected');
     };
   }, [backendAvailable, agentNamesKey]);
