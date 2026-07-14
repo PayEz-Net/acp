@@ -65,6 +65,13 @@ export class AcpRuntimeManager extends EventEmitter {
   private inactivityTimer: ReturnType<typeof setInterval> | null = null;
   private promptSettledRef: { current: boolean } | null = null;
 
+  // Kimi's ACP runtime does not handle concurrent session/prompt requests on
+  // the same session; overlapping calls produce -32603 internal errors and can
+  // cause the in-flight turn to return an empty end_turn. Queue prompts so only
+  // one is ever in flight at a time.
+  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: () => void }> = [];
+  private promptInFlight = false;
+
   // Crash-recovery state. We track whether a kill was intentional so an
   // unexpected process exit can auto-restart, and we back off so a repeatedly
   // crashing runtime (e.g., Kimi cold-init race on Windows) doesn't spin forever.
@@ -352,7 +359,7 @@ export class AcpRuntimeManager extends EventEmitter {
       throw new Error('ACP runtime not initialized');
     }
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
-    this.sendPrompt(prompt);
+    await this.sendPrompt(prompt);
   }
 
   async sendMessage(content: AcpSendContentBlock[]): Promise<void> {
@@ -364,18 +371,43 @@ export class AcpRuntimeManager extends EventEmitter {
     const prompt: AcpSendContentBlock[] = supportsImage
       ? content
       : [{ type: 'text', text: this.buildMarkdownFallback(content) }];
-    this.sendPrompt(prompt);
+    await this.sendPrompt(prompt);
   }
 
-  private sendPrompt(prompt: AcpSendContentBlock[]): void {
+  private sendPrompt(prompt: AcpSendContentBlock[]): Promise<void> {
     if (!this.process?.isRunning() || !this.sessionId) {
       const message = 'ACP runtime not initialized';
       console.error(`[ACP ${this.options.agentName}] ${message}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
       this.scheduleRestart('runtime not running when prompt sent');
+      return Promise.resolve();
+    }
+
+    if (this.promptInFlight) {
+      return new Promise((resolve) => {
+        this.promptQueue.push({ prompt, resolve });
+        console.log(`[ACP ${this.options.agentName}] prompt queued (queueDepth=${this.promptQueue.length}, session=${this.sessionId})`);
+      });
+    }
+
+    this.executePrompt(prompt);
+    return Promise.resolve();
+  }
+
+  private executePrompt(prompt: AcpSendContentBlock[], resolveDispatched?: () => void): void {
+    if (!this.process?.isRunning() || !this.sessionId) {
+      const message = 'ACP runtime not initialized';
+      console.error(`[ACP ${this.options.agentName}] ${message}`);
+      this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
+      this.scheduleRestart('runtime not running when prompt sent');
+      resolveDispatched?.();
+      this.promptInFlight = false;
+      this.drainPromptQueue();
       return;
     }
 
+    this.promptInFlight = true;
+    resolveDispatched?.();
     const sessionId = this.sessionId;
     const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);
     console.log(`[ACP ${this.options.agentName}] >>> session/prompt (session=${sessionId}): ${preview}`);
@@ -417,6 +449,9 @@ export class AcpRuntimeManager extends EventEmitter {
           sessionId,
           stopReason,
         });
+        // Visibility aid: log the raw result so we can see what the runtime
+        // actually returned when the transcript appears empty.
+        console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result).slice(0, 2000));
       })
       .catch((err) => {
         if (settledRef.current) return;
@@ -425,7 +460,37 @@ export class AcpRuntimeManager extends EventEmitter {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[ACP ${this.options.agentName}] session/prompt failed (session=${sessionId}):`, err);
         this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: message });
+        // A JSON-RPC error on the actual prompt call usually means the runtime
+        // is in a broken state (not just slow). Kill and restart it so the next
+        // turn starts from a clean process instead of silently returning empty.
+        this.scheduleRestart(`session/prompt failed: ${message}`);
+      })
+      .finally(() => {
+        this.promptInFlight = false;
+        this.drainPromptQueue();
       });
+  }
+
+  private drainPromptQueue(): void {
+    if (!this.process?.isRunning() || !this.sessionId) {
+      // Runtime is down (likely restarting after an error). Fail any queued
+      // prompts so the user sees feedback rather than an eternal spinner.
+      if (this.promptQueue.length > 0) {
+        console.warn(`[ACP ${this.options.agentName}] dropping ${this.promptQueue.length} queued prompt(s): runtime not initialized`);
+        for (const queued of this.promptQueue) {
+          const preview = queued.prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 80);
+          this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: `Prompt dropped, runtime restarting: ${preview}` });
+        }
+        this.promptQueue = [];
+      }
+      return;
+    }
+
+    const next = this.promptQueue.shift();
+    if (next) {
+      console.log(`[ACP ${this.options.agentName}] draining prompt queue (remaining=${this.promptQueue.length}, session=${this.sessionId})`);
+      this.executePrompt(next.prompt, next.resolve);
+    }
   }
 
   private buildMarkdownFallback(content: AcpSendContentBlock[]): string {

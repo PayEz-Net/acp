@@ -75,6 +75,14 @@ export function AssistantTurn({ turn }: AssistantTurnProps) {
 
       {answerText.trim().length > 0 && <MarkdownProse>{answerText}</MarkdownProse>}
 
+      {/* Show a visible placeholder when the assistant finished the turn but
+          produced no message, so it doesn't look like the agent fell asleep. */}
+      {!hasThinking && !hasAnswer && turn.toolCalls.length === 0 && turn.status === 'done' && (
+        <div className="text-xs text-slate-500 italic px-2 py-1" data-testid="assistant-empty-response">
+          (no response)
+        </div>
+      )}
+
       {hasImageBlock(turn.content) && (
         <div className="flex flex-col gap-2 mt-2" data-testid="assistant-turn-images">
           {turn.content.map((block, idx) => renderImageBlock(block, idx))}

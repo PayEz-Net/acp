@@ -21,6 +21,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer?: ReturnType<typeof setTimeout>;
+  method: string;
 }
 
 export class AcpProcess extends EventEmitter {
@@ -88,8 +89,9 @@ export class AcpProcess extends EventEmitter {
       }
 
       const id = ++this.requestId;
-      const pending: PendingRequest = { resolve, reject };
+      const pending: PendingRequest = { resolve, reject, method };
       this.pendingRequests.set(id, pending);
+      console.log(`[ACP process] >>> ${method} id=${id}`);
 
       const message: AcpJsonRpcMessage = { jsonrpc: '2.0', id, method, params };
       this.write(message);
@@ -232,8 +234,10 @@ export class AcpProcess extends EventEmitter {
         if (pending.timer) clearTimeout(pending.timer);
         this.pendingRequests.delete(message.id);
         if (message.error) {
+          console.error(`[ACP process] <<< error id=${message.id} (${pending.method}): ${message.error.message} (code ${message.error.code})`);
           pending.reject(new Error(`${message.error.message} (code ${message.error.code})`));
         } else {
+          console.log(`[ACP process] <<< result id=${message.id} (${pending.method})`);
           pending.resolve(message.result);
         }
       }

@@ -69,6 +69,7 @@ vi.mock('./AcpProcess', () => ({
       this.requests.push({ method, params });
       const response = mockState.responses.get(method);
       if (response instanceof Error) throw response;
+      // Returning a Promise lets tests simulate in-flight streaming requests.
       return response;
     }
 
@@ -228,6 +229,45 @@ describe('AcpRuntimeManager', () => {
       sessionId: 'sess-complete',
       stopReason: 'end_turn',
     });
+  });
+
+  it('serializes concurrent prompts so only one session/prompt is in flight at a time', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-serial' });
+    await manager.start();
+
+    let deferredResolve: (value: unknown) => void = () => {};
+    const deferredPromise = new Promise<unknown>((resolve) => {
+      deferredResolve = resolve;
+    });
+    // Hold the first user prompt open so we can queue a second one against it.
+    mockState.setResponse('session/prompt', deferredPromise);
+
+    await manager.prompt('first');
+    await Promise.resolve();
+
+    const process = getProcess();
+    // Boot prompt + first user prompt have both been dispatched.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // Queue a second prompt while the first is still in flight.
+    const secondDispatched = manager.prompt('second');
+    await Promise.resolve();
+    // No new request should have been issued while the first is pending.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // Complete the first prompt; the second should then be sent.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    deferredResolve({ stopReason: 'end_turn' });
+    await secondDispatched;
+
+    const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
+    expect(promptRequests.length).toBe(3);
+    expect((promptRequests[1].params as any).prompt[0].text).toBe('first');
+    expect((promptRequests[2].params as any).prompt[0].text).toBe('second');
+
+    const completes = events.filter((e) => e.update.sessionUpdate === 'turn_complete');
+    expect(completes.length).toBeGreaterThanOrEqual(2);
   });
 
   it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
