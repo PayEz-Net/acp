@@ -7,7 +7,10 @@
 
 export type TelemetryEvent =
   | { event: 'image_paste_sent'; imageCount: number; totalSizeBytes: number }
-  | { event: 'image_paste_failed'; errorCode: string };
+  | { event: 'image_paste_failed'; errorCode: string }
+  | { event: 'composer_send'; combined: boolean }
+  | { event: 'composer_paste'; text: boolean; images: boolean; length: number }
+  | { event: 'composer_insert_text'; length: number; collapsed: boolean; combined: boolean };
 
 const queue: TelemetryEvent[] = [];
 

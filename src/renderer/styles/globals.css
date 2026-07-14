@@ -72,6 +72,28 @@ html, body, #root {
   -webkit-app-region: no-drag;
 }
 
+/* Any fixed overlay that covers the titlebar must explicitly opt out of the
+   drag region, otherwise the titlebar's -webkit-app-region: drag can swallow
+   pointer events for elements that overlap it (Electron hit-testing quirk). */
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Neutralize native OS button rendering on Windows so Tailwind utilities own
+   the background/font/color everywhere. Without this, <button> falls back to
+   the system button face (white bg, system font, black text) which is what the
+   screenshot showed across the titlebar and mail header. */
+button,
+[type='button'],
+[type='reset'],
+[type='submit'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: transparent;
+  font-family: inherit;
+  color: inherit;
+}
+
 /* Terminal pane styles */
 .terminal-pane {
   border: 1px solid var(--bg-tertiary);

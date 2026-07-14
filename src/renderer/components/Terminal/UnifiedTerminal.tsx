@@ -89,7 +89,7 @@ export function UnifiedTerminal({
   const measureRef = useRef<HTMLSpanElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const pastedBlockRef = useRef<{ placeholder: string; fullText: string } | null>(null);
+  const pastedBlockRef = useRef<{ placeholder: string; fullText: string; start: number; end: number } | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const terminalIdRef = useRef(terminalId);
   const userScrolledRef = useRef(false);
@@ -99,6 +99,8 @@ export function UnifiedTerminal({
   const [paused, setPaused] = useState(false);
   const [showNewOutput, setShowNewOutput] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [interruptFlash, setInterruptFlash] = useState<string | null>(null);
+  const [cancelRequested, setCancelRequested] = useState(false);
   const [pendingInstantSend, setPendingInstantSend] = useState(false);
   const errorId = useId();
 
@@ -293,6 +295,26 @@ export function UnifiedTerminal({
     onThinkingLiveChange?.(isAcpMode ? acpIsThinkingLive : isThinkingLive);
   }, [isAcpMode, acpIsThinkingLive, isThinkingLive, onThinkingLiveChange]);
 
+  // Clear the Escape-interrupt flash after a short delay so it acts as a
+  // transient confirmation rather than persistent state.
+  useEffect(() => {
+    if (!interruptFlash) return;
+    const timer = setTimeout(() => setInterruptFlash(null), 2000);
+    return () => clearTimeout(timer);
+  }, [interruptFlash]);
+
+  // Hide the ACP "Stopping…" indicator once the active turn actually stops.
+  useEffect(() => {
+    if (!cancelRequested) return;
+    if (
+      !acpActiveTurn ||
+      acpActiveTurn.status === 'done' ||
+      acpActiveTurn.status === 'error'
+    ) {
+      setCancelRequested(false);
+    }
+  }, [cancelRequested, acpActiveTurn]);
+
   const getSelectionText = useCallback((): string => {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return '';
@@ -363,38 +385,103 @@ export function UnifiedTerminal({
     }
   }, [agentName, handlePasteFallback]);
 
-  const insertTextAtCursor = useCallback((input: HTMLInputElement, text: string) => {
-    const start = input.selectionStart ?? input.value.length;
-    const end = input.selectionEnd ?? input.value.length;
-    const lineCount = text.split('\n').length;
-    const shouldCollapse =
-      lineCount >= PASTE_COLLAPSE_LINE_THRESHOLD || text.length >= PASTE_COLLAPSE_CHAR_THRESHOLD;
-
-    const mark = perfMark('composer-insert-text');
-
-    if (shouldCollapse) {
-      // Large code/text pastes get collapsed into a placeholder so the single-line
-      // composer doesn't render hundreds of lines. The full text is preserved and
-      // sent as the actual message when the user hits Enter.
-      const placeholder = `[pasted code ${lineCount} lines]`;
-      pastedBlockRef.current = { placeholder, fullText: text };
-      input.value = placeholder;
-    } else if (typeof input.setRangeText === 'function') {
-      // Use the native setRangeText API when available: it performs the splice
-      // and selection update in one optimized browser operation, avoiding the
-      // O(n) string copies that happen when we slice and concatenate manually.
-      // This makes pasting small-to-medium prompts into the composer feel instant.
-      input.setRangeText(text, start, end, 'end');
-    } else {
-      const newValue = input.value.slice(0, start) + text + input.value.slice(end);
-      input.value = newValue;
-      const newCursor = start + text.length;
-      input.setSelectionRange(newCursor, newCursor);
-    }
-
-    input.focus();
-    perfMeasure('composer-insert-text', mark, { length: text.length, collapsed: shouldCollapse });
+  // Find the exact position of the collapsed-paste placeholder in the current
+  // input value. Returns null if it is missing or appears more than once.
+  const findBlockRange = useCallback((input: HTMLInputElement) => {
+    const block = pastedBlockRef.current;
+    if (!block) return null;
+    const start = input.value.indexOf(block.placeholder);
+    if (start === -1) return null;
+    if (input.value.indexOf(block.placeholder, start + 1) !== -1) return null;
+    return { start, end: start + block.placeholder.length };
   }, []);
+
+  // Recompute the cached start/end for the collapsed block. Clears the block if
+  // the placeholder is no longer present exactly once.
+  const refreshBlockRange = useCallback(
+    (input: HTMLInputElement) => {
+      const range = findBlockRange(input);
+      if (!range || !pastedBlockRef.current) {
+        pastedBlockRef.current = null;
+        return null;
+      }
+      pastedBlockRef.current = { ...pastedBlockRef.current, ...range };
+      return range;
+    },
+    [findBlockRange],
+  );
+
+  // Remove the collapsed block from the input while preserving any typed text
+  // before or after it. The cursor is placed where the block started.
+  const removeBlock = useCallback(
+    (input: HTMLInputElement) => {
+      const range = findBlockRange(input);
+      if (!range) {
+        pastedBlockRef.current = null;
+        return;
+      }
+      const before = input.value.slice(0, range.start);
+      const after = input.value.slice(range.end);
+      input.value = before + after;
+      pastedBlockRef.current = null;
+      input.setSelectionRange(range.start, range.start);
+    },
+    [findBlockRange],
+  );
+
+  const insertTextAtCursor = useCallback(
+    (input: HTMLInputElement, text: string) => {
+      let start = input.selectionStart ?? input.value.length;
+      let end = input.selectionEnd ?? input.value.length;
+      const lineCount = text.split('\n').length;
+      const shouldCollapse =
+        lineCount >= PASTE_COLLAPSE_LINE_THRESHOLD || text.length >= PASTE_COLLAPSE_CHAR_THRESHOLD;
+
+      const mark = perfMark('composer-insert-text');
+
+      if (shouldCollapse) {
+        // Large code/text pastes get collapsed into a placeholder so the single-line
+        // composer doesn't render hundreds of lines. The full text is preserved and
+        // sent as the actual message when the user hits Enter.
+        const placeholder = `[pasted code ${lineCount} lines]`;
+        // Keep only one collapsed block at a time. If one already exists, remove it
+        // before inserting the new one so we never end up with two placeholders.
+        if (pastedBlockRef.current) {
+          removeBlock(input);
+          start = input.selectionStart ?? input.value.length;
+          end = input.selectionEnd ?? input.value.length;
+        }
+        pastedBlockRef.current = { placeholder, fullText: text, start, end: start + placeholder.length };
+        input.setRangeText(placeholder, start, end, 'end');
+      } else if (typeof input.setRangeText === 'function') {
+        // Use the native setRangeText API when available: it performs the splice
+        // and selection update in one optimized browser operation, avoiding the
+        // O(n) string copies that happen when we slice and concatenate manually.
+        // This makes pasting small-to-medium prompts into the composer feel instant.
+        input.setRangeText(text, start, end, 'end');
+        // A small paste that overlaps the placeholder corrupts the block; clear it.
+        if (pastedBlockRef.current) {
+          refreshBlockRange(input);
+        }
+      } else {
+        const newValue = input.value.slice(0, start) + text + input.value.slice(end);
+        input.value = newValue;
+        const newCursor = start + text.length;
+        input.setSelectionRange(newCursor, newCursor);
+        if (pastedBlockRef.current) {
+          refreshBlockRange(input);
+        }
+      }
+
+      input.focus();
+      perfMeasure('composer-insert-text', mark, {
+        length: text.length,
+        collapsed: shouldCollapse,
+        combined: shouldCollapse,
+      });
+    },
+    [removeBlock, refreshBlockRange],
+  );
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -502,17 +589,40 @@ export function UnifiedTerminal({
     const tid = terminalIdRef.current;
     const input = inputRef.current;
     if (!input) return;
-    // If the composer is showing a collapsed paste placeholder, send the stored
-    // full text instead of the placeholder.
-    const value = pastedBlockRef.current?.fullText ?? input.value;
+    // If the composer is showing a valid collapsed paste placeholder, combine
+    // any typed prompt text with the stored full paste. Use a blank line to
+    // separate the prompt from the code when both are present.
+    let value = input.value;
+    let combined = false;
+    const block = pastedBlockRef.current;
+    if (block) {
+      const range = findBlockRange(input);
+      const fullText = block.fullText;
+      if (range) {
+        const before = input.value.slice(0, range.start);
+        const after = input.value.slice(range.end);
+        const prompt = (before + after).trim();
+        value = prompt ? `${prompt}\n\n${fullText}` : fullText;
+        combined = prompt.length > 0;
+      }
+      pastedBlockRef.current = null;
+    }
     setSendError(null);
 
+    // Telemetry: flag sends that combine a typed prompt with a collapsed paste.
+    if (block) {
+      trackEvent({ event: 'composer_send', combined });
+    }
+
     if (isAcpMode) {
-      // If a previous assistant turn is still active, fail it before the user
+      setCancelRequested(false);
+      // If a previous assistant turn is still active, stop it before the user
       // starts a new turn. Otherwise the old turn's spinner stays live forever
-      // when the new assistant turn takes over activeTurnId.
+      // when the new assistant turn takes over activeTurnId. We intentionally
+      // do NOT mark this as a send error; the user interrupted an in-progress
+      // response by sending a follow-up message.
       if (useAcpSessionStore.getState().getSession(agentName)?.activeTurnId) {
-        useAcpSessionStore.getState().failActiveTurn(agentName, 'Interrupted by new message');
+        useAcpSessionStore.getState().stopActiveTurn(agentName, 'interrupted');
       }
 
       const sessionId = acpSession?.sessionId ?? '';
@@ -531,6 +641,7 @@ export function UnifiedTerminal({
 
       // No images: keep the original synchronous clear behavior for ACP text prompts.
       if (imagesToSend.length === 0) {
+        console.log(`[UnifiedTerminal ${agentName}] sending ACP prompt (session=${sessionId}): ${value.slice(0, 80)}`);
         window.electronAPI
           .sendAcpPrompt({ agent: agentName, sessionId, text: value })
           .catch((err: unknown) => {
@@ -540,7 +651,6 @@ export function UnifiedTerminal({
           });
         inputHistory.commit(value);
         input.value = '';
-        pastedBlockRef.current = null;
         return;
       }
 
@@ -549,13 +659,13 @@ export function UnifiedTerminal({
       // IPC contract to the main process is flat AcpSendContentBlock[].
       const contentBlocks = buildAcpSendBlocks(value, imagesToSend);
 
+      console.log(`[UnifiedTerminal ${agentName}] sending ACP message (session=${sessionId}, blocks=${contentBlocks.length})`);
       const sendPromise = window.electronAPI.sendAcpMessage({ agent: agentName, sessionId, content: contentBlocks });
 
       sendPromise
         .then(() => {
           inputHistory.commit(value);
           input.value = '';
-          pastedBlockRef.current = null;
           clearImages();
           trackEvent({ event: 'image_paste_sent', imageCount: imagesToSend.length, totalSizeBytes });
         })
@@ -588,8 +698,7 @@ export function UnifiedTerminal({
     window.electronAPI.writeTerminal(tid, value + '\r');
     inputHistory.commit(value);
     input.value = '';
-    pastedBlockRef.current = null;
-  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName, inputHistory]);
+  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName, inputHistory, findBlockRange, setCancelRequested]);
 
   // Phase 2 instant-send: once images are staged and the composer is still
   // empty, send the message automatically. Use a ref for the callback so the
@@ -610,6 +719,7 @@ export function UnifiedTerminal({
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       const tid = terminalIdRef.current;
+      const input = e.currentTarget;
 
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -617,30 +727,60 @@ export function UnifiedTerminal({
         return;
       }
 
-      // If a collapsed paste placeholder is active, don't let the user edit the
-      // placeholder text. Backspace/Delete clears it fully; a printable key
-      // clears it before the character is inserted; other keys pass through.
-      if (pastedBlockRef.current) {
-        const input = e.currentTarget;
-        if (e.key === 'Backspace' || e.key === 'Delete') {
-          e.preventDefault();
-          pastedBlockRef.current = null;
-          input.value = '';
-          return;
+      // Arrow keys: jump over the collapsed block instead of landing inside it.
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        const block = pastedBlockRef.current;
+        if (block) {
+          const range = findBlockRange(input);
+          if (range) {
+            const caret = input.selectionStart ?? 0;
+            if (e.key === 'ArrowLeft' && caret > range.start && caret <= range.end) {
+              e.preventDefault();
+              input.setSelectionRange(range.start, range.start);
+              return;
+            }
+            if (e.key === 'ArrowRight' && caret >= range.start && caret < range.end) {
+              e.preventDefault();
+              input.setSelectionRange(range.end, range.end);
+              return;
+            }
+          }
         }
-        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-          pastedBlockRef.current = null;
-          input.value = '';
-        }
+        // Let the default arrow-key caret movement run when no jump is needed.
+        return;
       }
 
+      // Backspace/Delete removes the whole collapsed block when the caret is at
+      // either boundary. If the caret is inside the placeholder, jump to the
+      // nearest boundary instead of editing the placeholder characters.
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        const block = pastedBlockRef.current;
+        if (block) {
+          const range = findBlockRange(input);
+          if (range) {
+            const caret = input.selectionStart ?? 0;
+            const atBoundary = caret === range.start || caret === range.end;
+            const inside = caret > range.start && caret < range.end;
+            if (atBoundary || inside) {
+              e.preventDefault();
+              removeBlock(input);
+              return;
+            }
+          }
+        }
+        // Let the default editing behavior run when no block is active.
+        return;
+      }
+
+      // History recall clears the collapsed block so the stored full text doesn't
+      // override the recalled item on send. Typed text around the block is kept
+      // as the history draft.
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
-        const input = inputRef.current;
-        if (!input) return;
-        // Discard any collapsed paste block before recalling history so the
-        // stored full text doesn't override the recalled item on send.
-        pastedBlockRef.current = null;
+        if (pastedBlockRef.current) {
+          console.warn('[UnifiedTerminal] clearing collapsed paste block on history recall');
+          removeBlock(input);
+        }
         const next = inputHistory.cycle(e.key === 'ArrowUp' ? 'up' : 'down', input.value);
         if (next !== null) {
           input.value = next;
@@ -654,13 +794,24 @@ export function UnifiedTerminal({
       if (e.key === 'Escape') {
         e.preventDefault();
         if (pastedBlockRef.current) {
-          pastedBlockRef.current = null;
-          e.currentTarget.value = '';
+          removeBlock(input);
         } else if (stagedImages.length > 0) {
           clearImages();
           setSendError(null);
-        } else if (!isAcpMode && tid) {
-          window.electronAPI.writeTerminal(tid, '\u001b');
+        } else if (isAcpMode) {
+          const sessionId = acpSession?.sessionId ?? '';
+          setCancelRequested(true);
+          window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
+          input.value = '';
+          pastedBlockRef.current = null;
+          setInterruptFlash('Interrupted — stopping current turn…');
+        } else if (tid) {
+          if (effectiveProvider === 'kimi') {
+            window.electronAPI.writeTerminal(tid, '\u0003');
+            setInterruptFlash('Interrupted — stopping current turn…');
+          } else {
+            window.electronAPI.writeTerminal(tid, '\u001b');
+          }
         }
         return;
       }
@@ -675,11 +826,11 @@ export function UnifiedTerminal({
 
       // Ctrl+C: SIGINT if no selection, otherwise let default copy handle it.
       if (e.key.toLowerCase() === 'c' && (e.ctrlKey || e.metaKey)) {
-        const input = e.currentTarget;
         if (input.selectionStart === input.selectionEnd) {
           e.preventDefault();
           if (isAcpMode) {
             const sessionId = acpSession?.sessionId ?? '';
+            setCancelRequested(true);
             window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
           } else if (tid) {
             window.electronAPI.writeTerminal(tid, '\u0003');
@@ -690,8 +841,24 @@ export function UnifiedTerminal({
         return;
       }
 
+      // Printable keystrokes inside the placeholder jump to the nearest boundary
+      // so the user never edits the placeholder characters directly.
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const block = pastedBlockRef.current;
+        if (block) {
+          const range = findBlockRange(input);
+          if (range) {
+            const caret = input.selectionStart ?? 0;
+            if (caret > range.start && caret < range.end) {
+              e.preventDefault();
+              const target = caret - range.start < range.end - caret ? range.start : range.end;
+              input.setSelectionRange(target, target);
+            }
+          }
+        }
+      }
     },
-    [sendInputLine, stagedImages, clearImages, isAcpMode, acpSession, agentName, inputHistory],
+    [sendInputLine, findBlockRange, removeBlock, stagedImages, clearImages, isAcpMode, acpSession, agentName, inputHistory, effectiveProvider],
   );
 
   const handleInputPaste = useCallback(
@@ -779,12 +946,15 @@ export function UnifiedTerminal({
     }
   }, [onFocus]);
 
-  const handleInputInput = useCallback((e: React.FormEvent<HTMLInputElement>) => {
-    const input = e.currentTarget;
-    if (pastedBlockRef.current && input.value !== pastedBlockRef.current.placeholder) {
-      pastedBlockRef.current = null;
-    }
-  }, []);
+  const handleInputInput = useCallback(
+    (e: React.FormEvent<HTMLInputElement>) => {
+      const input = e.currentTarget;
+      if (pastedBlockRef.current) {
+        refreshBlockRange(input);
+      }
+    },
+    [refreshBlockRange],
+  );
 
   const resumeFollow = useCallback(() => {
     setPaused(false);
@@ -841,6 +1011,7 @@ export function UnifiedTerminal({
               agent={agentName}
               sessionId={acpSession?.sessionId}
               pendingPermission={acpSession?.pendingPermission}
+              cancelRequested={cancelRequested}
             />
           ) : (
             <>
@@ -928,6 +1099,17 @@ export function UnifiedTerminal({
                 onRemove={handleRemoveImage}
               />
             ))}
+          </div>
+        )}
+
+        {/* Escape-interrupt confirmation flash */}
+        {interruptFlash && (
+          <div
+            className="text-xs text-amber-400 px-1 flex items-center gap-1.5"
+            data-testid="terminal-interrupt-flash"
+          >
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+            {interruptFlash}
           </div>
         )}
 

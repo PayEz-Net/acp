@@ -12,6 +12,7 @@ interface AcpTranscriptProps {
   agent?: string;
   sessionId?: string;
   pendingPermission?: AcpSessionState['pendingPermission'];
+  cancelRequested?: boolean;
 }
 
 export function AcpTranscript({
@@ -20,6 +21,7 @@ export function AcpTranscript({
   agent,
   sessionId,
   pendingPermission: pendingPermissionProp,
+  cancelRequested,
 }: AcpTranscriptProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -77,6 +79,16 @@ export function AcpTranscript({
       {activeTurn && activeTurn.status !== 'done' && activeTurn.status !== 'error' && (
         <ActivityIndicator status={activeTurn.status} />
       )}
+
+      {cancelRequested && (
+        <div
+          className="px-2 py-1 text-xs text-amber-400 bg-amber-400/10 rounded m-2"
+          data-testid="acp-stopping-indicator"
+        >
+          Stopping…
+        </div>
+      )}
+
       <div ref={bottomRef} />
     </div>
   );

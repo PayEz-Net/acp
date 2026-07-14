@@ -56,6 +56,24 @@ export class AcpRuntimeManager extends EventEmitter {
   private autoApprove = false;
   private capabilities: AcpAgentCapabilities | undefined = undefined;
 
+  // Inactivity watchdog while a session/prompt is pending. A fixed timeout
+  // falsely kills slow-but-healthy turns (tool calls, long reasoning). We
+  // only declare a hang when the runtime has been completely silent for a
+  // while, and we auto-restart when that happens.
+  private promptPending = false;
+  private promptIdleTicks = 0;
+  private inactivityTimer: ReturnType<typeof setInterval> | null = null;
+  private promptSettledRef: { current: boolean } | null = null;
+
+  // Crash-recovery state. We track whether a kill was intentional so an
+  // unexpected process exit can auto-restart, and we back off so a repeatedly
+  // crashing runtime (e.g., Kimi cold-init race on Windows) doesn't spin forever.
+  private intentionalKill = false;
+  private restarting = false;
+  private restartCount = 0;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly MAX_RESTARTS = 5;
+
   constructor(
     private readonly id: string,
     private readonly provider: ProviderConfig,
@@ -92,6 +110,68 @@ export class AcpRuntimeManager extends EventEmitter {
     this.autoApprove = enabled;
   }
 
+  private startPromptWatchdog(): void {
+    const WATCHDOG_INTERVAL_MS = 15_000;
+    const PROMPT_IDLE_MS = 120_000;
+    const WATCHDOG_IDLE_TICKS = Math.ceil(PROMPT_IDLE_MS / WATCHDOG_INTERVAL_MS);
+    this.promptPending = true;
+    this.promptIdleTicks = 0;
+    if (this.inactivityTimer) clearInterval(this.inactivityTimer);
+    this.inactivityTimer = setInterval(() => {
+      if (!this.promptPending) {
+        this.stopPromptWatchdog();
+        return;
+      }
+      // If the OS process is already gone, there will never be another
+      // notification. Fail the turn immediately and restart rather than waiting
+      // for the full idle timeout.
+      if (!this.process?.isRunning()) {
+        const message = `ACP process for ${this.options.agentName} died while a turn was pending; restarting runtime`;
+        console.warn(`[ACP ${this.options.agentName}] ${message}`);
+        this.stopPromptWatchdog();
+        this.emitAcpEvent({
+          sessionUpdate: 'error',
+          sessionId: this.sessionId ?? '',
+          error: message,
+        });
+        void this.restart();
+        return;
+      }
+      this.promptIdleTicks++;
+      if (this.promptIdleTicks >= WATCHDOG_IDLE_TICKS) {
+        if (this.promptSettledRef?.current) {
+          this.stopPromptWatchdog();
+          return;
+        }
+        this.promptSettledRef!.current = true;
+        const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending; restarting runtime`;
+        console.warn(`[ACP ${this.options.agentName}] ${message}`);
+        this.stopPromptWatchdog();
+        this.emitAcpEvent({
+          sessionUpdate: 'error',
+          sessionId: this.sessionId ?? '',
+          error: message,
+        });
+        void this.restart();
+      }
+    }, WATCHDOG_INTERVAL_MS);
+  }
+
+  private stopPromptWatchdog(): void {
+    this.promptPending = false;
+    if (this.inactivityTimer) {
+      clearInterval(this.inactivityTimer);
+      this.inactivityTimer = null;
+    }
+    this.promptSettledRef = null;
+  }
+
+  private markPromptActivity(): void {
+    if (this.promptPending) {
+      this.promptIdleTicks = 0;
+    }
+  }
+
   async start(): Promise<void> {
     if (this.process) return;
 
@@ -118,6 +198,7 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private cleanupProcess(): void {
+    this.stopPromptWatchdog();
     if (this.process) {
       try {
         this.process.kill('SIGTERM');
@@ -152,25 +233,43 @@ export class AcpRuntimeManager extends EventEmitter {
     });
 
     this.process.on('stderr', (text: string) => {
-      // Log startup stderr to console so Kimi internal errors (-32603 etc.) are
-      // visible without relying on the renderer ACP event surface.
-      if (!this.initialized) {
-        console.error(`[ACP] stderr from ${this.options.agentName}: ${text.trim()}`);
+      // Kimi dumps internal diagnostics (including -32603 errors) to stderr.
+      // Keep them visible in main-process logs even after init so we can diagnose
+      // crashes that don't produce a clean exit event.
+      const trimmed = text.trim();
+      if (trimmed) {
+        console.error(`[ACP ${this.options.agentName}] stderr: ${trimmed}`);
       }
       this.emitAcpEvent({ sessionUpdate: 'stderr', sessionId: this.sessionId ?? undefined, text });
     });
 
     this.process.on('error', (err: Error) => {
+      console.error(`[ACP ${this.options.agentName}] process error:`, err);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });
+      this.scheduleRestart(`process error: ${err.message}`);
     });
 
     this.process.on('exit', (code: number | null, signal: string | null) => {
+      const wasIntentional = this.intentionalKill;
+      const wasHealthy = this.initialized;
+      this.intentionalKill = false;
+      console.warn(`[ACP ${this.options.agentName}] process exited (code=${code}, signal=${signal})`);
+      this.stopPromptWatchdog();
+      this.process = null;
+      this.sessionId = null;
+      this.initialized = false;
       void endAgentSession(this.id, 'normal');
       this.emitAcpEvent({
         sessionUpdate: 'error',
         sessionId: this.sessionId ?? undefined,
         error: `ACP process exited (code=${code}, signal=${signal})`,
       });
+      // If the runtime died unexpectedly while it was healthy, try to bring it
+      // back. Intentional kills (manual restart/quit) and startup-time crashes
+      // are handled by the caller.
+      if (!wasIntentional && wasHealthy) {
+        this.scheduleRestart(`process exited (code=${code}, signal=${signal})`);
+      }
     });
 
     this.process.start();
@@ -198,6 +297,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.sessionId = (sessionResult.sessionId as string) ?? null;
     this.initialized = true;
     this.capabilities = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
+    this.markHealthy();
 
     if (this.options.agentId != null) {
       void (async () => {
@@ -248,12 +348,15 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   async prompt(text: string): Promise<void> {
+    if (!this.process?.isRunning() || !this.sessionId) {
+      throw new Error('ACP runtime not initialized');
+    }
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
     this.sendPrompt(prompt);
   }
 
   async sendMessage(content: AcpSendContentBlock[]): Promise<void> {
-    if (!this.process || !this.sessionId) {
+    if (!this.process?.isRunning() || !this.sessionId) {
       throw new Error('ACP runtime not initialized');
     }
 
@@ -265,40 +368,50 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private sendPrompt(prompt: AcpSendContentBlock[]): void {
-    if (!this.process || !this.sessionId) {
-      throw new Error('ACP runtime not initialized');
+    if (!this.process?.isRunning() || !this.sessionId) {
+      const message = 'ACP runtime not initialized';
+      console.error(`[ACP ${this.options.agentName}] ${message}`);
+      this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
+      this.scheduleRestart('runtime not running when prompt sent');
+      return;
     }
 
     const sessionId = this.sessionId;
-    const PROMPT_TIMEOUT_MS = 120_000;
-    let settled = false;
+    const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);
+    console.log(`[ACP ${this.options.agentName}] >>> session/prompt (session=${sessionId}): ${preview}`);
+    const settledRef = { current: false };
+    this.promptSettledRef = settledRef;
 
-    // Defensive timeout: if the runtime streams all content but never returns a
-    // session/prompt result (the image-paste "Answering…" hang), fail the turn
-    // so the activity spinner clears instead of spinning forever.
+    // Start the inactivity watchdog. Slow-but-healthy turns (long tool calls,
+    // heavy reasoning) keep emitting notifications and reset the watchdog. We
+    // only treat the runtime as hung when it has been completely silent for
+    // PROMPT_IDLE_MS. A hard ceiling (PROMPT_MAX_MS) still guards against a
+    // runtime that streams meaningless keepalives forever.
+    this.startPromptWatchdog();
+    const PROMPT_MAX_MS = 600_000;
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => {
-        reject(new Error(`session/prompt timed out after ${PROMPT_TIMEOUT_MS}ms`));
-      }, PROMPT_TIMEOUT_MS);
+        reject(new Error(`session/prompt exceeded maximum time of ${PROMPT_MAX_MS}ms`));
+      }, PROMPT_MAX_MS);
     });
 
     // Send prompt without awaiting — the response arrives as streaming notifications.
+    // Pass timeoutMs=0 so the per-request timeout in AcpProcess doesn't fire while
+    // a healthy turn is still streaming; our manager-level watchdog handles hangs.
     Promise.race([
-      this.process.request('session/prompt', { sessionId, prompt }),
+      this.process.request('session/prompt', { sessionId, prompt }, 0),
       timeoutPromise,
     ])
       .then((result) => {
-        if (settled) return;
-        settled = true;
-        // Kimi signals turn completion by returning { stopReason } from the
-        // session/prompt request, not via a session/update notification. Convert
-        // that response into the canonical turn_complete event so the renderer
-        // clears its activity spinner. If no stopReason is provided, default to
-        // 'end_turn' so the turn never hangs in an answering/thinking state.
+        if (settledRef.current) return;
+        settledRef.current = true;
+        this.stopPromptWatchdog();
+        this.markHealthy();
         const stopReason =
           typeof (result as Record<string, unknown>)?.stopReason === 'string'
             ? ((result as Record<string, unknown>).stopReason as string)
             : 'end_turn';
+        console.log(`[ACP ${this.options.agentName}] <<< session/prompt result (session=${sessionId}): stopReason=${stopReason}`);
         this.emitAcpEvent({
           sessionUpdate: 'turn_complete',
           sessionId,
@@ -306,9 +419,12 @@ export class AcpRuntimeManager extends EventEmitter {
         });
       })
       .catch((err) => {
-        if (settled) return;
-        settled = true;
-        this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: err.message });
+        if (settledRef.current) return;
+        settledRef.current = true;
+        this.stopPromptWatchdog();
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[ACP ${this.options.agentName}] session/prompt failed (session=${sessionId}):`, err);
+        this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: message });
       });
   }
 
@@ -328,13 +444,16 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   cancel(): void {
-    if (!this.process || !this.sessionId) return;
-    this.process.notify('session/cancel', { sessionId: this.sessionId });
-    // Defensively emit turn_complete so the renderer clears the activity spinner
-    // even if the runtime doesn't respond with its own completion event.
+    const sessionId = this.sessionId;
+    if (this.process && sessionId) {
+      this.process.notify('session/cancel', { sessionId });
+    }
+    // Always emit turn_complete so the renderer clears the activity spinner,
+    // even if the runtime process has already crashed and the cancel notify
+    // could not be delivered.
     this.emitAcpEvent({
       sessionUpdate: 'turn_complete',
-      sessionId: this.sessionId,
+      sessionId: sessionId ?? '',
       stopReason: 'cancel',
     });
   }
@@ -345,12 +464,68 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   kill(): void {
+    this.intentionalKill = true;
+    this.stopPromptWatchdog();
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (!this.process) return;
     this.process.kill('SIGTERM');
     this.process = null;
     this.sessionId = null;
     this.initialized = false;
     void endAgentSession(this.id, 'normal');
+  }
+
+  async restart(): Promise<void> {
+    if (this.restarting) return;
+    this.restarting = true;
+    console.log(`[ACP ${this.options.agentName}] Restarting runtime`);
+    this.kill();
+    // Brief pause so the OS can release stdio handles / file locks before we
+    // spawn a replacement (especially important on Windows).
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      await this.start();
+      this.markHealthy();
+      console.log(`[ACP ${this.options.agentName}] Runtime restarted`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[ACP ${this.options.agentName}] Runtime restart failed:`, err);
+      this.emitAcpEvent({
+        sessionUpdate: 'error',
+        sessionId: this.sessionId ?? '',
+        error: `Runtime restart failed: ${message}`,
+      });
+      this.scheduleRestart(`restart failed: ${message}`);
+    } finally {
+      this.restarting = false;
+    }
+  }
+
+  private scheduleRestart(reason: string): void {
+    if (this.restartTimer) return;
+    if (this.restartCount >= this.MAX_RESTARTS) {
+      const message = `Runtime keeps failing (${this.restartCount} restarts): ${reason}`;
+      console.error(`[ACP ${this.options.agentName}] ${message}`);
+      this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
+      return;
+    }
+    this.restartCount++;
+    const delay = Math.min(30_000, 1_000 * Math.pow(2, this.restartCount - 1));
+    console.warn(`[ACP ${this.options.agentName}] scheduling restart #${this.restartCount} in ${delay}ms: ${reason}`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      void this.restart();
+    }, delay);
+  }
+
+  private markHealthy(): void {
+    if (this.restartCount > 0) {
+      console.log(`[ACP ${this.options.agentName}] runtime healthy; reset restart counter`);
+      this.restartCount = 0;
+    }
   }
 
   respondToPermission(requestId: number | string, optionId: string, outcome = 'selected'): void {
@@ -365,6 +540,7 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private handleNotification(method: string, params: unknown, id?: number | string): void {
+    this.markPromptActivity();
     if (method === 'session/request_permission') {
       this.handlePermissionRequest({ jsonrpc: '2.0', id, method, params });
       return;
@@ -377,6 +553,7 @@ export class AcpRuntimeManager extends EventEmitter {
 
     const sessionUpdate = update.sessionUpdate as string;
     const sessionId = (updateParams.sessionId as string) ?? this.sessionId ?? '';
+    console.log(`[ACP ${this.options.agentName}] notification: ${sessionUpdate}`);
 
     switch (sessionUpdate) {
       case 'available_commands_update': {

@@ -1057,11 +1057,18 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       console.warn(`[ACP] prompt for unknown agent: ${payload.agent}`);
       return;
     }
+    console.log(`[ACP main] prompt received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
     await runtime.prompt(payload.text);
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_CANCEL, (_, payload: AcpCancelPayload) => {
-    getAcpRuntimeByAgent(payload.agent)?.cancel();
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) {
+      console.warn(`[ACP main] cancel for unknown agent: ${payload.agent}`);
+      return;
+    }
+    console.log(`[ACP main] cancel received for ${payload.agent}`);
+    runtime.cancel();
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_SET_MODE, (_, payload: AcpSetModePayload) => {

@@ -17,12 +17,21 @@ export interface AcpProcessOptions {
   env?: Record<string, string>;
 }
 
+interface PendingRequest {
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 export class AcpProcess extends EventEmitter {
   private child: ChildProcess | null = null;
   private requestId = 0;
-  private pendingRequests = new Map<number | string, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+  private pendingRequests = new Map<number | string, PendingRequest>();
   private buffer = '';
   private killed = false;
+  private exitFired = false;
+  private writeQueue: string[] = [];
+  private writePending = false;
 
   constructor(private readonly options: AcpProcessOptions) {
     super();
@@ -31,12 +40,17 @@ export class AcpProcess extends EventEmitter {
   start(): void {
     if (this.child) return;
 
-    this.child = spawn(this.options.command, this.options.args, {
+    const [command, ...args] = [this.options.command, ...this.options.args];
+    this.child = spawn(command, args, {
       cwd: this.options.cwd,
       env: { ...process.env, ...this.options.env },
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
+      // Don't pop up a console window for the child process on Windows.
+      windowsHide: true,
     });
+
+    console.log(`[ACP process] spawned ${command} ${args.join(' ')} (pid=${this.child.pid ?? 'unknown'})`);
 
     this.child.stdout?.setEncoding('utf8');
     this.child.stdout?.on('data', (chunk: string) => this.onStdoutData(chunk));
@@ -44,17 +58,29 @@ export class AcpProcess extends EventEmitter {
     this.child.stderr?.on('data', (chunk: string) => this.emit('stderr', chunk));
 
     this.child.on('error', (err) => {
+      console.error(`[ACP process] spawn error for ${command}:`, err);
       this.emit('error', err);
       this.rejectAllPending(err);
     });
 
     this.child.on('exit', (code, signal) => {
+      if (this.exitFired) return;
+      this.exitFired = true;
+      console.log(`[ACP process] exited ${command} (code=${code}, signal=${signal}, pid=${this.child?.pid ?? 'unknown'})`);
       this.emit('exit', code, signal);
       this.rejectAllPending(new Error(`ACP process exited (code=${code}, signal=${signal})`));
     });
+
+    this.child.on('close', () => {
+      // Drain any remaining stdout before finalizing exit handling.
+      if (this.buffer.trim()) {
+        this.parseLine(this.buffer.trim());
+        this.buffer = '';
+      }
+    });
   }
 
-  request(method: string, params?: unknown): Promise<unknown> {
+  request(method: string, params?: unknown, timeoutMs = 60000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (this.killed || !this.child) {
         reject(new Error('ACP process is not running'));
@@ -62,18 +88,27 @@ export class AcpProcess extends EventEmitter {
       }
 
       const id = ++this.requestId;
-      this.pendingRequests.set(id, { resolve, reject });
+      const pending: PendingRequest = { resolve, reject };
+      this.pendingRequests.set(id, pending);
 
       const message: AcpJsonRpcMessage = { jsonrpc: '2.0', id, method, params };
       this.write(message);
 
-      // Timeout safety: reject if no response in 60 seconds.
-      setTimeout(() => {
-        if (this.pendingRequests.has(id)) {
-          this.pendingRequests.delete(id);
-          reject(new Error(`ACP request ${method} timed out`));
-        }
-      }, 60000);
+      if (timeoutMs <= 0) return;
+
+      // Timeout safety: reject if no response in the allotted time. Long-running
+      // streaming requests (e.g., session/prompt) pass timeoutMs=0 and rely on the
+      // AcpRuntimeManager-level watchdog instead.
+      pending.timer = setTimeout(() => {
+        if (!this.pendingRequests.has(id)) return;
+        this.pendingRequests.delete(id);
+        const err = new Error(`ACP request ${method} timed out`);
+        console.warn(`[ACP process] ${method} timed out; terminating runtime`);
+        reject(err);
+        this.kill('SIGTERM');
+        // Guarantee the process is gone even if SIGTERM is ignored (Windows).
+        setTimeout(() => this.forceKill(), 3000);
+      }, timeoutMs);
     });
   }
 
@@ -89,22 +124,84 @@ export class AcpProcess extends EventEmitter {
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
     this.killed = true;
-    if (this.child && !this.child.killed) {
-      this.child.kill(signal);
-    }
     this.rejectAllPending(new Error('ACP process killed'));
+    if (!this.child || this.child.killed) {
+      this.child = null;
+      return;
+    }
+    try {
+      this.child.kill(signal);
+    } catch (err) {
+      console.warn(`[ACP process] kill(${signal}) failed:`, err);
+    }
+    // Give SIGTERM a moment, then escalate to SIGKILL / taskkill so we don't
+    // leave a zombie runtime holding locks on Windows.
+    setTimeout(() => this.forceKill(), 2000);
   }
 
   isRunning(): boolean {
-    return this.child !== null && !this.child.killed && this.killed === false;
+    if (this.killed || !this.child) return false;
+    if (this.child.killed) return false;
+    // exitCode/signalCode are set as soon as the OS reports the process gone,
+    // even before the 'exit' event has been processed.
+    return this.child.exitCode === null && this.child.signalCode === null;
+  }
+
+  private forceKill(): void {
+    if (!this.child || this.child.killed) {
+      this.child = null;
+      return;
+    }
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      this.child = null;
+      return;
+    }
+    console.warn(`[ACP process] escalating to force kill (pid=${this.child.pid ?? 'unknown'})`);
+    try {
+      this.child.kill('SIGKILL');
+    } catch {
+      // ignore
+    }
+    if (process.platform === 'win32' && this.child.pid) {
+      setTimeout(() => {
+        if (!this.child || this.child.killed) return;
+        if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+        console.warn(`[ACP process] using taskkill /F /T for pid=${this.child.pid}`);
+        try {
+          spawn('taskkill', ['/F', '/T', '/PID', String(this.child.pid)], { windowsHide: true, detached: true });
+        } catch {
+          // ignore
+        }
+      }, 1500);
+    }
   }
 
   private write(message: AcpJsonRpcMessage): void {
     const line = JSON.stringify(message) + '\n';
-    if (this.child?.stdin?.writable) {
-      this.child.stdin.write(line);
-    } else {
+    this.writeQueue.push(line);
+    this.drainWriteQueue();
+  }
+
+  private drainWriteQueue(): void {
+    if (this.writePending || !this.child?.stdin || this.child.stdin.destroyed) return;
+    const line = this.writeQueue.shift();
+    if (!line) return;
+    if (!this.child.stdin.writable) {
       this.emit('error', new Error('ACP process stdin is not writable'));
+      return;
+    }
+    this.writePending = true;
+    const ok = this.child.stdin.write(line, (err) => {
+      if (err) this.emit('error', err);
+    });
+    if (ok !== false) {
+      this.writePending = false;
+      setImmediate(() => this.drainWriteQueue());
+    } else {
+      this.child.stdin.once('drain', () => {
+        this.writePending = false;
+        this.drainWriteQueue();
+      });
     }
   }
 
@@ -132,6 +229,7 @@ export class AcpProcess extends EventEmitter {
     if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
       const pending = this.pendingRequests.get(message.id);
       if (pending) {
+        if (pending.timer) clearTimeout(pending.timer);
         this.pendingRequests.delete(message.id);
         if (message.error) {
           pending.reject(new Error(`${message.error.message} (code ${message.error.code})`));
@@ -148,6 +246,7 @@ export class AcpProcess extends EventEmitter {
 
   private rejectAllPending(err: Error): void {
     for (const pending of this.pendingRequests.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(err);
     }
     this.pendingRequests.clear();

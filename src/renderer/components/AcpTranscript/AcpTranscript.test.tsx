@@ -90,6 +90,18 @@ describe('AcpTranscript', () => {
     cleanup(root, container);
   });
 
+  it('shows a stopping indicator when cancel is requested', () => {
+    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+    const { container, root } = render(
+      <AcpTranscript turns={turns} activeTurnId="a1" cancelRequested={true} />,
+    );
+    expect(container.querySelector('[data-testid="acp-stopping-indicator"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="acp-stopping-indicator"]')?.textContent).toBe(
+      'Stopping…',
+    );
+    cleanup(root, container);
+  });
+
   it('renders a permission request card and sends the selected response', async () => {
     useAcpSessionStore.getState().startUserTurn('NextPert', 's1', 'Run dir');
     useAcpSessionStore.getState().startAssistantTurn('NextPert', 's1');

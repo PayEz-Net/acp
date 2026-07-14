@@ -634,27 +634,72 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('clears a collapsed paste with Escape', async () => {
+    it('removes a collapsed paste with Escape and keeps typed text', async () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
       await act(async () => {
         input.focus();
+        input.value = 'explain this ';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
         pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
         await new Promise((r) => setTimeout(r, 10));
       });
 
-      expect(input.value).toBe('[pasted code 6 lines]');
+      expect(input.value).toBe('explain this [pasted code 6 lines]');
 
       act(() => {
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       });
 
-      expect(input.value).toBe('');
+      expect(input.value).toBe('explain this ');
       cleanup(root, container);
     });
 
-    it('clears a collapsed paste with Backspace', async () => {
+    it('removes a collapsed paste with Backspace at the boundary and keeps text after it', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const placeholder = '[pasted code 6 lines]';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe(placeholder);
+
+      act(() => {
+        input.value = `${placeholder}explain`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.setSelectionRange(placeholder.length, placeholder.length);
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      });
+
+      expect(input.value).toBe('explain');
+      cleanup(root, container);
+    });
+
+    it('preserves existing typed text when a large paste is collapsed', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        input.value = 'explain this ';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      expect(input.value).toBe('explain this [pasted code 6 lines]');
+      cleanup(root, container);
+    });
+
+    it('keeps text typed after a collapsed paste', async () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
@@ -664,13 +709,138 @@ describe('UnifiedTerminal', () => {
         await new Promise((r) => setTimeout(r, 10));
       });
 
-      expect(input.value).toBe('[pasted code 6 lines]');
-
       act(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+        input.value = '[pasted code 6 lines] explain';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       });
 
+      expect(input.value).toBe('[pasted code 6 lines] explain');
+      cleanup(root, container);
+    });
+
+    it('keeps text typed before a collapsed paste', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      act(() => {
+        input.value = 'explain [pasted code 6 lines]';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+
+      expect(input.value).toBe('explain [pasted code 6 lines]');
+      cleanup(root, container);
+    });
+
+    it('sends the combined prompt and full paste on Enter', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const largeText = 'a\nb\nc\nd\ne\nf';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, largeText);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      act(() => {
+        input.value = `[pasted code 6 lines]explain this`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', `explain this\n\n${largeText}\r`);
       expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('discards the collapsed paste when the placeholder is edited', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      act(() => {
+        input.value = '[pasted code 6x lines]';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockWriteTerminal).toHaveBeenCalledWith('t1', '[pasted code 6x lines]\r');
+      cleanup(root, container);
+    });
+
+    it('removes a collapsed paste with Delete at the boundary and keeps text before it', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const placeholder = '[pasted code 6 lines]';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      act(() => {
+        input.value = `explain${placeholder}`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.setSelectionRange('explain'.length, 'explain'.length);
+      });
+
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      });
+
+      expect(input.value).toBe('explain');
+      cleanup(root, container);
+    });
+
+    it('jumps over a collapsed paste with arrow keys', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      const placeholder = '[pasted code 6 lines]';
+
+      await act(async () => {
+        input.focus();
+        pasteTextOnInput(input, 'a\nb\nc\nd\ne\nf');
+        await new Promise((r) => setTimeout(r, 10));
+      });
+
+      act(() => {
+        input.value = `before${placeholder}after`;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+
+      const blockStart = 'before'.length;
+      const blockEnd = blockStart + placeholder.length;
+
+      act(() => {
+        input.setSelectionRange(blockStart + 1, blockStart + 1);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+      });
+      expect(input.selectionStart).toBe(blockStart);
+
+      act(() => {
+        input.setSelectionRange(blockEnd - 1, blockEnd - 1);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+      });
+      expect(input.selectionStart).toBe(blockEnd);
+
       cleanup(root, container);
     });
 
@@ -1119,7 +1289,6 @@ describe('UnifiedTerminal', () => {
           agentInfo: { name: 'Kimi Code CLI' },
         },
       });
-
       const agent: AgentState = {
         id: '1',
         name: 'NextPert',
@@ -1147,7 +1316,48 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('fails an active assistant turn when the user sends a new message', () => {
+    it('cancels the active ACP turn and shows an interrupt flash when Escape is pressed', () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.focus();
+        input.value = 'partial command';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(mockSendAcpCancel).toHaveBeenCalledWith({ agent: 'NextPert', sessionId: 's1' });
+      expect(input.value).toBe('');
+      expect(container.querySelector('[data-testid="terminal-interrupt-flash"]')?.textContent).toContain('Interrupted');
+      cleanup(root, container);
+    });
+
+    it('stops an active assistant turn when the user sends a new message', () => {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
       });
@@ -1197,7 +1407,8 @@ describe('UnifiedTerminal', () => {
       const session = useAcpSessionStore.getState().getSession('NextPert');
       expect(session?.turns).toHaveLength(4);
       expect(session?.turns[1].role).toBe('assistant');
-      expect(session?.turns[1].status).toBe('error');
+      expect(session?.turns[1].status).toBe('done');
+      expect(session?.turns[1].stopReason).toBe('interrupted');
       expect(session?.activeTurnId).toBe(session?.turns[3].id);
       expect(session?.turns[3].role).toBe('assistant');
       expect(session?.turns[3].status).toBe('thinking');

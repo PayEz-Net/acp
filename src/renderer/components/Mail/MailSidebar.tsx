@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { CheckCheck, FolderOpen, Loader2, Mail, MailOpen, RefreshCw, X } from 'lucide-react';
+import { useCallback } from 'react';
+import { CheckCheck, FolderOpen, Mail, MailOpen, RefreshCw, X } from 'lucide-react';
 import { AgentState, MailMessage } from '@shared/types';
 import { useMail } from '../../hooks/useMail';
 import { useProjectStore } from '../../stores/projectStore';
@@ -29,7 +29,6 @@ export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
     executeAction,
     refresh,
     markAllRead,
-    totalUnread,
     showUnreadOnly,
     toggleUnreadFilter,
   } = useMail({
@@ -39,17 +38,12 @@ export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
   });
   const selectedMessage = useMailStore((s) => s.selectedMessage);
 
-  const [markingAll, setMarkingAll] = useState(false);
-
-  const handleMarkAllRead = async () => {
-    if (markingAll || totalUnread === 0) return;
-    setMarkingAll(true);
-    try {
-      await markAllRead();
-    } finally {
-      setMarkingAll(false);
-    }
-  };
+  const handleMarkAllRead = useCallback(() => {
+    console.log('[MailSidebar] mark all read clicked');
+    void markAllRead().catch((err) => {
+      console.error('[MailSidebar] mark all read failed:', err);
+    });
+  }, [markAllRead]);
 
   if (!isOpen) return null;
 
@@ -57,64 +51,71 @@ export function MailSidebar({ agents, isOpen, onClose }: MailSidebarProps) {
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/50 z-40"
+        className="fixed inset-0 bg-black/50 z-40 no-drag"
         onClick={onClose}
         aria-hidden="true"
       />
 
-      {/* Drawer */}
-      <div className="fixed right-0 top-0 bottom-0 w-[600px] bg-acp-surface border-l border-acp-border z-50 flex shadow-2xl">
+      {/* Drawer — explicit no-drag so the titlebar drag-region behind it can't
+          swallow pointer events for the header controls. */}
+      <div className="fixed right-0 top-0 bottom-0 w-[600px] bg-acp-surface border-l border-acp-border z-50 flex shadow-2xl no-drag">
         {/* Mail List */}
         <div className="w-72 flex flex-col border-r border-acp-border">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-acp-border bg-acp-surface-raised shrink-0">
-            <div className="flex items-center gap-2">
-              <Mail className="w-5 h-5 text-acp-accent" />
-              <span className="text-sm font-semibold text-acp-text-primary">Mail</span>
+          {/* Header — rebuilt as text-only controls to avoid the icon-only
+              hit-test trap in the titlebar overlap zone. */}
+          <div className="no-drag flex items-center justify-between px-4 py-3 border-b border-acp-border bg-acp-surface-raised shrink-0 gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mail className="w-5 h-5 text-acp-accent shrink-0" />
+              <span className="text-sm font-semibold text-acp-text-primary truncate">Mail</span>
               {pushConnectionState !== 'connected' && (() => {
                 const isOff = pushConnectionState === 'disconnected';
                 return (
                   <span
-                    className="flex items-center gap-1 text-[10px] uppercase tracking-wide"
+                    className="flex items-center shrink-0"
                     title={`Mail push: ${pushConnectionState}`}
                   >
                     <span className={`w-1.5 h-1.5 rounded-full ${isOff ? 'bg-acp-status-error' : 'bg-acp-status-busy animate-pulse'}`} />
-                    <span className={isOff ? 'text-acp-status-error' : 'text-acp-status-busy'}>
-                      {isOff ? 'Offline' : 'Reconnecting'}
-                    </span>
+                    <span className="sr-only">{isOff ? 'Offline' : 'Reconnecting'}</span>
                   </span>
                 );
               })()}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="no-drag flex items-center gap-1 shrink-0">
               <button
+                type="button"
                 onClick={toggleUnreadFilter}
-                className={`p-1.5 rounded transition-colors ${showUnreadOnly ? 'text-acp-accent bg-acp-accent/10' : 'text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised'}`}
+                className={`no-drag appearance-none font-sans p-1.5 rounded transition-colors border ${showUnreadOnly ? 'text-acp-accent bg-acp-accent/10 border-acp-accent/20' : 'text-acp-text-muted bg-transparent hover:text-acp-text-primary hover:bg-acp-surface-raised border-transparent hover:border-acp-border'}`}
                 title={showUnreadOnly ? 'Show all messages' : 'Show unread only'}
+                aria-label={showUnreadOnly ? 'Show all messages' : 'Show unread only'}
               >
-                {showUnreadOnly ? <Mail className="w-4 h-4" /> : <MailOpen className="w-4 h-4" />}
+                {showUnreadOnly ? <Mail className="w-4 h-4 pointer-events-none" /> : <MailOpen className="w-4 h-4 pointer-events-none" />}
               </button>
               <button
+                type="button"
                 onClick={handleMarkAllRead}
-                disabled={markingAll || totalUnread === 0}
-                className="p-1.5 text-acp-text-muted hover:text-acp-accent hover:bg-acp-surface-raised rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title={totalUnread === 0 ? 'No unread messages' : `Mark all ${totalUnread} read (this project)`}
+                className="no-drag appearance-none font-sans p-1.5 text-acp-text-muted bg-transparent hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors border border-transparent hover:border-acp-border"
+                title="Mark all read (this project)"
+                aria-label="Mark all read (this project)"
               >
-                {markingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
+                <CheckCheck className="w-4 h-4 pointer-events-none" />
               </button>
               <button
+                type="button"
                 onClick={refresh}
-                className="p-1.5 text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors"
+                className="no-drag appearance-none font-sans p-1.5 text-acp-text-muted bg-transparent hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors border border-transparent hover:border-acp-border"
                 title="Refresh"
+                aria-label="Refresh"
               >
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className="w-4 h-4 pointer-events-none" />
               </button>
               <button
+                type="button"
                 onClick={onClose}
-                className="p-1.5 text-acp-text-muted hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors"
+                className="no-drag appearance-none font-sans p-1.5 text-acp-text-muted bg-transparent hover:text-acp-text-primary hover:bg-acp-surface-raised rounded transition-colors border border-transparent hover:border-acp-border"
                 title="Close"
+                aria-label="Close"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4 pointer-events-none" />
               </button>
             </div>
           </div>

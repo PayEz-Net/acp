@@ -26,7 +26,7 @@ function cleanup(root: ReturnType<typeof createRoot>, container: HTMLElement) {
   document.body.removeChild(container);
 }
 
-function typeInto(input: HTMLInputElement, text: string) {
+function typeInto(input: HTMLTextAreaElement, text: string) {
   input.value = text;
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -126,7 +126,7 @@ describe('ChatPanel', () => {
     });
 
     const { container, root } = render(<ChatPanel isOpen onClose={() => {}} />);
-    const input = container.querySelector('[data-testid="chat-input"]') as HTMLInputElement;
+    const input = container.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement;
 
     await act(async () => {
       input.focus();
@@ -164,7 +164,7 @@ describe('ChatPanel', () => {
     });
 
     const { container, root } = render(<ChatPanel isOpen onClose={() => {}} />);
-    const input = container.querySelector('[data-testid="chat-input"]') as HTMLInputElement;
+    const input = container.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement;
 
     await act(async () => {
       typeInto(input, 'First');
@@ -202,6 +202,48 @@ describe('ChatPanel', () => {
       await Promise.resolve();
     });
     expect(input.value).toBe('draft');
+
+    cleanup(root, container);
+  });
+
+  it('sends on Enter and inserts a newline on Shift+Enter', async () => {
+    const sendSpy = vi.spyOn(useChatStore.getState(), 'sendMessage').mockResolvedValue(true);
+    useChatStore.setState({
+      conversations: [
+        {
+          id: 'c1',
+          participants: ['Jon', 'NextPert'],
+          unreadCount: 0,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      selectedConversation: {
+        id: 'c1',
+        participants: ['Jon', 'NextPert'],
+        unreadCount: 0,
+        createdAt: new Date().toISOString(),
+      },
+    });
+
+    const { container, root } = render(<ChatPanel isOpen onClose={() => {}} />);
+    const input = container.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement;
+
+    await act(async () => {
+      typeInto(input, 'Line one');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(input.value).toContain('\n');
+    expect(sendSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith('c1', 'Jon', expect.stringContaining('Line one'));
 
     cleanup(root, container);
   });

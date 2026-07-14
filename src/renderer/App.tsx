@@ -23,6 +23,7 @@ import { RuntimeReconcileDialog } from './components/Layout/RuntimeReconcileDial
 import { RuntimeNotSet } from './components/Layout/RuntimeNotSet';
 import { OverlayPanel } from './components/Layout/OverlayPanel';
 import { AgentConfig, AgentSessionStartFailedPayload } from '@shared/types';
+import type { AcpEventPayload } from '@shared/acpTypes';
 import { useAppStore } from './stores/appStore';
 import { useDocumentStore } from './stores/documentStore';
 import { useProjectStore } from './stores/projectStore';
@@ -250,11 +251,37 @@ export default function App() {
 
   // ACP (Agent Client Protocol) event stream — forward structured JSON-RPC
   // session/update notifications into the per-agent ACP session store.
+  // Events are batched and flushed in a macrotask so a flood of runtime
+  // notifications (e.g., BAPert stuck in a tight chunk loop) cannot trigger
+  // React's maximum update depth warning or freeze the renderer mid-render.
   useEffect(() => {
+    const pending: AcpEventPayload[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = () => {
+      flushTimer = null;
+      if (pending.length === 0) return;
+      const batch = pending.splice(0, pending.length);
+      const counts: Record<string, number> = {};
+      for (const ev of batch) {
+        counts[ev.agent] = (counts[ev.agent] || 0) + 1;
+      }
+      console.log(`[App] Applying ACP event batch: ${batch.length} events`, counts);
+      useAcpSessionStore.getState().applyEvents(batch);
+    };
+
     const unsub = window.electronAPI.onAcpEvent((payload) => {
-      useAcpSessionStore.getState().applyEvent(payload);
+      pending.push(payload);
+      if (!flushTimer) {
+        flushTimer = setTimeout(flush, 0);
+      }
     });
-    return unsub;
+
+    return () => {
+      unsub();
+      if (flushTimer) clearTimeout(flushTimer);
+      flush();
+    };
   }, []);
 
   // Surface PayEzVibe agent session start failures in the UI. The lifecycle

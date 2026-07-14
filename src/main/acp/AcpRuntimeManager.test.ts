@@ -253,6 +253,8 @@ describe('AcpRuntimeManager', () => {
     await manager.start();
 
     vi.useFakeTimers();
+    // Prevent the automatic restart from leaving fake timers behind in this test.
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
     // Simulate a runtime that streams content but never returns a session/prompt result.
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
     manager.prompt('hello');
@@ -264,9 +266,12 @@ describe('AcpRuntimeManager', () => {
     expect(error?.update).toMatchObject({
       sessionUpdate: 'error',
       sessionId: 'sess-hang',
-      error: expect.stringContaining('timed out'),
+      error: expect.stringContaining('No response'),
     });
+    expect(restartSpy).toHaveBeenCalled();
 
+    restartSpy.mockRestore();
+    manager.kill();
     vi.useRealTimers();
   });
 

@@ -152,7 +152,9 @@ interface AcpSessionStoreActions {
   startUserTurn(agent: string, sessionId: string, text: string, images?: StagedImageInput[], ts?: string): void;
   startAssistantTurn(agent: string, sessionId: string, ts?: string): void;
   failActiveTurn(agent: string, error?: string): void;
+  stopActiveTurn(agent: string, stopReason?: string): void;
   applyEvent(payload: AcpEventPayload): void;
+  applyEvents(payloads: AcpEventPayload[]): void;
   respondPermission(agent: string, optionId: string): void;
   clearSession(agent: string): void;
 }
@@ -381,9 +383,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
           ? {
               ...turn,
               status: 'error' as AcpTurnStatus,
-              // TODO: evaluate whether to show timeout/transport errors in the UI and how (toast? inline? ignore?)
-              // contentText: update.error ? `[Send failed] ${update.error}` : turn.contentText,
-              contentText: turn.contentText,
+              contentText: update.error ? `[Send failed] ${update.error}` : turn.contentText,
               // Mark any still-running tools as failed so their spinners stop.
               toolCalls: turn.toolCalls.map((t) =>
                 t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
@@ -465,9 +465,7 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
             ? {
                 ...turn,
                 status: 'error' as AcpTurnStatus,
-                // TODO: evaluate whether to show timeout/transport errors in the UI and how
-                // contentText: error ? `[Send failed] ${error}` : turn.contentText,
-                contentText: turn.contentText,
+                contentText: error ? `[Send failed] ${error}` : turn.contentText,
                 // Mark any still-running tools as failed so their spinners stop.
                 toolCalls: turn.toolCalls.map((t) =>
                   t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
@@ -476,6 +474,31 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
             : turn,
         );
         sessions.set(agent, { ...session, turns, activeTurnId: null, error });
+        return { sessions };
+      });
+    },
+
+    stopActiveTurn(agent: string, stopReason = 'interrupted') {
+      set((state) => {
+        const sessions = new Map(state.sessions);
+        const session = sessions.get(agent);
+        if (!session?.activeTurnId) return state;
+        const turns = session.turns.map((turn) =>
+          turn.id === session.activeTurnId
+            ? {
+                ...turn,
+                status: 'done' as AcpTurnStatus,
+                stopReason,
+                // Mark any still-running tools as failed so their spinners stop.
+                // The turn itself is not an error; the assistant was simply cut off
+                // by a newer user message.
+                toolCalls: turn.toolCalls.map((t) =>
+                  t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
+                ),
+              }
+            : turn,
+        );
+        sessions.set(agent, { ...session, turns, activeTurnId: null });
         return { sessions };
       });
     },
@@ -491,6 +514,24 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
           session.sessionId = payload.sessionId;
         }
         sessions.set(payload.agent, applyAcpUpdate(session, payload.update, payload.agent));
+        return { sessions };
+      });
+    },
+
+    applyEvents(payloads: AcpEventPayload[]) {
+      if (payloads.length === 0) return;
+      set((state) => {
+        const sessions = new Map(state.sessions);
+        for (const payload of payloads) {
+          const session = getOrCreateSession(sessions, payload.agent);
+          if (session.runtimeMode !== 'acp') {
+            session.runtimeMode = 'acp';
+          }
+          if (payload.sessionId && session.sessionId !== payload.sessionId) {
+            session.sessionId = payload.sessionId;
+          }
+          sessions.set(payload.agent, applyAcpUpdate(session, payload.update, payload.agent));
+        }
         return { sessions };
       });
     },

@@ -55,7 +55,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   const [optimisticMessages, setOptimisticMessages] = useState<ChatMessage[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const myName = useMemo(() => {
     const me = agents.find((a) => a.id === activeAgentId);
@@ -73,6 +73,20 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, optimisticMessages]);
+
+  // Auto-resize the textarea as the user types or pastes.
+  const resizeInput = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const maxHeight = 160;
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) resizeInput();
+  }, [isOpen, resizeInput]);
 
   const handleNewChat = async (participantName: string) => {
     const convId = await startConversation([myName, participantName]);
@@ -100,6 +114,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
     };
     setOptimisticMessages((prev) => [...prev, optimistic]);
     input.value = '';
+    input.style.height = 'auto';
     setCanSend(false);
     history.commit(body);
 
@@ -109,18 +124,29 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
       setSendError('Failed to send message.');
       // Restore the input so the user can retry.
       input.value = body;
+      resizeInput();
       setCanSend(true);
     }
   }, [selectedConversation, myName, sendMessage, history]);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       const input = inputRef.current;
       if (!input) return;
 
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         handleSend();
+        return;
+      }
+      if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? input.value.length;
+        input.value = input.value.slice(0, start) + '\n' + input.value.slice(end);
+        input.setSelectionRange(start + 1, start + 1);
+        setCanSend(input.value.trim() !== '');
+        resizeInput();
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
@@ -129,13 +155,14 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
         if (next !== null) {
           input.value = next;
           setCanSend(next.trim() !== '');
+          resizeInput();
           requestAnimationFrame(() => {
             input.setSelectionRange(next.length, next.length);
           });
         }
       }
     },
-    [handleSend, history],
+    [handleSend, history, resizeInput],
   );
 
   const totalUnread = conversations.reduce((sum, c) => sum + c.unreadCount, 0);
@@ -236,14 +263,18 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
 
                 <div className="shrink-0 border-t border-slate-800 p-2">
                   <div className="flex items-center gap-2 rounded-full bg-slate-800/80 px-3 py-2 border border-slate-700/50 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/30 transition-all">
-                    <input
+                    <textarea
                       ref={inputRef}
-                      type="text"
+                      rows={1}
                       defaultValue=""
-                      onChange={(e) => setCanSend(e.target.value.trim() !== '')}
+                      onChange={(e) => {
+                        setCanSend(e.target.value.trim() !== '');
+                        resizeInput();
+                      }}
+                      onPaste={() => requestAnimationFrame(resizeInput)}
                       onKeyDown={handleKeyDown}
                       placeholder={`Message ${selectedConversation.participants.filter((p) => p !== myName).join(', ')}…`}
-                      className="flex-1 bg-transparent text-slate-200 text-sm placeholder:text-slate-500 outline-none"
+                      className="flex-1 bg-transparent text-slate-200 text-sm placeholder:text-slate-500 outline-none resize-none py-1.5 min-h-[20px] max-h-[160px]"
                       data-testid="chat-input"
                       aria-label="Chat message input"
                     />
@@ -257,7 +288,7 @@ export function ChatPanel({ isOpen, onClose }: ChatPanelProps) {
                       <Send className="w-4 h-4" />
                     </button>
                   </div>
-                  <div className="text-[10px] text-slate-600 mt-1 px-1">Up/Down arrows recall recent inputs</div>
+                  <div className="text-[10px] text-slate-600 mt-1 px-1">Enter to send · Shift+Enter for new line · Up/Down arrows recall recent inputs</div>
                 </div>
               </>
             ) : (

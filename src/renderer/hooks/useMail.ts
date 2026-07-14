@@ -23,6 +23,7 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
     selectMessage,
     setComposing,
     markAsRead,
+    setMailbox,
     sendMessage,
     executeAction,
     showUnreadOnly,
@@ -37,7 +38,6 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   const activeProjectIdRef = useRef(activeProjectId);
   const pollIntervalRef = useRef(pollInterval);
   const fetchAllInboxesRef = useRef(fetchAllInboxes);
-  const getUnreadCountRef = useRef<(agent: string) => number>(() => 0);
 
   agentsRef.current = agents;
   activeProjectIdRef.current = activeProjectId;
@@ -150,12 +150,10 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   }, [mailboxes, activeProjectId]);
 
   // Total unread across all agents (scoped to current project).
-  // Info-tier scout chatter does not interrupt workflow, so it is excluded from
-  // the unread count surfaced on the mail icon.
+  // Use the server-provided unreadCount so the button stays enabled when the
+  // message list is paginated/filtered and does not contain every unread message.
   const totalUnread = Object.values(scopedMailboxes).reduce(
-    (sum, mb) =>
-      sum +
-      (mb?.messages?.filter((m) => !m.is_read && m.importance !== 'info').length || 0),
+    (sum, mb) => sum + (mb?.unreadCount || 0),
     0
   );
 
@@ -163,8 +161,6 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
   const getUnreadCount = useCallback((agent: string) => {
     return scopedMailboxes[agent]?.unreadCount || 0;
   }, [scopedMailboxes]);
-
-  getUnreadCountRef.current = getUnreadCount;
 
   // Get messages for specific agent
   const getMessages = useCallback((agent: string) => {
@@ -178,18 +174,32 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
 
   // Mark ALL messages read across the current project's agents (BAPert 1310).
   // The cloud endpoint is per agentName + project_id; acp-api scopes to the
-  // current project the same way fetchInbox does. Only hit agents that have
-  // unread, then refresh so the badges reflect unread->0. Returns which agents
-  // (if any) failed so the caller can surface it instead of failing silently.
+  // current project the same way fetchInbox does. Send for every agent and let
+  // the server decide what to mark — the local unread count is not authoritative.
   const markAllRead = useCallback(async (): Promise<{ ok: boolean; failed: string[] }> => {
-    const currentGetUnreadCount = getUnreadCountRef.current;
-    const targets = agentsRef.current.filter((a) => currentGetUnreadCount(a) > 0);
+    const targets = agentsRef.current;
+    const projectId = activeProjectIdRef.current;
     if (targets.length === 0) return { ok: true, failed: [] };
     const results = await Promise.all(
       targets.map(async (a) => ({ agent: a, res: await markAllMessagesRead(a) })),
     );
     const failed = results.filter((r) => !r.res.success).map((r) => r.agent);
-    fetchAllInboxesRef.current(agentsRef.current, activeProjectIdRef.current);
+
+    // Optimistically clear the unread state for successful agents so the UI
+    // reacts immediately while the authoritative fetch catches up.
+    for (const { agent, res } of results) {
+      if (!res.success) continue;
+      const key = projectId !== undefined ? `${projectId}:${agent}` : agent;
+      const existing = useMailStore.getState().mailboxes[key];
+      if (existing) {
+        setMailbox(agent, {
+          unreadCount: 0,
+          messages: existing.messages.map((m) => ({ ...m, is_read: true })),
+        }, projectId);
+      }
+    }
+
+    fetchAllInboxesRef.current(agentsRef.current, projectId);
     return { ok: failed.length === 0, failed };
   }, []);
 

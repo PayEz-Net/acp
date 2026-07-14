@@ -224,6 +224,39 @@ describe('acpSessionStore', () => {
     expect(session?.turns[0].status).toBe('error');
   });
 
+  it('stops an active assistant turn without marking it as a send failure', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'tool_call',
+        sessionId: 's1',
+        toolCall: {
+          toolCallId: 'tc1',
+          title: 'WriteFile',
+          status: 'in_progress',
+          content: [],
+        },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Partial answer' } },
+      }),
+    );
+    store.stopActiveTurn('NextPert', 'interrupted');
+
+    const session = store.getSession('NextPert');
+    expect(session?.turns[0].status).toBe('done');
+    expect(session?.turns[0].stopReason).toBe('interrupted');
+    expect(session?.turns[0].contentText).toBe('Partial answer');
+    expect(session?.turns[0].toolCalls[0].status).toBe('failed');
+    expect(session?.activeTurnId).toBeNull();
+    expect(session?.error).toBeUndefined();
+  });
+
   it('stores pending permission requests', () => {
     const store = useAcpSessionStore.getState();
     store.startAssistantTurn('NextPert', 's1');
