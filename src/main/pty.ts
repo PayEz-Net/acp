@@ -69,6 +69,9 @@ interface ManagedPty {
   // paste drains). See queuePtyWrite/drainPtyWrite.
   writeBuf: string;
   writeDraining: boolean;
+  // PayEzVibe agent session token for the active session; used to authorize
+  // agent-output POSTs without relying on name/id resolution.
+  sessionToken?: string;
 }
 
 export type AgentRuntime = TerminalProvider;
@@ -693,6 +696,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   if (opts?.agentId != null) {
     void (async () => {
       const result = await startAgentSession(id, opts.agentId!, opts.projectId);
+      if (result.ok && result.session.sessionToken) {
+        managed.sessionToken = result.session.sessionToken;
+      }
       if (!result.ok) {
         // Surface the non-fatal session-start failure in the UI so the user
         // sees why the agent-output stream will fail, instead of a silent
@@ -721,7 +727,15 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // now that mail push is handled by the MCP Channels path.
   ptyProcess.onData((data) => {
     safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data });
-    reportPtyOutput(agentName, id, data, provider, opts?.projectId ? String(opts.projectId) : undefined);
+    reportPtyOutput(
+      agentName,
+      id,
+      data,
+      provider,
+      opts?.projectId ? String(opts.projectId) : undefined,
+      undefined,
+      managed.sessionToken,
+    );
 
     const buf = Buffer.from(data);
     if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {

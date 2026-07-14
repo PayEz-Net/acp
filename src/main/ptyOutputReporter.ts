@@ -20,6 +20,7 @@ interface PendingOutput {
   provider?: string;
   projectId?: string;
   sessionId?: string;
+  sessionToken?: string;
   chunks: string[];
   timer: NodeJS.Timeout | null;
 }
@@ -72,6 +73,7 @@ function flushEntry(key: string): void {
     provider: entry.provider,
     projectId: entry.projectId,
     sessionId: entry.sessionId,
+    sessionToken: entry.sessionToken,
   }).catch(() => {
     recordDrop(Buffer.byteLength(data));
   });
@@ -84,6 +86,7 @@ export function reportPtyOutput(
   provider?: string,
   projectId?: string,
   sessionId?: string,
+  sessionToken?: string,
 ): void {
   if (!data) return;
 
@@ -96,6 +99,7 @@ export function reportPtyOutput(
       provider,
       projectId,
       sessionId,
+      sessionToken,
       chunks: [],
       timer: null,
     };

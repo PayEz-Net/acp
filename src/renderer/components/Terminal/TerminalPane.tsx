@@ -55,14 +55,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
   const startAgent = useCallback(async () => {
     if (spawnPendingRef.current) {
-      console.log(`[Agent] Spawn already in flight for ${agent.name}; skipping duplicate`);
+      console.debug(`[Agent] Spawn already in flight for ${agent.name}; skipping duplicate`);
       return;
     }
     // Global dedupe: if another pane / StrictMode instance is already spawning
     // this agent, await that promise instead of starting a second spawn.
     const inFlight = spawnPromiseMap.get(agent.name);
     if (inFlight) {
-      console.log(`[Agent] Coalescing with in-flight spawn for ${agent.name}`);
+      console.debug(`[Agent] Coalescing with in-flight spawn for ${agent.name}`);
       try {
         const terminalId = await inFlight;
         if (terminalId && !agent.terminalId) {

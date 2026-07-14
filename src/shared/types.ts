@@ -404,6 +404,7 @@ export const IPC_CHANNELS = {
 
   // vsql-cache (PayEz Vibe SQL agent-output store)
   VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
+  VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN: 'vsql-cache:getActiveSessionToken',
   // Renderer → main: trigger app.relaunch() + app.exit(0). Originally
   // Ship F-bis fail-loud-stub Restart-ACP affordance. Stays for
   // diagnostic / manual relaunch needs (e.g., backend recovery).

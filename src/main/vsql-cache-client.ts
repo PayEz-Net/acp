@@ -107,6 +107,7 @@ export interface VsqlCacheOutputPayload {
   provider?: string;
   projectId?: string;
   sessionId?: string;
+  sessionToken?: string;
   userId?: string;
 }
 
@@ -130,6 +131,7 @@ export async function postAgentOutput(payload: VsqlCacheOutputPayload): Promise<
     terminalId: payload.terminalId,
     data: payload.data,
     provider: payload.provider,
+    sessionToken: payload.sessionToken,
   });
 
   const fetchHeaders: Record<string, string> = {

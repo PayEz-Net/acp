@@ -118,6 +118,11 @@ export function useVsqlCacheSse(): {
         return;
       }
 
+      const sessionTokenResult = await window.electronAPI.getActiveSessionToken(Number(projectIdStr));
+      if (sessionTokenResult.error) {
+        console.error('[VsqlCacheSse] Failed to get active session token:', sessionTokenResult.error);
+      }
+
       const params = new URLSearchParams();
       params.set('projectId', projectIdStr);
       if (agentsKey) {
@@ -126,13 +131,15 @@ export function useVsqlCacheSse(): {
       if (lastTsRef.current) {
         params.set('since', lastTsRef.current);
       }
-
       const url = `${vsqlCacheBaseUrl}${path}?${params.toString()}`;
       const headers: Record<string, string> = {
         Accept: 'text/event-stream',
         'X-Vibe-Project-Id': projectIdStr,
         ...(authHeaders as Record<string, string>),
       };
+      if (sessionTokenResult.token) {
+        headers['X-Session-Token'] = sessionTokenResult.token;
+      }
 
       console.log(`[VsqlCacheSse] Connecting... (attempt ${retryCount + 1})`);
       setConn('reconnecting');

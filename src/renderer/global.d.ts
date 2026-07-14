@@ -72,6 +72,7 @@ declare global {
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
       getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
+      getActiveSessionToken: (projectId: number) => Promise<{ token: string | null; error?: string }>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
 

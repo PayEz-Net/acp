@@ -164,6 +164,24 @@ export function getAgentSession(terminalId: string): AgentSession | null {
   return state?.session ?? null;
 }
 
+/**
+ * Return an active PayEzVibe session token for any terminal in the given
+ * project. Used by the renderer's unified agent-output SSE stream to
+ * authenticate without depending on name/id resolution.
+ */
+export function getActiveSessionTokenForProject(projectId: number): string | undefined {
+  for (const state of sessions.values()) {
+    if (
+      state.projectId === projectId &&
+      state.status === 'active' &&
+      state.session?.sessionToken
+    ) {
+      return state.session.sessionToken;
+    }
+  }
+  return undefined;
+}
+
 function startHeartbeat(state: SessionState): void {
   if (state.heartbeatTimer) {
     clearInterval(state.heartbeatTimer);

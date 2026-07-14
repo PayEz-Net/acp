@@ -36,6 +36,13 @@ function resolveProjectId(projectId?: number): number | undefined {
   return projectId ?? useProjectStore.getState().activeProject?.id;
 }
 
+/** Return true if an error is an abort/signal cancellation (benign noise). */
+function isAbortError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  return false;
+}
+
 /** Extract bare agent name from a composite mailbox key */
 function extractAgentFromKey(key: string): string {
   const idx = key.indexOf(':');
@@ -347,6 +354,11 @@ export const useMailStore = create<MailStore>((set, get) => ({
         }, pid);
       }
     } catch (err) {
+      if (isAbortError(err)) {
+        // Caller aborted (e.g., React StrictMode cleanup) — not a real failure.
+        setMailbox(agent, { loading: false }, pid);
+        return;
+      }
       console.error(`[Mail] Failed to fetch inbox for ${agent}:`, err);
       setMailbox(agent, {
         loading: false,
@@ -380,7 +392,7 @@ export const useMailStore = create<MailStore>((set, get) => ({
       try {
         const aliasToAgent = new Map(agents.map((a) => [resolveMailAlias(a), a]));
         const apiAgents = agents.map((a) => resolveMailAlias(a));
-        const qs = `?agents=${encodeURIComponent(apiAgents.join(','))}${pid != null ? `&project_id=${pid}` : ''}`;
+        const qs = `?agents=${encodeURIComponent(apiAgents.join(','))}`;
         const res = await mailRequest(`/inboxes${qs}`, { signal });
         if (res.status === 429) { _rateLimitedUntil = Date.now() + RATE_LIMIT_BACKOFF_MS; return; }
         if (!res.ok) throw new Error(`Failed to fetch inboxes: ${res.status}`);
@@ -414,6 +426,11 @@ export const useMailStore = create<MailStore>((set, get) => ({
           }, pid);
         }
       } catch (err) {
+        if (isAbortError(err)) {
+          // Caller aborted (e.g., React StrictMode cleanup) — not a real failure.
+          for (const agent of agents) setMailbox(agent, { loading: false }, pid);
+          return;
+        }
         console.error('[Mail] fetchAllInboxes (aggregated) failed:', err);
         // No retry-storm: clear loading, leave existing data; the next non-cooldown trigger retries.
         for (const agent of agents) setMailbox(agent, { loading: false }, pid);

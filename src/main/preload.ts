@@ -40,6 +40,7 @@ const IPC_CHANNELS = {
   ACP_GET_LOGS: 'acp:getLogs',
   ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
   VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
+  VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN: 'vsql-cache:getActiveSessionToken',
   ACP_RELAUNCH: 'acp:relaunch',
   // Wave C/2 (msg 1155 + 1156)
   PROJECT_SWITCH: 'project:switch',
@@ -359,6 +360,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, method, path);
   },
 
+  getActiveSessionToken: (projectId: number): Promise<{ token: string | null; error?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN, projectId);
+  },
+
   onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void): () => void => {
     const handler = (_: Electron.IpcRendererEvent, data: { available: boolean; message?: string }) => {
       if (!isValidPayload<{ available: boolean }>(data, ['available'])) {
@@ -519,6 +524,7 @@ declare global {
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
       getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
+      getActiveSessionToken: (projectId: number) => Promise<{ token: string | null; error?: string }>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
       // Wave C project-switch + lifecycle event subscribers

@@ -23,6 +23,7 @@ import { IPC_CHANNELS } from '../shared/types';
 import { colonizeWorkspace } from './colonize';
 import { VIBE_API_URL, cloudEndpointsSnapshot } from './env';
 import { buildVsqlCacheAuthHeaders } from './vsql-cache-client';
+import { getActiveSessionTokenForProject } from './agentSessionLifecycle';
 
 // --- Install-time / headless colonization (NSIS customInstall) -------------
 // The installer invokes the just-installed exe headless:
@@ -367,6 +368,19 @@ function setupIpcHandlers() {
       return { url: VIBE_API_URL, ...headers };
     } catch (e) {
       console.error('[vibe-api] agent-output auth headers error:', e);
+      return { error: String(e) };
+    }
+  });
+
+  // Agent-output stream session token: return any active PayEzVibe session
+  // token for the requested project so the renderer SSE stream can resolve
+  // without relying on agent name/id lookups.
+  ipcMain.handle(IPC_CHANNELS.VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN, (_, projectId: number) => {
+    try {
+      const token = getActiveSessionTokenForProject(projectId);
+      return { token: token ?? null };
+    } catch (e) {
+      console.error('[vibe-api] get active session token error:', e);
       return { error: String(e) };
     }
   });
