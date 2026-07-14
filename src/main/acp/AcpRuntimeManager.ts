@@ -72,6 +72,13 @@ export class AcpRuntimeManager extends EventEmitter {
   private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: () => void }> = [];
   private promptInFlight = false;
 
+  // When the user is actively typing to an agent, suppress auto-injected mail
+  // notices so the agent doesn't get trapped in a mail-processing loop that
+  // drowns out the human. User prompts refresh this timestamp; mail injection
+  // checks it and is dropped during the cooldown window.
+  private lastUserPromptTime = 0;
+  private static readonly MAIL_COOLDOWN_MS = 5 * 60 * 1000;
+
   // Crash-recovery state. We track whether a kill was intentional so an
   // unexpected process exit can auto-restart, and we back off so a repeatedly
   // crashing runtime (e.g., Kimi cold-init race on Windows) doesn't spin forever.
@@ -349,12 +356,20 @@ export class AcpRuntimeManager extends EventEmitter {
         kickoff = buildAgentBootPrompt(this.options.agentName);
       }
     }
-    this.prompt(kickoff).catch((err) => {
+    this.systemPrompt(kickoff).catch((err) => {
       console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
     });
   }
 
   async prompt(text: string): Promise<void> {
+    if (!this.process?.isRunning() || !this.sessionId) {
+      throw new Error('ACP runtime not initialized');
+    }
+    this.lastUserPromptTime = Date.now();
+    await this.systemPrompt(text);
+  }
+
+  private async systemPrompt(text: string): Promise<void> {
     if (!this.process?.isRunning() || !this.sessionId) {
       throw new Error('ACP runtime not initialized');
     }
@@ -367,11 +382,35 @@ export class AcpRuntimeManager extends EventEmitter {
       throw new Error('ACP runtime not initialized');
     }
 
+    this.lastUserPromptTime = Date.now();
     const supportsImage = Boolean(this.capabilities?.promptCapabilities?.image);
     const prompt: AcpSendContentBlock[] = supportsImage
       ? content
       : [{ type: 'text', text: this.buildMarkdownFallback(content) }];
     await this.sendPrompt(prompt);
+  }
+
+  /**
+   * Inject a mail notice as a user-turn prompt. Suppressed when the human user
+   * has recently sent a direct message to this agent, to prevent mail loops
+   * from drowning out the user.
+   */
+  async injectMail(text: string): Promise<boolean> {
+    if (!this.process?.isRunning() || !this.sessionId) {
+      console.warn(`[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized`);
+      return false;
+    }
+
+    const elapsed = Date.now() - this.lastUserPromptTime;
+    if (this.lastUserPromptTime > 0 && elapsed < AcpRuntimeManager.MAIL_COOLDOWN_MS) {
+      const remaining = Math.ceil((AcpRuntimeManager.MAIL_COOLDOWN_MS - elapsed) / 1000);
+      console.log(`[ACP ${this.options.agentName}] injectMail suppressed: user active ${Math.round(elapsed / 1000)}s ago, cooldown ${remaining}s remaining`);
+      return false;
+    }
+
+    const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
+    await this.sendPrompt(prompt);
+    return true;
   }
 
   private sendPrompt(prompt: AcpSendContentBlock[]): Promise<void> {

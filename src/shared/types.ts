@@ -470,6 +470,7 @@ export const IPC_CHANNELS = {
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
   ACP_SEND_MESSAGE: 'acp:send-message',
+  ACP_INJECT_MAIL: 'acp:inject-mail',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event

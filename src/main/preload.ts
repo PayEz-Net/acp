@@ -64,6 +64,7 @@ const IPC_CHANNELS = {
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
   ACP_SEND_MESSAGE: 'acp:send-message',
+  ACP_INJECT_MAIL: 'acp:inject-mail',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
@@ -83,6 +84,7 @@ type AgentSessionStartFailedPayload = { agentName: string; terminalId: string; s
 
 // ACP transport type aliases (mirrors ../shared/acpTypes).
 type AcpPromptPayload = { agent: string; sessionId: string; text: string };
+type AcpInjectMailPayload = { agent: string; sessionId: string; text: string };
 type AcpCancelPayload = { agent: string; sessionId: string };
 type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
 type AcpKillPayload = { agent: string; sessionId: string };
@@ -307,6 +309,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_PROMPT, payload);
   },
 
+  injectAcpMail: (payload: AcpInjectMailPayload): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_INJECT_MAIL, payload);
+  },
+
   sendAcpCancel: (payload: AcpCancelPayload): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_CANCEL, payload);
   },
@@ -512,6 +518,7 @@ declare global {
       triggerPaste: () => Promise<void>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
+      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;

@@ -1,5 +1,5 @@
 import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload, AgentSessionStartFailedPayload } from '@shared/types';
-import type { AcpEventPayload, AcpPromptPayload, AcpSendMessagePayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
+import type { AcpEventPayload, AcpPromptPayload, AcpInjectMailPayload, AcpSendMessagePayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
 
 export {};
 
@@ -59,6 +59,7 @@ declare global {
       triggerPaste: () => Promise<void>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
+      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;

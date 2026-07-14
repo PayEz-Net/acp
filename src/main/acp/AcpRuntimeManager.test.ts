@@ -231,6 +231,40 @@ describe('AcpRuntimeManager', () => {
     });
   });
 
+  it('injects mail notices when the user has not recently spoken', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    const injected = await manager.injectMail('you have mail');
+
+    expect(injected).toBe(true);
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-mail',
+          prompt: [{ type: 'text', text: 'you have mail' }],
+        }),
+      }),
+    );
+  });
+
+  it('suppresses mail notices while the user is actively addressing the agent', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
+    await manager.start();
+
+    // User sends a direct message.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('hello');
+
+    // Mail that arrives immediately afterward should be suppressed.
+    const injected = await manager.injectMail('you have mail');
+    expect(injected).toBe(false);
+  });
+
   it('serializes concurrent prompts so only one session/prompt is in flight at a time', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-serial' });

@@ -269,8 +269,8 @@ export function useAcpSse() {
                 // Surface the alert visibly in the active transcript/output surface
                 // BEFORE the agent starts thinking, so the user knows what triggered it.
                 // Isolated try/catch: a visual-rendering bug must NEVER stop the actual mail push.
+                const acpSession = useAcpSessionStore.getState().sessions.get(agentName);
                 try {
-                  const acpSession = useAcpSessionStore.getState().sessions.get(agentName);
                   console.log(`[AcpSse] Mail visual path for ${agentName}: sessionId=${acpSession?.sessionId ?? 'none'} terminalId=${agentState?.terminalId ?? 'none'}`);
                   if (acpSession?.sessionId) {
                     // ACP transcript mode: add a user turn so it renders in the structured transcript.
@@ -300,14 +300,24 @@ export function useAcpSse() {
                 );
                 console.log(`[AcpSse] Resolved provider for ${agentName}: ${provider} (runtime=${agentState?.runtimeProvider ?? '-'} user=${agentState?.provider ?? '-'} team=${useProjectStore.getState().activeProject?.runtime_choice ?? '-'} global=${useAppStore.getState().settings?.agentProvider ?? '-'})`);
                 if (shouldInjectMailToPty(provider)) {
-                  if (agentState?.terminalId) {
+                  const mailSessionId = acpSession?.sessionId;
+                  if (agentState?.terminalId && mailSessionId) {
                     const tid = agentState.terminalId;
-                    console.log(`[AcpSse] Injecting mail notice to ${agentName} terminal ${tid} via writeTerminal`);
+                    console.log(`[AcpSse] Injecting mail notice to ${agentName} terminal ${tid} via ACP inject-mail`);
                     setTimeout(() => {
-                      window.electronAPI.writeTerminal(tid, noticeText + '\r\n');
+                      window.electronAPI
+                        .injectAcpMail({ agent: agentName, sessionId: mailSessionId, text: noticeText })
+                        .then((injected) => {
+                          if (!injected) {
+                            console.log(`[AcpSse] Mail notice to ${agentName} suppressed: user recently active`);
+                          }
+                        })
+                        .catch((err: unknown) => {
+                          console.error(`[AcpSse] injectAcpMail failed for ${agentName}:`, err);
+                        });
                     }, 500);
                   } else {
-                    console.warn(`[AcpSse] Cannot inject mail notice to ${agentName}: no terminalId (provider=${provider})`);
+                    console.warn(`[AcpSse] Cannot inject mail notice to ${agentName}: no terminalId/sessionId (provider=${provider})`);
                   }
                 } else {
                   console.log(`[AcpSse] Provider ${provider} for ${agentName} does not need PTY injection`);

@@ -98,6 +98,12 @@ export interface AcpPromptPayload {
   text: string;
 }
 
+export interface AcpInjectMailPayload {
+  agent: string;
+  sessionId: string;
+  text: string;
+}
+
 export interface AcpSendMessagePayload {
   agent: string;
   sessionId: string;

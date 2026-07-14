@@ -14,6 +14,7 @@ import {
 import {
   type AcpEventPayload,
   type AcpPromptPayload,
+  type AcpInjectMailPayload,
   type AcpSendMessagePayload,
   type AcpCancelPayload,
   type AcpSetModePayload,
@@ -1059,6 +1060,16 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
     }
     console.log(`[ACP main] prompt received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
     await runtime.prompt(payload.text);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_INJECT_MAIL, async (_, payload: AcpInjectMailPayload) => {
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) {
+      console.warn(`[ACP] inject-mail for unknown agent: ${payload.agent}`);
+      return false;
+    }
+    console.log(`[ACP main] mail notice received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
+    return runtime.injectMail(payload.text);
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_CANCEL, (_, payload: AcpCancelPayload) => {
