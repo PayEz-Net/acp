@@ -88,7 +88,7 @@ node /e/repos/acp-desktop/docs/tools/acp-probe.mjs
 - `corepack prepare` on the **system** node fails pnpm 10.33 signature verification ("Cannot find matching keyid") — use the portable node's own corepack.
 - `build:native:sea` alone fails asserting dist-web missing — run the full `pnpm build` first.
 - signtool absent on this box → "signtool ENOENT" / "signature seems corrupted" warnings during SEA inject — harmless for local install (ad-hoc signing skipped).
-- GitNexus CLI `analyze` segfaults on this machine (acp-desktop AGENTS.md asks for it) — manual impact analysis is the accepted workaround.
+- GitNexus (RESOLVED 2026-07-17, was: `analyze` segfaults): root cause was (1) `analyze` requires Node ≥22 while the machine default is Node 20, and (2) bare `npx gitnexus` on Node 20 resolved a stale cached 1.6.3 whose storage version can't read the 1.6.9 index. Durable rules: read-only commands (status/impact/context/query/detect-changes) via `npx -y gitnexus@latest ...` (never bare `npx gitnexus` on Node 20); re-index via portable Node 24 — `PATH="/e/repos/.tmp/node24/node:$PATH" npx -y gitnexus@latest analyze`. Fresh acp-desktop index exists (1.6.9: 4,446 nodes / 9,180 edges); the AGENTS.md gitnexus block self-regenerates on analyze, no hand edits.
 - `pnpm install` skips some build scripts (esbuild, node-pty) with default policy — fine for typecheck/tests/SEA; node-pty only matters for terminal tooling.
 
 ## History
