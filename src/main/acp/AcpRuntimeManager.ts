@@ -51,6 +51,15 @@ async function acquireInitLock(): Promise<() => void> {
 export class AcpRuntimeManager extends EventEmitter {
   private process: AcpProcess | null = null;
   private sessionId: string | null = null;
+  // Preserve the session id across runtime restarts so a watchdog/crash
+  // restart can resume the prior session via session/resume instead of
+  // re-onboarding into an empty session/new (which wiped the agent's entire
+  // working context). Cleared only when a fresh session is established.
+  private lastSessionId: string | null = null;
+  // Whether the most recent startOnce() resumed an existing session. restart()
+  // uses this to decide whether queued prompts drain (context kept) or drop
+  // with a visible error (fresh session, context gone).
+  private resumedLastStart = false;
   private initialized = false;
   private pendingPermissions = new Map<number | string, PendingPermission>();
   private autoApprove = false;
@@ -72,13 +81,6 @@ export class AcpRuntimeManager extends EventEmitter {
   private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: () => void }> = [];
   private promptInFlight = false;
 
-  // When the user is actively typing to an agent, suppress auto-injected mail
-  // notices so the agent doesn't get trapped in a mail-processing loop that
-  // drowns out the human. User prompts refresh this timestamp; mail injection
-  // checks it and is dropped during the cooldown window.
-  private lastUserPromptTime = 0;
-  private static readonly MAIL_COOLDOWN_MS = 5 * 60 * 1000;
-
   // Crash-recovery state. We track whether a kill was intentional so an
   // unexpected process exit can auto-restart, and we back off so a repeatedly
   // crashing runtime (e.g., Kimi cold-init race on Windows) doesn't spin forever.
@@ -87,6 +89,13 @@ export class AcpRuntimeManager extends EventEmitter {
   private restartCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly MAX_RESTARTS = 5;
+
+  // Preserve the most recent user prompts across runtime restarts so a watchdog
+  // restart (or unexpected process crash) doesn't force the user to restate the
+  // mission from scratch. We keep a short sliding window in the main process
+  // because the renderer-side transcript store is not reachable here.
+  private recentUserPrompts: string[] = [];
+  private readonly MAX_PRESERVED_PROMPTS = 6;
 
   constructor(
     private readonly id: string,
@@ -126,7 +135,12 @@ export class AcpRuntimeManager extends EventEmitter {
 
   private startPromptWatchdog(): void {
     const WATCHDOG_INTERVAL_MS = 15_000;
-    const PROMPT_IDLE_MS = 120_000;
+    // 120s was too aggressive for legitimately silent-but-working turns (deep
+    // reasoning, long tool calls without progress pings). 5 minutes gives those
+    // turns room to breathe. This is the sole hang detector: there is no
+    // wall-clock ceiling on session/prompt, and only content-bearing
+    // notifications reset the idle clock (see handleNotification).
+    const PROMPT_IDLE_MS = 300_000;
     const WATCHDOG_IDLE_TICKS = Math.ceil(PROMPT_IDLE_MS / WATCHDOG_INTERVAL_MS);
     this.promptPending = true;
     this.promptIdleTicks = 0;
@@ -142,12 +156,10 @@ export class AcpRuntimeManager extends EventEmitter {
       if (!this.process?.isRunning()) {
         const message = `ACP process for ${this.options.agentName} died while a turn was pending; restarting runtime`;
         console.warn(`[ACP ${this.options.agentName}] ${message}`);
-        this.stopPromptWatchdog();
-        this.emitAcpEvent({
-          sessionUpdate: 'error',
-          sessionId: this.sessionId ?? '',
-          error: message,
-        });
+        // Settle the pending prompt promise so its .catch doesn't fire a
+        // duplicate error / restart scheduling below.
+        if (this.promptSettledRef) this.promptSettledRef.current = true;
+        this.failPendingTurn(message);
         void this.restart();
         return;
       }
@@ -160,15 +172,36 @@ export class AcpRuntimeManager extends EventEmitter {
         this.promptSettledRef!.current = true;
         const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending; restarting runtime`;
         console.warn(`[ACP ${this.options.agentName}] ${message}`);
-        this.stopPromptWatchdog();
-        this.emitAcpEvent({
-          sessionUpdate: 'error',
-          sessionId: this.sessionId ?? '',
-          error: message,
-        });
+        // Best-effort cancel: a merely-slow runtime may still honor it and
+        // resolve the turn; a truly hung one ignores it and gets killed by the
+        // restart. Either way the turn is declared over here so the queue is
+        // not held hostage by a promise that may never settle.
+        this.process?.notify('session/cancel', { sessionId: this.sessionId });
+        this.failPendingTurn(message);
         void this.restart();
       }
     }, WATCHDOG_INTERVAL_MS);
+  }
+
+  /**
+   * Declare the in-flight turn over without touching the process or the
+   * session: surface the error, emit a turn_complete so the renderer clears
+   * its spinner, and release the in-flight flag so the prompt queue can move.
+   * Callers decide whether the runtime itself also needs a restart.
+   */
+  private failPendingTurn(message: string): void {
+    this.stopPromptWatchdog();
+    this.emitAcpEvent({
+      sessionUpdate: 'error',
+      sessionId: this.sessionId ?? '',
+      error: message,
+    });
+    this.emitAcpEvent({
+      sessionUpdate: 'turn_complete',
+      sessionId: this.sessionId ?? '',
+      stopReason: 'cancel',
+    });
+    this.promptInFlight = false;
   }
 
   private stopPromptWatchdog(): void {
@@ -293,24 +326,52 @@ export class AcpRuntimeManager extends EventEmitter {
     const releaseLock = await acquireInitLock();
     let initResult: Record<string, unknown>;
     let sessionResult: Record<string, unknown>;
+    let agentCaps: AcpAgentCapabilities = {};
+    let resumed = false;
     try {
       initResult = (await this.process.request('initialize', {
         protocolVersion: 1,
         capabilities: this.provider.defaultCapabilities,
         clientInfo: { name: 'acp-desktop', version: '1.0.0' },
       })) as Record<string, unknown>;
+      agentCaps = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
 
-      sessionResult = (await this.process.request('session/new', {
-        mcpServers: [],
-        cwd: this.options.workDir,
-      })) as Record<string, unknown>;
+      // Resume the prior session when possible. A restart (watchdog, crash,
+      // failed turn) must not throw away the agent's working context by
+      // starting an empty session/new. Kimi advertises loadSession and
+      // implements session/resume (no history replay — the renderer already
+      // holds the transcript). Unknown/expired sessions return a JSON-RPC
+      // error and fall back to session/new.
+      if (this.lastSessionId && agentCaps.loadSession) {
+        try {
+          await this.process.request('session/resume', {
+            sessionId: this.lastSessionId,
+            cwd: this.options.workDir,
+            mcpServers: [],
+          });
+          resumed = true;
+          console.log(`[ACP ${this.options.agentName}] resumed session ${this.lastSessionId}`);
+        } catch (err) {
+          console.warn(`[ACP ${this.options.agentName}] session/resume failed for ${this.lastSessionId}; starting a fresh session:`, err);
+        }
+      }
+      if (resumed) {
+        sessionResult = { sessionId: this.lastSessionId };
+      } else {
+        sessionResult = (await this.process.request('session/new', {
+          mcpServers: [],
+          cwd: this.options.workDir,
+        })) as Record<string, unknown>;
+      }
     } finally {
       releaseLock();
     }
 
     this.sessionId = (sessionResult.sessionId as string) ?? null;
+    this.lastSessionId = this.sessionId;
+    this.resumedLastStart = resumed;
     this.initialized = true;
-    this.capabilities = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
+    this.capabilities = agentCaps;
     this.markHealthy();
 
     if (this.options.agentId != null) {
@@ -329,7 +390,10 @@ export class AcpRuntimeManager extends EventEmitter {
       agentInfo: (initResult.agentInfo as AcpAgentInfo) ?? { name: this.provider.displayName },
     });
 
-    this.process.notify('session/list_commands', { sessionId: this.sessionId });
+    // No `session/list_commands` nudge here: it's not an ACP-spec method, and
+    // Kimi (the only ACP provider) pushes `available_commands_update`
+    // proactively after `session/new`. Sending it just made the agent log a
+    // -32601 "Method not found" to stderr on every startup.
 
     // Restore the automatic onboarding kickoff that the PTY fallback path
     // has always provided. The ACP path (e.g., `kimi acp`) no longer shows
@@ -342,30 +406,41 @@ export class AcpRuntimeManager extends EventEmitter {
     // ACP adapter crashes with -32603 if the agent emits a tool call before the
     // session is fully initialized, so we must embed the data instead of asking
     // the agent to curl it on turn one.
-    let kickoff = this.options.bootPrompt?.trim() ?? '';
-    if (!kickoff) {
-      try {
-        const [profile, unreadCount] = await Promise.all([
-          acpApiGetAgentProfile(this.options.agentName),
-          acpApiGetUnreadMailCount(this.options.agentName),
-        ]);
-        console.log(`[ACP] boot prompt data for ${this.options.agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'null'}`);
-        kickoff = buildAgentBootPrompt(this.options.agentName, { profile, unreadCount });
-      } catch (err) {
-        console.warn(`[ACP] failed to pre-fetch boot data for ${this.options.agentName}:`, err);
-        kickoff = buildAgentBootPrompt(this.options.agentName);
+    // A resumed session already carries the boot prompt and full conversation
+    // history — re-kicking would double-onboard and burn a turn. Only fresh
+    // sessions get the onboarding kickoff.
+    if (!resumed) {
+      let kickoff = this.options.bootPrompt?.trim() ?? '';
+      if (!kickoff) {
+        try {
+          const [profile, unreadCount] = await Promise.all([
+            acpApiGetAgentProfile(this.options.agentName),
+            acpApiGetUnreadMailCount(this.options.agentName),
+          ]);
+          console.log(`[ACP] boot prompt data for ${this.options.agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'null'}`);
+          kickoff = buildAgentBootPrompt(this.options.agentName, {
+            profile,
+            unreadCount,
+            recentContext: this.recentUserPrompts,
+          });
+        } catch (err) {
+          console.warn(`[ACP] failed to pre-fetch boot data for ${this.options.agentName}:`, err);
+          kickoff = buildAgentBootPrompt(this.options.agentName, {
+            recentContext: this.recentUserPrompts,
+          });
+        }
       }
+      this.systemPrompt(kickoff).catch((err) => {
+        console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
+      });
     }
-    this.systemPrompt(kickoff).catch((err) => {
-      console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
-    });
   }
 
   async prompt(text: string): Promise<void> {
     if (!this.process?.isRunning() || !this.sessionId) {
       throw new Error('ACP runtime not initialized');
     }
-    this.lastUserPromptTime = Date.now();
+    this.recordUserPrompt(text);
     await this.systemPrompt(text);
   }
 
@@ -377,23 +452,30 @@ export class AcpRuntimeManager extends EventEmitter {
     await this.sendPrompt(prompt);
   }
 
+  private recordUserPrompt(text: string): void {
+    this.recentUserPrompts.push(text);
+    if (this.recentUserPrompts.length > this.MAX_PRESERVED_PROMPTS) {
+      this.recentUserPrompts.shift();
+    }
+  }
+
   async sendMessage(content: AcpSendContentBlock[]): Promise<void> {
     if (!this.process?.isRunning() || !this.sessionId) {
       throw new Error('ACP runtime not initialized');
     }
 
-    this.lastUserPromptTime = Date.now();
     const supportsImage = Boolean(this.capabilities?.promptCapabilities?.image);
     const prompt: AcpSendContentBlock[] = supportsImage
       ? content
       : [{ type: 'text', text: this.buildMarkdownFallback(content) }];
+    this.recordUserPrompt(prompt.map((b) => (b.type === 'text' ? b.text : '[image]')).join(' '));
     await this.sendPrompt(prompt);
   }
 
   /**
-   * Inject a mail notice as a user-turn prompt. Suppressed when the human user
-   * has recently sent a direct message to this agent, to prevent mail loops
-   * from drowning out the user.
+   * Inject a mail notice as a user-turn prompt. Queued behind any prompt
+   * already in flight so we never overlap session/prompt calls on Kimi's
+   * runtime, but never dropped when the runtime is healthy.
    */
   async injectMail(text: string): Promise<boolean> {
     if (!this.process?.isRunning() || !this.sessionId) {
@@ -401,14 +483,8 @@ export class AcpRuntimeManager extends EventEmitter {
       return false;
     }
 
-    const elapsed = Date.now() - this.lastUserPromptTime;
-    if (this.lastUserPromptTime > 0 && elapsed < AcpRuntimeManager.MAIL_COOLDOWN_MS) {
-      const remaining = Math.ceil((AcpRuntimeManager.MAIL_COOLDOWN_MS - elapsed) / 1000);
-      console.log(`[ACP ${this.options.agentName}] injectMail suppressed: user active ${Math.round(elapsed / 1000)}s ago, cooldown ${remaining}s remaining`);
-      return false;
-    }
-
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
+    this.recordUserPrompt(text);
     await this.sendPrompt(prompt);
     return true;
   }
@@ -453,26 +529,18 @@ export class AcpRuntimeManager extends EventEmitter {
     const settledRef = { current: false };
     this.promptSettledRef = settledRef;
 
-    // Start the inactivity watchdog. Slow-but-healthy turns (long tool calls,
-    // heavy reasoning) keep emitting notifications and reset the watchdog. We
-    // only treat the runtime as hung when it has been completely silent for
-    // PROMPT_IDLE_MS. A hard ceiling (PROMPT_MAX_MS) still guards against a
-    // runtime that streams meaningless keepalives forever.
+    // The inactivity watchdog is the ONLY hang detector. There is no
+    // wall-clock ceiling on session/prompt: duration alone must never kill a
+    // turn. A fixed ceiling (previously 10 min) killed healthy long-running
+    // turns, and the resulting restart wiped the agent's entire session
+    // context. Healthy turns keep emitting content-bearing notifications and
+    // reset the watchdog; only PROMPT_IDLE_MS of meaningful silence trips it.
     this.startPromptWatchdog();
-    const PROMPT_MAX_MS = 600_000;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error(`session/prompt exceeded maximum time of ${PROMPT_MAX_MS}ms`));
-      }, PROMPT_MAX_MS);
-    });
 
     // Send prompt without awaiting — the response arrives as streaming notifications.
     // Pass timeoutMs=0 so the per-request timeout in AcpProcess doesn't fire while
-    // a healthy turn is still streaming; our manager-level watchdog handles hangs.
-    Promise.race([
-      this.process.request('session/prompt', { sessionId, prompt }, 0),
-      timeoutPromise,
-    ])
+    // a healthy turn is still streaming; the manager-level watchdog handles hangs.
+    this.process.request('session/prompt', { sessionId, prompt }, 0)
       .then((result) => {
         if (settledRef.current) return;
         settledRef.current = true;
@@ -490,38 +558,57 @@ export class AcpRuntimeManager extends EventEmitter {
         });
         // Visibility aid: log the raw result so we can see what the runtime
         // actually returned when the transcript appears empty.
-        console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result).slice(0, 2000));
+        console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result ?? null).slice(0, 2000));
+        this.promptInFlight = false;
+        this.drainPromptQueue();
       })
       .catch((err) => {
         if (settledRef.current) return;
         settledRef.current = true;
-        this.stopPromptWatchdog();
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[ACP ${this.options.agentName}] session/prompt failed (session=${sessionId}):`, err);
+        if (this.process?.isRunning()) {
+          // The runtime answered, so the process and session are alive: the
+          // failure is scoped to this turn. Cancel the turn, surface the
+          // error, and keep the session and prompt queue intact — restarting
+          // here would throw away working context for a non-fatal failure.
+          // (Kimi's ACP adapter resolves most turn failures as end_turn; a
+          // rejection is e.g. an auth error or an SDK-level failure, and its
+          // session/cancel resolves the in-flight prompt with 'cancelled' —
+          // the settledRef guard above keeps that late resolve from
+          // double-emitting turn_complete.)
+          console.warn(`[ACP ${this.options.agentName}] cancelling failed turn; keeping session ${sessionId}`);
+          this.process.notify('session/cancel', { sessionId });
+          this.failPendingTurn(message);
+          this.drainPromptQueue();
+          return;
+        }
+        // The process is gone, so the session cannot outlive it: surface the
+        // error and restart (the next start attempts session/resume via
+        // lastSessionId, and restart() drains or visibly drops queued prompts
+        // depending on whether the resume succeeded).
+        this.stopPromptWatchdog();
         this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: message });
-        // A JSON-RPC error on the actual prompt call usually means the runtime
-        // is in a broken state (not just slow). Kill and restart it so the next
-        // turn starts from a clean process instead of silently returning empty.
-        this.scheduleRestart(`session/prompt failed: ${message}`);
-      })
-      .finally(() => {
         this.promptInFlight = false;
-        this.drainPromptQueue();
+        this.scheduleRestart(`session/prompt failed: ${message}`);
       });
+  }
+
+  private dropQueuedPrompts(reason: string): void {
+    if (this.promptQueue.length === 0) return;
+    console.warn(`[ACP ${this.options.agentName}] dropping ${this.promptQueue.length} queued prompt(s): ${reason}`);
+    for (const queued of this.promptQueue) {
+      const preview = queued.prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 80);
+      this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: `${reason}: ${preview}` });
+    }
+    this.promptQueue = [];
   }
 
   private drainPromptQueue(): void {
     if (!this.process?.isRunning() || !this.sessionId) {
       // Runtime is down (likely restarting after an error). Fail any queued
       // prompts so the user sees feedback rather than an eternal spinner.
-      if (this.promptQueue.length > 0) {
-        console.warn(`[ACP ${this.options.agentName}] dropping ${this.promptQueue.length} queued prompt(s): runtime not initialized`);
-        for (const queued of this.promptQueue) {
-          const preview = queued.prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 80);
-          this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: `Prompt dropped, runtime restarting: ${preview}` });
-        }
-        this.promptQueue = [];
-      }
+      this.dropQueuedPrompts('runtime not initialized');
       return;
     }
 
@@ -594,6 +681,18 @@ export class AcpRuntimeManager extends EventEmitter {
       await this.start();
       this.markHealthy();
       console.log(`[ACP ${this.options.agentName}] Runtime restarted`);
+      if (this.promptQueue.length > 0) {
+        if (this.resumedLastStart) {
+          // Context survived the restart — queued prompts still make sense.
+          console.log(`[ACP ${this.options.agentName}] session resumed; draining ${this.promptQueue.length} queued prompt(s)`);
+          this.drainPromptQueue();
+        } else {
+          // Fresh session: queued prompts were written against context that no
+          // longer exists. Fail them visibly instead of sending them into an
+          // empty session.
+          this.dropQueuedPrompts('runtime restarted with a fresh session');
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ACP ${this.options.agentName}] Runtime restart failed:`, err);
@@ -644,8 +743,9 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private handleNotification(method: string, params: unknown, id?: number | string): void {
-    this.markPromptActivity();
     if (method === 'session/request_permission') {
+      // Interactive inbound request: the runtime is alive and waiting on us.
+      this.markPromptActivity();
       this.handlePermissionRequest({ jsonrpc: '2.0', id, method, params });
       return;
     }
@@ -656,8 +756,20 @@ export class AcpRuntimeManager extends EventEmitter {
     if (!update) return;
 
     const sessionUpdate = update.sessionUpdate as string;
+    // Only content-bearing updates count as turn activity. Anything else
+    // (keepalives, lifecycle chatter, unknown update types) must not reset
+    // the idle watchdog: a runtime that streams noise while producing nothing
+    // is hung and has to trip PROMPT_IDLE_MS.
+    if (MEANINGFUL_SESSION_UPDATES.has(sessionUpdate)) {
+      this.markPromptActivity();
+    }
     const sessionId = (updateParams.sessionId as string) ?? this.sessionId ?? '';
-    console.log(`[ACP ${this.options.agentName}] notification: ${sessionUpdate}`);
+    // Skip logging high-frequency streaming updates — they fire per token or
+    // per tool-progress tick and flood the terminal. One-shot lifecycle
+    // updates (tool_call, turn_complete, plan, ...) stay logged.
+    if (!NOISY_SESSION_UPDATES.has(sessionUpdate)) {
+      console.log(`[ACP ${this.options.agentName}] notification: ${sessionUpdate}`);
+    }
 
     switch (sessionUpdate) {
       case 'available_commands_update': {
@@ -769,6 +881,28 @@ export class AcpRuntimeManager extends EventEmitter {
     this.emit('event', payload);
   }
 }
+
+/** Streaming update types that fire too often to log line-by-line. */
+const NOISY_SESSION_UPDATES = new Set([
+  'agent_thought_chunk',
+  'agent_message_chunk',
+  'tool_call_update',
+]);
+
+/**
+ * session/update types that prove the runtime is producing real turn output.
+ * Only these reset the inactivity watchdog (see handleNotification). Kimi's
+ * ACP adapter sends no keepalive frames, so anything outside this set is
+ * lifecycle chatter, not progress.
+ */
+const MEANINGFUL_SESSION_UPDATES = new Set([
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'turn_complete',
+]);
 
 function extractContent(content: unknown): AcpContentBlock | null {
   if (!content) return null;

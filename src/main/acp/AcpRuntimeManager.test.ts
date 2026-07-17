@@ -132,17 +132,6 @@ describe('AcpRuntimeManager', () => {
     });
   });
 
-  it('requests available commands after session init', async () => {
-    mockState.setResponse('initialize', {});
-    mockState.setResponse('session/new', { sessionId: 'sess-2' });
-
-    await manager.start();
-
-    expect(getProcess().notifications).toContainEqual(
-      expect.objectContaining({ method: 'session/list_commands' }),
-    );
-  });
-
   it('spawns the Kimi ACP command with --yolo', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-cmd' });
@@ -251,18 +240,38 @@ describe('AcpRuntimeManager', () => {
     );
   });
 
-  it('suppresses mail notices while the user is actively addressing the agent', async () => {
+  it('queues mail notices while a prompt is in flight', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
     await manager.start();
 
-    // User sends a direct message.
-    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
-    await manager.prompt('hello');
+    // Hold the first user prompt open so mail gets queued against it.
+    let deferredResolve: (value: unknown) => void = () => {};
+    const deferredPromise = new Promise<unknown>((resolve) => {
+      deferredResolve = resolve;
+    });
+    mockState.setResponse('session/prompt', deferredPromise);
+    const userPrompt = manager.prompt('hello');
+    await Promise.resolve();
 
-    // Mail that arrives immediately afterward should be suppressed.
-    const injected = await manager.injectMail('you have mail');
-    expect(injected).toBe(false);
+    // Mail that arrives while the prompt is in flight should be queued.
+    const mailPromise = manager.injectMail('you have mail');
+    await Promise.resolve();
+
+    const process = getProcess();
+    // Boot prompt + first user prompt have been dispatched; mail is still queued.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // Complete the first prompt; the queued mail should then be sent.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    deferredResolve({ stopReason: 'end_turn' });
+    await userPrompt;
+    await mailPromise;
+
+    const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
+    expect(promptRequests.length).toBe(3);
+    expect((promptRequests[1].params as any).prompt[0].text).toBe('hello');
+    expect((promptRequests[2].params as any).prompt[0].text).toBe('you have mail');
   });
 
   it('serializes concurrent prompts so only one session/prompt is in flight at a time', async () => {
@@ -333,7 +342,7 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
     manager.prompt('hello');
 
-    await vi.advanceTimersByTimeAsync(120_001);
+    await vi.advanceTimersByTimeAsync(300_001);
 
     const error = events.find((e) => e.update.sessionUpdate === 'error');
     expect(error).toBeDefined();
@@ -347,6 +356,156 @@ describe('AcpRuntimeManager', () => {
     restartSpy.mockRestore();
     manager.kill();
     vi.useRealTimers();
+  });
+
+  it('completes a turn that stays active past 10 minutes with the same session', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-long' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
+    const process = getProcess();
+
+    let resolveTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { resolveTurn = resolve; }));
+    manager.prompt('long healthy turn');
+
+    // 11 minutes of steady content-bearing output: each chunk resets the idle
+    // watchdog, and no wall-clock ceiling may fire. Total advanced: 660_000ms.
+    for (let i = 0; i < 11; i++) {
+      process.emit('notification', 'session/update', {
+        sessionId: 'sess-long',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'content', content: { type: 'text', text: `chunk ${i}` } },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    resolveTurn({ stopReason: 'max_tokens' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(manager.getSessionId()).toBe('sess-long');
+    expect(getProcess()).toBe(process);
+    expect(restartSpy).not.toHaveBeenCalled();
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && e.update.sessionId === 'sess-long'
+          && (e.update as Record<string, unknown>).stopReason === 'max_tokens',
+      ),
+    ).toBe(true);
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('cancels the turn, keeps the session, and drains the queue when a prompt fails with a live process', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-fail' });
+    await manager.start();
+
+    const process = getProcess();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
+
+    let rejectTurn: (err: Error) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((_, reject) => { rejectTurn = reject; }));
+    await manager.prompt('first');
+    const secondDispatched = manager.prompt('second');
+    await Promise.resolve();
+    // Boot prompt + first user prompt dispatched; second is queued in flight.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    rejectTurn(new Error('boom'));
+    await secondDispatched;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(process.notifications).toContainEqual(
+      expect.objectContaining({
+        method: 'session/cancel',
+        params: expect.objectContaining({ sessionId: 'sess-fail' }),
+      }),
+    );
+    const error = events.find((e) => e.update.sessionUpdate === 'error');
+    expect(error?.update).toMatchObject({
+      sessionId: 'sess-fail',
+      error: expect.stringContaining('boom'),
+    });
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && (e.update as Record<string, unknown>).stopReason === 'cancel',
+      ),
+    ).toBe(true);
+    expect(manager.getSessionId()).toBe('sess-fail');
+    expect(getProcess()).toBe(process);
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
+    expect(promptRequests.length).toBe(3);
+    expect((promptRequests[2].params as any).prompt[0].text).toBe('second');
+
+    restartSpy.mockRestore();
+    manager.kill();
+  });
+
+  it('restarts a hung runtime that streams only non-content notifications', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-noise' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    manager.prompt('hello');
+
+    // Non-content updates (lifecycle chatter) must NOT reset the idle watchdog:
+    // 25 x 15s = 375s of noise still trips the 300s idle budget.
+    for (let i = 0; i < 25; i++) {
+      getProcess().emit('notification', 'session/update', {
+        sessionId: 'sess-noise',
+        update: { sessionUpdate: 'available_commands_update', availableCommands: [] },
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+    }
+
+    const error = events.find((e) => e.update.sessionUpdate === 'error');
+    expect(error?.update).toMatchObject({
+      sessionUpdate: 'error',
+      sessionId: 'sess-noise',
+      error: expect.stringContaining('No response'),
+    });
+    expect(restartSpy).toHaveBeenCalled();
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('preserves recent user prompts in boot prompt after restart', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-restart-context' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('mission alpha');
+
+    // Restart should create a new process and re-send a boot prompt that
+    // includes the preserved user prompt so context is not lost.
+    await manager.restart();
+
+    const bootRequests = getProcess().requests.filter(
+      (r) => r.method === 'session/prompt' && typeof (r.params as any).prompt[0].text === 'string',
+    );
+    const latestBootPrompt = bootRequests[bootRequests.length - 1]?.params as { prompt: Array<{ text: string }> };
+    expect(latestBootPrompt).toBeDefined();
+    expect(latestBootPrompt.prompt[0].text).toContain('mission alpha');
+    expect(latestBootPrompt.prompt[0].text).toContain('Restart context');
   });
 
   it('forwards structured content blocks when runtime declares image support', async () => {
