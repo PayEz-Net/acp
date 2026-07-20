@@ -292,7 +292,6 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
 
     // Send keystrokes to PTY
     const dataHandler = terminal.onData((data) => {
-      console.log(`[Terminal] ${agent.name} input:`, JSON.stringify(data));
       window.electronAPI.writeTerminal(agent.terminalId!, data);
     });
 
