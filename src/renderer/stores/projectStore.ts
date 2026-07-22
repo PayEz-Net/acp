@@ -57,6 +57,10 @@ export interface ProjectTeamMember {
   /** Per-agent Claude effort override (Claude-only). NULL = inherit the single
    *  global default at spawn (pty.ts resolver). Consumed via a-renderer. */
   effort_override: 'low' | 'medium' | 'high' | 'max' | null;
+  /** Per-agent model override (kimi). NULL = inherit the CLI default. The
+   *  renderer POSTs it as `model` on manual spawn so the k3 effort gate can
+   *  fire on hand-spawned agents too (WO 11469). */
+  model_override: string | null;
   work_dir_override: string | null;
   position_hint: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null;
   is_lead: boolean;

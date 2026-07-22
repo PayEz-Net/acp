@@ -39,6 +39,10 @@ interface ProjectTeamMember {
   runtime_override: string | null;
   work_dir_override: string | null;
   effort_override: string | null;
+  // Bare kimi model id (WO-KIMI-MODEL-OVERRIDE). Passed through RAW to the
+  // spawn boundary — unknown ids must fail loud there, never be narrowed
+  // into a silent inherit here.
+  model_override: string | null;
   position_hint: string | null;
   is_lead: boolean;
 }
@@ -361,6 +365,11 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     const effort = (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high' || rawEffort === 'max')
       ? rawEffort
       : undefined;
+    // Per-agent MODEL override (WO-KIMI-MODEL-OVERRIDE): passed through RAW,
+    // deliberately UNLIKE effort above. The spawn boundary validates the bare
+    // id and throws ModelNotRecognizedError on anything unknown — narrowing
+    // here would be exactly the silent-fallback-to-inherit the WO forbids.
+    const modelOverride = member.model_override || undefined;
     // Effective runtime — used ONLY to decide the non-claude spawn stagger
     // below. SPEC-team-runtime §3.3 (Jon re-scope): NO global agentProvider
     // fallback here — the team runtime is the single authority. If runtime is
@@ -369,7 +378,7 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // an unnecessary stagger before the block fires.
     const effectiveProvider = runtime;
     try {
-      const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, projectId, agentId: member.agent_id });
+      const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, modelOverride, projectId, agentId: member.agent_id });
       records.push({
         projectId,
         agentId: member.agent_id,

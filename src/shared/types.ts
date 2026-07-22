@@ -326,6 +326,12 @@ export interface AppSettings {
   instantSendPastedImages: boolean;
   // Feature flag to enable image paste in terminal composer (default ON)
   enableTerminalImagePaste: boolean;
+  // Last live ACP session id per agent+workDir (`"AgentName::/work/dir"`),
+  // persisted so an app crash/restart can resume the prior runtime session
+  // via session/resume instead of wiping the agent's working context with a
+  // fresh session/new. Unknown/expired ids fall back to session/new at
+  // resume time and the entry self-heals with the new id.
+  acpSessionIds?: Record<string, string>;
 }
 
 // IPC channel names

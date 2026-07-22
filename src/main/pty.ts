@@ -15,7 +15,6 @@ import {
   type AcpEventPayload,
   type AcpPromptPayload,
   type AcpInjectMailPayload,
-  type AcpSendMessagePayload,
   type AcpCancelPayload,
   type AcpSetModePayload,
   type AcpKillPayload,
@@ -24,7 +23,7 @@ import {
 import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
-import { getProviderConfig } from './acp/providerConfigs';
+import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 
@@ -96,17 +95,26 @@ export interface SpawnAgentOptions {
    *  legacy-IPC path (projectId absent). Per-member mixed runtimes are
    *  parked (§5) — runtime is team-uniform. */
   runtime?: AgentRuntime;
-  /** Per-agent effort override (Claude-only), consumed at spawn as
-   *  `--effort`. Leg (b) of effort_override consumption (Aurum 1405):
+  /** Per-agent effort override (Claude `--effort`; k3 thinking effort via
+   *  KIMI_MODEL_THINKING_EFFORT env — WO-KIMI-MODEL-OVERRIDE), consumed at spawn.
+   *  Leg (b) of effort_override consumption (Aurum 1405):
    *  the spawn resolver defers to ONE chain —
    *    per-agent override -> single global default (settings.claudeEffort) -> 'high'.
    *  undefined = inherit (NOT a DB-baked literal; migration 14's
    *  effort_override column has no DEFAULT, so NULL round-trips as
    *  "defer to the resolver"). The renderer/orchestrator reads
    *  project_team_members.effort_override (same path as `runtime`) and
-   *  threads it here — leg (a), NextPert. Kimi/Codex have no effort
-   *  lever, so this is ignored for those runtimes. */
+   *  threads it here — leg (a), NextPert. Codex has no effort lever, so
+   *  this is ignored for codex. */
   effort?: ClaudeEffort;
+  /** Bare kimi model id from project_team_members.model_override
+   *  (WO-KIMI-MODEL-OVERRIDE) — `k3` | `kimi-for-coding` |
+   *  `kimi-for-coding-highspeed`. undefined/null = inherit default_model.
+   *  Passed through RAW (never narrowed upstream): unknown/mistyped ids
+   *  must fail loud at the spawn boundary (ModelNotRecognizedError), not be
+   *  stripped into a silent inherit — that fallback is explicitly
+   *  unacceptable per the WO's locked decisions. */
+  modelOverride?: string;
   /** Project ID for namespace scoping. Prevents multi-project PTY
    *  collisions when two projects share agent names. */
   projectId?: number;
@@ -324,7 +332,7 @@ function extractMessages(response: any): any[] {
 }
 
 function startInboxPoller(managed: ManagedPty): void {
-  const { agentName, projectId, pty: ptyProcess } = managed;
+  const { agentName, projectId } = managed;
   const seen = new Set<number>();
   let firstPoll = true;
   const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -382,10 +390,18 @@ function startInboxPoller(managed: ManagedPty): void {
       seen.add(Number(id));
       const from = m.from_agent ?? 'unknown';
       const subject = m.subject ?? '(no subject)';
-      const line =
+      const text =
         `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
-        `Read with: curl -s ${apiBase}/v1/mail/messages/${id} -H "X-ACP-Agent: ${agentName}"\r`;
-      ptyProcess.write(line);
+        `Read it NOW with: curl -s ${apiBase}/v1/mail/messages/${id} -H "X-ACP-Agent: ${agentName}" ` +
+        `and act on actionable messages — do not wait for the human.`;
+      // Inject as bracketed paste + a SEPARATE Enter write. A raw
+      // `write(text + '\r')` arrives as one input burst; the kimi TUI treats
+      // the burst as pasted content and the trailing \r becomes a newline in
+      // the draft — the notice sat unsubmitted in the input box until a
+      // human pressed Enter. Paste-close followed by a distinct Enter write
+      // is processed as a real submit, so mail lands straight in context.
+      queuePtyWrite(managed, `\x1b[200~${text}\x1b[201~`);
+      setTimeout(() => queuePtyWrite(managed, '\r'), 100);
       console.log(`[PTY] Pushed mail ${id} from ${from} into ${agentName} PTY`);
     }
 
@@ -615,6 +631,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       projectId: opts?.projectId,
       bootPrompt,
       effort: opts?.effort,
+      modelOverride: opts?.modelOverride,
       agentId: opts?.agentId,
     });
     // Phase 1: explicit renderer approval is coming later; until then stay
@@ -646,6 +663,16 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
 
   // PTY fallback path for providers that don't support ACP (Claude, Codex).
   const id = crypto.randomUUID();
+
+  // Kimi PTY-fallback model (this branch is unreachable while kimi is
+  // supportsAcp:true, but keep it honest): thread modelOverride through the
+  // same fail-loud alias authority as the ACP spawn boundary — an unknown id
+  // throws here, synchronously, before any PTY is allocated, instead of
+  // silently launching the legacy hardcoded default (WO 11489 follow-up).
+  const kimiPtyModel =
+    provider === 'kimi' && opts?.modelOverride
+      ? resolveKimiModelAlias(opts.modelOverride)
+      : 'kimi-for-coding-highspeed';
   const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
   const acpBinDir = getAcpBinDir();
   const existingPath = process.env.PATH || process.env.Path || '';
@@ -779,7 +806,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     const KIMI_MAX_ATTEMPTS = 3;
     const kimiLaunch = () => {
       kimiAttempts++;
-      ptyProcess.write(`kimi --yolo --model kimi-for-coding-highspeed\r`);
+      ptyProcess.write(`kimi --yolo --model ${kimiPtyModel}\r`);
       console.log(`[PTY] Starting Kimi (yolo mode) for ${agentName} — attempt ${kimiAttempts}/${KIMI_MAX_ATTEMPTS}`);
     };
     if (provider === 'claude') {
@@ -859,11 +886,15 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
           dataListener.dispose();
         }
       } else {
-        // Kimi: a completed banner means it's actually up → inject the
+        // Kimi: a completed welcome box means it's actually up → inject the
         // code-generated onboarding prompt. We no longer send the bare
         // "report as" string; the boot prompt carries the full identity
         // and mail instructions, eliminating per-agent markdown files.
-        if (!reportSent && buffer.includes('Session:') && buffer.includes('Tip:')) {
+        // Readiness markers: kimi ≥0.27 dropped the static 'Tip:' line —
+        // startup output is now the welcome box plus a server-driven tips
+        // banner (see kimi-code tui/banner/banner-provider.ts) whose text
+        // changes without notice. Match only the stable welcome box.
+        if (!reportSent && buffer.includes('Welcome to Kimi Code!') && buffer.includes('Session:')) {
           reportSent = true;
           console.log(`[PTY] Kimi banner complete for ${agentName}, injecting boot prompt`);
           setTimeout(() => {
@@ -897,6 +928,17 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
           // recognized" bug). No banner in-window → retry the launch if
           // attempts remain (the data listener catches the retry's banner).
           // If exhausted, surface the failure (kanban #12), don't bury it.
+          // Guard first: if the welcome box IS in the buffer, kimi is already
+          // up (the data listener should have caught it — but a marker drift
+          // must never re-type `kimi --yolo` into a live TUI input). Inject
+          // the boot prompt instead of relaunching.
+          if (buffer.includes('Welcome to Kimi Code!')) {
+            reportSent = true;
+            console.warn(`[PTY] Kimi welcome box seen but readiness check missed for ${agentName}; injecting boot prompt via fallback`);
+            injectBootPrompt(managed, bootPrompt);
+            dataListener.dispose();
+            return;
+          }
           if (kimiAttempts < KIMI_MAX_ATTEMPTS && !kimiRetrying) {
             kimiRetrying = true;
             console.warn(`[PTY] Kimi no-banner for ${agentName} after ${fallbackDelay}ms; retrying launch`);
@@ -1058,8 +1100,8 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       console.warn(`[ACP] prompt for unknown agent: ${payload.agent}`);
       return;
     }
-    console.log(`[ACP main] prompt received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
-    await runtime.prompt(payload.text);
+    console.log(`[ACP main] prompt received for ${payload.agent}: ${payload.text.slice(0, 80)} (images=${payload.images?.length ?? 0})`);
+    await runtime.prompt(payload.text, payload.images);
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_INJECT_MAIL, async (_, payload: AcpInjectMailPayload) => {
@@ -1098,15 +1140,6 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
       payload.optionId ?? 'reject',
       payload.outcome,
     );
-  });
-
-  ipcMain.handle(IPC_CHANNELS.ACP_SEND_MESSAGE, async (_, payload: AcpSendMessagePayload) => {
-    const runtime = getAcpRuntimeByAgent(payload.agent);
-    if (!runtime) {
-      console.warn(`[ACP] send-message for unknown agent: ${payload.agent}`);
-      return;
-    }
-    await runtime.sendMessage(payload.content);
   });
 }
 

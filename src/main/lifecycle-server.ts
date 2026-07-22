@@ -141,6 +141,12 @@ export async function startLifecycleServer(): Promise<number | null> {
         const effort = (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high' || rawEffort === 'max')
           ? rawEffort
           : undefined;
+        // Model override: pass through any non-empty string un-narrowed —
+        // the spawn boundary (providerConfigs KIMI_MODEL_ALIASES) is the
+        // fail-loud authority on unknown ids, never this layer (WO 11469).
+        const model = typeof body.model === 'string' && body.model.trim()
+          ? body.model.trim()
+          : undefined;
         const projectId = typeof body.projectId === 'number' ? body.projectId : undefined;
         const agentId = typeof body.agentId === 'number' ? body.agentId : undefined;
         if (!agentName) {
@@ -164,7 +170,7 @@ export async function startLifecycleServer(): Promise<number | null> {
             killTerminal(existing.id);
             let conformedId: string;
             try {
-              conformedId = spawnAgent(agentName, workDir, { runtime, effort, projectId, agentId });
+              conformedId = spawnAgent(agentName, workDir, { runtime, effort, modelOverride: model, projectId, agentId });
             } catch (spawnErr) {
               if (trySendTypedSpawnError(res, spawnErr, agentName)) return;
               throw spawnErr;
@@ -183,7 +189,7 @@ export async function startLifecycleServer(): Promise<number | null> {
         }
         let terminalId: string;
         try {
-          terminalId = spawnAgent(agentName, workDir, { runtime, effort, projectId, agentId });
+          terminalId = spawnAgent(agentName, workDir, { runtime, effort, modelOverride: model, projectId, agentId });
         } catch (spawnErr) {
           // Typed 422 for the well-formed-but-cannot-instantiate cases
           // (WORKDIR_INVALID §3.4 / RUNTIME_NOT_SET §3.3). acp-api relays it;

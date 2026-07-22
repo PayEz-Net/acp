@@ -88,6 +88,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
         (m) => m.agent_name === agent.name,
       );
       const effortOverride = teamMember?.effort_override ?? undefined;
+      const modelOverride = teamMember?.model_override ?? undefined;
 
       if (backendAvailable) {
         const secret = await window.electronAPI.getLocalSecret();
@@ -102,6 +103,7 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
             workDir: projectRepo,
             ...(projectRuntime ? { runtime: projectRuntime } : {}),
             ...(effortOverride ? { effort: effortOverride } : {}),
+            ...(modelOverride ? { model: modelOverride } : {}),
             ...(activeProject?.id != null ? { projectId: activeProject.id } : {}),
           }),
         });
