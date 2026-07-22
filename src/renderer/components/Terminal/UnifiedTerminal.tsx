@@ -27,13 +27,11 @@ import { useAgentOutputStore, type AgentOutputLine } from '../../stores/agentOut
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
-import { useAcpSessionStore } from '../../stores/acpSessionStore';
-import type { AcpSendContentBlock } from '@shared/acpTypes';
+import { useAcpSessionStore, type StagedImageInput } from '../../stores/acpSessionStore';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { TerminalFooter } from './TerminalFooter';
 import { CodeChangeCard } from './CodeChangeCard';
 import { terminalStreamNormalizer } from '../../lib/terminalStream';
-import { useTerminalImages, type StagedImage } from '../../hooks/useTerminalImages';
 import { useInputHistory } from '../../hooks/useInputHistory';
 
 import { perfMark, perfMeasure } from '../../lib/perf';
@@ -65,6 +63,119 @@ const AUTO_SCROLL_THRESHOLD_PX = 40;
 const FOOTER_DEBOUNCE_MS = 100;
 const PASTE_COLLAPSE_LINE_THRESHOLD = 5;
 const PASTE_COLLAPSE_CHAR_THRESHOLD = 1000;
+
+/**
+ * Transport-cost cap for pasted images, NOT a format gate: anything larger is
+ * canvas-scaled down so we don't ship 20 MB of base64 over IPC+stdio.
+ * Readability of the bytes IS gated locally — corrupt clipboard data that the
+ * renderer cannot decode is rejected with a composer error rather than shipped
+ * for the kimi server-side gate to silently drop (WO 11438).
+ */
+const MAX_TRANSPORT_EDGE_PX = 2000;
+
+/** A pasted image staged above the composer, ready to ride the next prompt. */
+export interface ComposerStagedImage {
+  id: string;
+  name: string;
+  mimeType: string;
+  /** Final send-ready data URL (after any transport re-encode/downscale). */
+  dataUrl: string;
+  /** Object URL of the original file, used only for the chip thumbnail. */
+  previewUrl: string;
+}
+
+export interface TransportEncodedImage {
+  dataUrl: string;
+  mimeType: string;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error('failed to read pasted image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image decode failed'));
+    img.src = src;
+  });
+}
+
+/**
+ * Transport conversion for a pasted image file. PNG ships as-is; anything
+ * else is re-encoded to PNG via canvas; anything with a longest edge over
+ * MAX_TRANSPORT_EDGE_PX is canvas-scaled first (transport cost only — the
+ * server compresses anyway).
+ *
+ * Decode IS a gate: bytes the renderer cannot read or decode cannot be
+ * previewed and are almost always corrupt clipboard data — shipping them raw
+ * was the silent-loss vector (the server gate dropped them and the agent
+ * received bare text, WO 11438). Throws on unreadable/undecodable bytes; the
+ * caller surfaces a composer error. Only a canvas re-encode failure after a
+ * successful decode still falls back to the original (provably valid) bytes.
+ */
+export async function encodeImageForTransport(file: File): Promise<TransportEncodedImage> {
+  const rawDataUrl = await readFileAsDataUrl(file);
+  const fallbackMimeType = file.type || 'image/png';
+
+  const img = await loadImageElement(rawDataUrl);
+
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  const longestEdge = Math.max(width, height);
+  const scale = longestEdge > MAX_TRANSPORT_EDGE_PX ? MAX_TRANSPORT_EDGE_PX / longestEdge : 1;
+  if (file.type === 'image/png' && scale === 1) {
+    return { dataUrl: rawDataUrl, mimeType: 'image/png' };
+  }
+
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return { dataUrl: rawDataUrl, mimeType: fallbackMimeType };
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return { dataUrl: canvas.toDataURL('image/png'), mimeType: 'image/png' };
+  } catch {
+    return { dataUrl: rawDataUrl, mimeType: fallbackMimeType };
+  }
+}
+
+/** RFC-4122 v4 UUID via crypto.getRandomValues (avoids crypto.randomUUID). */
+function newStagedImageId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Strip the `data:<mime>;base64,` prefix from a data URL for the wire. */
+function stripDataUrlPrefix(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',');
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+/**
+ * Boundary adaptation for the transcript store: ComposerStagedImage carries a
+ * data URL while StagedImageInput wants an ArrayBuffer. Inverse of the store's
+ * arrayBufferToBase64.
+ */
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
 
 export function UnifiedTerminal({
   agentName: agentNameProp,
@@ -101,8 +212,90 @@ export function UnifiedTerminal({
   const [sendError, setSendError] = useState<string | null>(null);
   const [interruptFlash, setInterruptFlash] = useState<string | null>(null);
   const [cancelRequested, setCancelRequested] = useState(false);
-  const [pendingInstantSend, setPendingInstantSend] = useState(false);
+  const [stagedImages, setStagedImages] = useState<ComposerStagedImage[]>([]);
   const errorId = useId();
+
+  // Synchronous source of truth for staged images: mutators update the ref
+  // first and feed setState from it, so sendInputLine (which may run in a
+  // microtask right after awaiting staging, before React re-renders) never
+  // reads a stale list. Also used by the unmount cleanup to revoke object URLs.
+  const stagedImagesRef = useRef<ComposerStagedImage[]>([]);
+  // In-flight paste staging. sendInputLine awaits this so an Enter pressed
+  // while a pasted image is still encoding can't silently send text-only.
+  const pendingStagingRef = useRef<Promise<void> | null>(null);
+  // One-shot read-failure latch: set by stageImages, consumed by sendInputLine
+  // to block the next send with the error re-surfaced (WO 11438).
+  const stagingErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    return () => {
+      for (const img of stagedImagesRef.current) {
+        URL.revokeObjectURL(img.previewUrl);
+      }
+    };
+  }, []);
+
+  // Stage pasted image files (ACP mode only). Files whose bytes cannot be
+  // read or decoded are NOT staged — the failure is surfaced as a composer
+  // error and remembered in stagingErrorRef so the next Enter can't silently
+  // send text-only (WO 11438).
+  const stageImages = useCallback(async (files: File[]) => {
+    const results = await Promise.all(
+      files.map(async (file): Promise<ComposerStagedImage | null> => {
+        const name = file.name || `pasted-image.${(file.type.split('/')[1] ?? 'png').replace(/[^a-z0-9]/gi, '') || 'png'}`;
+        try {
+          const encoded = await encodeImageForTransport(file);
+          return {
+            id: newStagedImageId(),
+            name,
+            mimeType: encoded.mimeType,
+            dataUrl: encoded.dataUrl,
+            previewUrl: URL.createObjectURL(file),
+          };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const staged = results.filter((r): r is ComposerStagedImage => r != null);
+    if (staged.length < files.length) {
+      const failedNames = files
+        .filter((_, i) => results[i] == null)
+        .map((file, i) => file.name || `pasted image ${i + 1}`);
+      stagingErrorRef.current =
+        failedNames.length === 1
+          ? `Couldn't read image "${failedNames[0]}" — copy it again and re-paste`
+          : `Couldn't read ${failedNames.length} images — copy them again and re-paste`;
+      setSendError(stagingErrorRef.current);
+    } else {
+      stagingErrorRef.current = null;
+    }
+    if (staged.length > 0) {
+      const next = [...stagedImagesRef.current, ...staged];
+      stagedImagesRef.current = next;
+      setStagedImages(next);
+    }
+  }, []);
+
+  const removeStagedImage = useCallback((id: string) => {
+    const next = stagedImagesRef.current.filter((img) => {
+      if (img.id === id) {
+        URL.revokeObjectURL(img.previewUrl);
+        return false;
+      }
+      return true;
+    });
+    stagedImagesRef.current = next;
+    setStagedImages(next);
+    inputRef.current?.focus();
+  }, []);
+
+  const clearStagedImages = useCallback(() => {
+    for (const img of stagedImagesRef.current) {
+      URL.revokeObjectURL(img.previewUrl);
+    }
+    stagedImagesRef.current = [];
+    setStagedImages([]);
+  }, []);
 
   // Debounced footer metadata so PTY bursts don't recompute stats every frame.
   // Initialize synchronously from the current lines so first render is correct.
@@ -128,8 +321,6 @@ export function UnifiedTerminal({
   // runtime_choice is the single authority for the team runtime; agent.provider
   // may be stale from the legacy agentProvider field.
   const effectiveProvider = activeProject?.runtime_choice ?? agent?.provider ?? null;
-  const instantSendPastedImages = useAppStore((s) => s.settings.instantSendPastedImages) === true;
-  const enableTerminalImagePaste = useAppStore((s) => s.settings.enableTerminalImagePaste) !== false;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
   const contextUsage = agentStatus?.contextUsage ?? 0;
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agentName));
@@ -372,9 +563,9 @@ export function UnifiedTerminal({
   }, [agentName, writePastedText]);
 
   const handleContextMenuPaste = useCallback(async () => {
-    // Prefer the native paste path so images from the clipboard land in the
-    // composer input and are staged exactly like Ctrl+V. Focus the input first
-    // so webContents.paste() targets it.
+    // Prefer the native paste path so clipboard text lands in the composer
+    // input exactly like Ctrl+V. Focus the input first so webContents.paste()
+    // targets it.
     inputRef.current?.focus();
     try {
       await window.electronAPI.triggerPaste();
@@ -569,23 +760,7 @@ export function UnifiedTerminal({
     [getSelectionText, handleCopy, isAcpMode],
   );
 
-  const { images: stagedImages, error: imageError, addImageFromFile, removeImage, clearImages } = useTerminalImages();
-
-  // Return focus to the composer after removing a preview so keyboard users stay
-  // in the input flow (PRD §9 accessibility).
-  const handleRemoveImage = useCallback(
-    (id: string) => {
-      removeImage(id);
-      inputRef.current?.focus();
-    },
-    [removeImage],
-  );
-
-  // Image paste/send is only supported in ACP mode now that the legacy PTY
-  // temp-file image path has been removed from the main process.
-  const canSendImages = isAcpMode;
-
-  const sendInputLine = useCallback(() => {
+  const sendInputLine = useCallback(async () => {
     const tid = terminalIdRef.current;
     const input = inputRef.current;
     if (!input) return;
@@ -615,6 +790,35 @@ export function UnifiedTerminal({
     }
 
     if (isAcpMode) {
+      // A paste may still be encoding (FileReader + canvas are async). Wait for
+      // in-flight staging so a quick Enter can't silently send text-only
+      // without the image (WO 11438).
+      const pending = pendingStagingRef.current;
+      if (pending) {
+        await pending.catch(() => {});
+      }
+      const staged = stagedImagesRef.current;
+
+      // A paste that failed to read must not become a silent text-only send:
+      // re-surface the error and swallow this Enter. The next Enter sends the
+      // text deliberately.
+      if (stagingErrorRef.current) {
+        const message = stagingErrorRef.current;
+        stagingErrorRef.current = null;
+        setSendError(message);
+        return;
+      }
+
+      // image_in UX gate (WO §3, refuse-with-message): when the active model's
+      // catalog entry explicitly says no image input, refuse locally instead
+      // of letting kimi silently degrade the images to "[image omitted]"
+      // markers. Unknown/absent imageIn allows the send — the server gate is
+      // the backstop for older runtimes.
+      if (staged.length > 0 && acpSession?.imageIn === false) {
+        setSendError("Current model can't see images");
+        return;
+      }
+
       setCancelRequested(false);
       // If a previous assistant turn is still active, stop it before the user
       // starts a new turn. Otherwise the old turn's spinner stays live forever
@@ -626,70 +830,44 @@ export function UnifiedTerminal({
       }
 
       const sessionId = acpSession?.sessionId ?? '';
-      const imagesToSend = stagedImages.map((img) => ({
+      if (!value && staged.length === 0) return;
+
+      const storeImages: StagedImageInput[] = staged.map((img) => ({
         id: img.id,
         name: img.name,
-        type: img.type,
-        data: img.data,
+        type: img.mimeType,
+        data: base64ToArrayBuffer(stripDataUrlPrefix(img.dataUrl)),
       }));
-      const totalSizeBytes = stagedImages.reduce((sum, img) => sum + img.size, 0);
-
-      if (!value && imagesToSend.length === 0) return;
-
-      useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value, imagesToSend);
+      useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value, storeImages);
       useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
 
-      // No images: keep the original synchronous clear behavior for ACP text prompts.
-      if (imagesToSend.length === 0) {
-        console.log(`[UnifiedTerminal ${agentName}] sending ACP prompt (session=${sessionId}): ${value.slice(0, 80)}`);
-        window.electronAPI
-          .sendAcpPrompt({ agent: agentName, sessionId, text: value })
-          .catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : 'Failed to send message.';
-            setSendError(message);
-            useAcpSessionStore.getState().failActiveTurn(agentName, message);
-          });
-        inputHistory.commit(value);
-        input.value = '';
-        return;
-      }
-
-      // Build the flat send content blocks expected by AcpSendMessagePayload.
-      // The store turn keeps the canonical nested AcpContentBlock shape; the
-      // IPC contract to the main process is flat AcpSendContentBlock[].
-      const contentBlocks = buildAcpSendBlocks(value, imagesToSend);
-
-      console.log(`[UnifiedTerminal ${agentName}] sending ACP message (session=${sessionId}, blocks=${contentBlocks.length})`);
-      const sendPromise = window.electronAPI.sendAcpMessage({ agent: agentName, sessionId, content: contentBlocks });
-
-      sendPromise
-        .then(() => {
-          inputHistory.commit(value);
-          input.value = '';
-          clearImages();
-          trackEvent({ event: 'image_paste_sent', imageCount: imagesToSend.length, totalSizeBytes });
+      // Wire payload carries base64 without the data-URL prefix, matching the
+      // adapter's { type: 'image', data, mimeType } content-block contract.
+      const wireImages = staged.map((img) => ({
+        data: stripDataUrlPrefix(img.dataUrl),
+        mimeType: img.mimeType,
+        name: img.name,
+      }));
+      console.log(`[UnifiedTerminal ${agentName}] sending ACP prompt (session=${sessionId}, images=${wireImages.length}): ${value.slice(0, 80)}`);
+      window.electronAPI
+        .sendAcpPrompt({
+          agent: agentName,
+          sessionId,
+          text: value,
+          images: wireImages.length > 0 ? wireImages : undefined,
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : 'Failed to send message.';
           setSendError(message);
           useAcpSessionStore.getState().failActiveTurn(agentName, message);
-          trackEvent({ event: 'image_paste_failed', errorCode: 'IPC_ERROR' });
         });
+      if (value) inputHistory.commit(value);
+      input.value = '';
+      clearStagedImages();
       return;
     }
 
     if (!tid) return;
-
-    if (stagedImages.length > 0) {
-      if (!canSendImages) {
-        setSendError('Image input is only supported in ACP mode.');
-        trackEvent({ event: 'image_paste_failed', errorCode: 'UNSUPPORTED_PROVIDER' });
-        return;
-      }
-      // PTY image send was removed with the legacy temp-file path. ACP mode
-      // handles images earlier in this function, so this branch is unreachable.
-      return;
-    }
 
     if (!value) return;
     const ts = new Date().toISOString();
@@ -698,23 +876,7 @@ export function UnifiedTerminal({
     window.electronAPI.writeTerminal(tid, value + '\r');
     inputHistory.commit(value);
     input.value = '';
-  }, [stagedImages, canSendImages, clearImages, effectiveProvider, isAcpMode, acpSession, agentName, inputHistory, findBlockRange, setCancelRequested]);
-
-  // Phase 2 instant-send: once images are staged and the composer is still
-  // empty, send the message automatically. Use a ref for the callback so the
-  // effect does not re-fire when sendInputLine is recreated by ACP store
-  // updates inside the send path.
-  const sendInputLineRef = useRef(sendInputLine);
-  sendInputLineRef.current = sendInputLine;
-
-  useEffect(() => {
-    if (!pendingInstantSend) return;
-    setPendingInstantSend(false);
-    const input = inputRef.current;
-    if (!input || input.value !== '') return;
-    if (stagedImages.length === 0) return;
-    sendInputLineRef.current();
-  }, [pendingInstantSend, stagedImages.length]);
+  }, [isAcpMode, acpSession, agentName, inputHistory, findBlockRange, setCancelRequested, clearStagedImages]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -795,9 +957,6 @@ export function UnifiedTerminal({
         e.preventDefault();
         if (pastedBlockRef.current) {
           removeBlock(input);
-        } else if (stagedImages.length > 0) {
-          clearImages();
-          setSendError(null);
         } else if (isAcpMode) {
           const sessionId = acpSession?.sessionId ?? '';
           setCancelRequested(true);
@@ -858,21 +1017,17 @@ export function UnifiedTerminal({
         }
       }
     },
-    [sendInputLine, findBlockRange, removeBlock, stagedImages, clearImages, isAcpMode, acpSession, agentName, inputHistory, effectiveProvider],
+    [sendInputLine, findBlockRange, removeBlock, isAcpMode, acpSession, agentName, inputHistory, effectiveProvider],
   );
 
   const handleInputPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLInputElement>) => {
       const input = e.currentTarget;
       const items = Array.from(e.clipboardData?.items ?? []);
-      const files = Array.from(e.clipboardData?.files ?? []);
-      let imageHandled = false;
       let textHandled = false;
-      const composerWasEmpty = input.value === '';
       const pasteMark = perfMark('composer-paste');
 
-      // Insert plain text first so the composer stays responsive even when the
-      // clipboard also contains images that need async staging/decoding.
+      // Insert plain text first so the composer stays responsive.
       // Prefer the synchronous getData API for the common case; only fall back
       // to the callback-based items API when getData is empty.
       const plainText = e.clipboardData?.getData('text/plain') ?? '';
@@ -890,51 +1045,39 @@ export function UnifiedTerminal({
         }
       }
 
-      // Stage images after text so the composer stays responsive. Keep the
-      // sequential await so the max-images check inside useTerminalImages is
-      // evaluated against the latest state for each file.
-      if (enableTerminalImagePaste) {
-        // Prefer the files list (standard API) and fall back to items for
-        // environments where only items are populated (e.g. some jsdom setups).
-        if (files.length > 0) {
-          for (const file of files) {
-            if (file.type.startsWith('image/')) {
-              imageHandled = true;
-              await addImageFromFile(file);
-            }
-          }
-        } else {
-          for (const item of items) {
-            if (item.kind === 'file' && item.type.startsWith('image/')) {
-              const file = item.getAsFile();
-              if (file) {
-                imageHandled = true;
-                await addImageFromFile(file);
-              }
-            }
-          }
-        }
-      }
+      // Image staging (ACP mode only — PTY sessions have no image transport).
+      // Clipboard items are only valid during the event, so collect the Files
+      // synchronously and encode/stage them async. A clipboard can carry both
+      // text and image items; text semantics above are untouched.
+      const imageFiles = isAcpMode
+        ? items
+            .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+            .map((item) => item.getAsFile())
+            .filter((file): file is File => file != null)
+        : [];
 
-      if (imageHandled || textHandled) {
+      if (textHandled || imageFiles.length > 0) {
         e.preventDefault();
         e.stopPropagation();
       }
 
       perfMeasure('composer-paste', pasteMark, {
         text: textHandled,
-        images: imageHandled,
+        images: imageFiles.length,
         length: input.value.length,
       });
 
-      // Phase 2 instant-send: only when the composer was empty, no text was
-      // pasted, and the input is still empty after staging images. Mixed
-      // clipboards always wait for Enter so the user can add context.
-      if (composerWasEmpty && instantSendPastedImages && !textHandled && input.value === '') {
-        setPendingInstantSend(true);
+      if (imageFiles.length > 0) {
+        const pending = stageImages(imageFiles);
+        pendingStagingRef.current = pending;
+        try {
+          await pending;
+        } finally {
+          if (pendingStagingRef.current === pending) pendingStagingRef.current = null;
+        }
       }
     },
-    [addImageFromFile, insertTextAtCursor, instantSendPastedImages, enableTerminalImagePaste],
+    [insertTextAtCursor, isAcpMode, stageImages],
   );
 
   const handleClick = useCallback(() => {
@@ -1083,25 +1226,6 @@ export function UnifiedTerminal({
 
       {/* Vercel-style composer — single chat input for the pane */}
       <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-2 space-y-2">
-        {/* Image preview strip */}
-        {stagedImages.length > 0 && (
-          <div
-            className="flex gap-2 overflow-x-auto pb-1"
-            data-testid="terminal-image-previews"
-            role="list"
-            aria-label={`${stagedImages.length} pasted image${stagedImages.length === 1 ? '' : 's'}`}
-          >
-            {stagedImages.map((img, idx) => (
-              <ImagePreviewChip
-                key={img.id}
-                image={img}
-                index={idx}
-                onRemove={handleRemoveImage}
-              />
-            ))}
-          </div>
-        )}
-
         {/* Escape-interrupt confirmation flash */}
         {interruptFlash && (
           <div
@@ -1114,20 +1238,43 @@ export function UnifiedTerminal({
         )}
 
         {/* Validation / send errors */}
-        {(imageError || sendError) && (
+        {sendError && (
           <div
             id={errorId}
             className="text-xs text-red-400 px-1"
             data-testid="terminal-image-error"
           >
-            {imageError ?? sendError}
+            {sendError}
           </div>
         )}
 
-        {/* ACP-only notice */}
-        {terminalId && stagedImages.length > 0 && !canSendImages && (
-          <div className="text-xs text-amber-400 px-1" data-testid="terminal-acp-only">
-            Image paste is only supported in ACP mode.
+        {/* Staged pasted images — removable thumbnails riding the next prompt */}
+        {stagedImages.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-1" data-testid="staged-images">
+            {stagedImages.map((img) => (
+              <div
+                key={img.id}
+                data-testid="staged-image-chip"
+                className="flex items-center gap-1.5 rounded border border-slate-700 bg-slate-800/80 px-1.5 py-1"
+              >
+                <img
+                  src={img.previewUrl}
+                  alt={img.name}
+                  className="h-16 w-auto max-w-40 shrink-0 rounded object-contain bg-slate-900/60"
+                />
+                <span className="max-w-[120px] truncate text-xs text-slate-300">{img.name}</span>
+                <button
+                  type="button"
+                  onClick={() => removeStagedImage(img.id)}
+                  className="p-0.5 rounded text-slate-400 hover:text-red-400 hover:bg-slate-700/50 transition-colors"
+                  title={`Remove ${img.name}`}
+                  aria-label={`Remove ${img.name}`}
+                  data-testid="staged-image-remove"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -1145,11 +1292,11 @@ export function UnifiedTerminal({
             className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid="terminal-input"
             aria-label="Terminal message input"
-            aria-describedby={imageError || sendError ? errorId : undefined}
+            aria-describedby={sendError ? errorId : undefined}
           />
           <button
             onClick={sendInputLine}
-            disabled={!terminalId || (stagedImages.length > 0 && !canSendImages)}
+            disabled={!terminalId}
             className="p-1.5 rounded-full text-slate-400 hover:text-emerald-400 hover:bg-slate-700/50 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Send"
             data-testid="terminal-send"
@@ -1231,61 +1378,3 @@ function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
   );
 }
 
-interface ImagePreviewChipProps {
-  image: StagedImage;
-  index: number;
-  onRemove: (id: string) => void;
-}
-
-function ImagePreviewChip({ image, index, onRemove }: ImagePreviewChipProps) {
-  return (
-    <div className="relative shrink-0 group rounded-lg border border-slate-700 bg-slate-800 overflow-hidden" role="listitem">
-      <img
-        src={image.previewUrl}
-        alt="Pasted image"
-        className="w-16 h-16 object-cover"
-      />
-      <div className="absolute inset-x-0 bottom-0 bg-slate-900/80 px-1.5 py-0.5 text-[10px] text-slate-300 truncate">
-        {image.width}×{image.height} · {formatBytes(image.size)}
-      </div>
-      <button
-        type="button"
-        onClick={() => onRemove(image.id)}
-        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-slate-900/80 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
-        aria-label={`Remove pasted image ${index + 1}`}
-        title="Remove"
-      >
-        <X className="w-3 h-3" />
-      </button>
-    </div>
-  );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function buildAcpSendBlocks(
-  text: string,
-  images: Array<{ type: string; data: ArrayBuffer }>,
-): AcpSendContentBlock[] {
-  const blocks: AcpSendContentBlock[] = [];
-  if (text) {
-    blocks.push({ type: 'text', text });
-  }
-  for (const img of images) {
-    blocks.push({ type: 'image', data: arrayBufferToBase64(img.data), mimeType: img.type });
-  }
-  return blocks;
-}

@@ -3,13 +3,13 @@ import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 
-import { UnifiedTerminal } from './UnifiedTerminal';
+import { UnifiedTerminal, encodeImageForTransport } from './UnifiedTerminal';
 import { useAgentOutputStore } from '../../stores/agentOutputStore';
 import { useAgentStatusStore } from '../../stores/agentStatusStore';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useAcpSessionStore } from '../../stores/acpSessionStore';
-import { getTelemetryQueue, clearTelemetryQueue } from '../../lib/telemetry';
+import { clearTelemetryQueue } from '../../lib/telemetry';
 import type { AgentState } from '@shared/types';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -20,7 +20,6 @@ const mockReadClipboardText = vi.fn();
 const mockTriggerPaste = vi.fn();
 
 const mockSendAcpPrompt = vi.fn().mockResolvedValue(undefined);
-const mockSendAcpMessage = vi.fn().mockResolvedValue(undefined);
 const mockSendAcpCancel = vi.fn().mockResolvedValue(undefined);
 const mockSendAcpPermissionResponse = vi.fn().mockResolvedValue(undefined);
 
@@ -57,7 +56,6 @@ beforeEach(() => {
     readClipboardText: mockReadClipboardText,
     triggerPaste: mockTriggerPaste,
     sendAcpPrompt: mockSendAcpPrompt,
-    sendAcpMessage: mockSendAcpMessage,
     sendAcpCancel: mockSendAcpCancel,
     sendAcpPermissionResponse: mockSendAcpPermissionResponse,
   });
@@ -79,19 +77,6 @@ afterEach(() => {
   vi.clearAllMocks();
   clearTelemetryQueue();
 });
-
-function createImageFile(name = 'test.png', type = 'image/png'): File {
-  // A minimal 1x1 transparent PNG.
-  const bytes = new Uint8Array([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-    0x0d, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0x60, 0x60, 0x60, 0x60,
-    0x00, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0a, 0x3a, 0x32, 0x9d, 0x00, 0x00,
-    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-  ]);
-  return new File([bytes], name, { type });
-}
 
 function pasteFilesOnInput(input: HTMLInputElement, files: File[], text?: string) {
   // jsdom's DataTransfer only reliably supports one file item and ignores
@@ -553,21 +538,6 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('pastes text into the composer when image paste is disabled', async () => {
-      useAppStore.setState({ settings: { enableTerminalImagePaste: false } as any });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [], 'plain text');
-        await new Promise((r) => setTimeout(r, 10));
-      });
-
-      expect(input.value).toBe('plain text');
-      cleanup(root, container);
-    });
-
     it('falls back to getData when clipboardData.items has no text entry', async () => {
       const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
@@ -856,148 +826,6 @@ describe('UnifiedTerminal', () => {
 
       expect(input.value).toBe('composer only');
       expect(mockWriteTerminal).not.toHaveBeenCalled();
-      cleanup(root, container);
-    });
-
-    it('stages an image pasted into the composer', async () => {
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-      cleanup(root, container);
-    });
-
-    it('clears staged images when Escape is pressed', async () => {
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
-      cleanup(root, container);
-    });
-
-    it('shows an ACP-only notice for non-ACP mode', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: null } as any,
-      });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-acp-only"]')).not.toBeNull();
-      cleanup(root, container);
-    });
-
-    it('stages both image and text when the clipboard contains both', async () => {
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()], 'look at this');
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-      expect(input.value).toBe('look at this');
-      cleanup(root, container);
-    });
-
-    it('removes a preview when the remove button is clicked', async () => {
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-
-      const removeBtn = container.querySelector('[aria-label^="Remove pasted image"]') as HTMLButtonElement;
-      expect(removeBtn).not.toBeNull();
-
-      act(() => {
-        removeBtn.click();
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
-      expect(document.activeElement).toBe(input);
-      cleanup(root, container);
-    });
-
-    it('emits image_paste_failed telemetry when sending images in unsupported provider mode', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: null } as any,
-      });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      });
-
-      const failedEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_failed');
-      expect(failedEvent).toBeDefined();
-      expect((failedEvent as any).errorCode).toBe('UNSUPPORTED_PROVIDER');
-      cleanup(root, container);
-    });
-
-    it('shows an inline error for unsupported image formats', async () => {
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [new File(['bmp'], 'scan.bmp', { type: 'image/bmp' })]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-error"]')?.textContent).toContain('image/bmp is not supported');
-      cleanup(root, container);
-    });
-
-    it('ignores image paste when the feature flag is disabled', async () => {
-      useAppStore.setState({ settings: { enableTerminalImagePaste: false } as any });
-      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
       cleanup(root, container);
     });
 
@@ -1575,8 +1403,62 @@ describe('UnifiedTerminal', () => {
       expect(container.textContent).toContain('raw PTY line');
       cleanup(root, container);
     });
+  });
 
-    it('stages an image pasted into the composer in ACP mode', async () => {
+  describe('image paste (ACP)', () => {
+    let originalCreateObjectURL: unknown;
+    let originalRevokeObjectURL: unknown;
+    // Only the canvas spies created by mockCanvas — restoring ALL mocks would
+    // wipe the file-shared mockSendAcpPrompt implementation.
+    let canvasSpies: Array<{ mockRestore: () => void }> = [];
+
+    beforeEach(() => {
+      originalCreateObjectURL = (URL as unknown as Record<string, unknown>).createObjectURL;
+      originalRevokeObjectURL = (URL as unknown as Record<string, unknown>).revokeObjectURL;
+      (URL as unknown as Record<string, unknown>).createObjectURL = vi.fn(() => 'blob:mock-preview');
+      (URL as unknown as Record<string, unknown>).revokeObjectURL = vi.fn();
+      mockImageWithSize(100, 100);
+    });
+
+    afterEach(() => {
+      (URL as unknown as Record<string, unknown>).createObjectURL = originalCreateObjectURL;
+      (URL as unknown as Record<string, unknown>).revokeObjectURL = originalRevokeObjectURL;
+      for (const spy of canvasSpies) spy.mockRestore();
+      canvasSpies = [];
+    });
+
+    function mockImageWithSize(width: number, height: number) {
+      class MockImage {
+        onload: (() => void) | null = null;
+        onerror: ((err: unknown) => void) | null = null;
+        naturalWidth = width;
+        naturalHeight = height;
+        width = width;
+        height = height;
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      vi.stubGlobal('Image', MockImage);
+    }
+
+    function mockCanvas(reencodeDataUrl = 'data:image/png;base64,UKVFTkNPREVE') {
+      const drawImage = vi.fn();
+      let captured: { width: number; height: number } | null = null;
+      const getContextSpy = vi
+        .spyOn(HTMLCanvasElement.prototype, 'getContext')
+        .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+      const toDataURLSpy = vi
+        .spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+        .mockImplementation(function (this: HTMLCanvasElement) {
+          captured = { width: this.width, height: this.height };
+          return reencodeDataUrl;
+        });
+      canvasSpies.push(getContextSpy, toDataURLSpy);
+      return { drawImage, getContextSpy, toDataURLSpy, getCaptured: () => captured };
+    }
+
+    function setupAcpSession(imageIn?: boolean): AgentState {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
       });
@@ -1587,11 +1469,11 @@ describe('UnifiedTerminal', () => {
           sessionUpdate: 'initialized',
           sessionId: 's1',
           capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
+          agentInfo: { name: 'Kimi Code CLI', version: '0.27.0' },
+          ...(imageIn === undefined ? {} : { imageIn }),
         },
       });
-
-      const agent: AgentState = {
+      return {
         id: '1',
         name: 'NextPert',
         displayName: 'NextPert',
@@ -1601,370 +1483,275 @@ describe('UnifiedTerminal', () => {
         status: 'busy',
         provider: 'kimi',
       };
+    }
 
+    async function pasteImageAndFlush(input: HTMLInputElement, files: File[], text?: string) {
+      await act(async () => {
+        input.focus();
+        pasteFilesOnInput(input, files, text);
+        // Let FileReader + the mocked Image decode + setState settle.
+        await new Promise((r) => setTimeout(r, 20));
+      });
+    }
+
+    it('stages a removable chip when an image item is pasted', async () => {
+      const agent = setupAcpSession();
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
 
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
+      const chip = container.querySelector('[data-testid="staged-image-chip"]');
+      expect(chip).not.toBeNull();
+      expect(chip?.textContent).toContain('shot.png');
+      expect(chip?.querySelector('img')?.getAttribute('src')).toBe('blob:mock-preview');
       cleanup(root, container);
     });
 
-    it('sends structured content blocks via sendAcpMessage when exposed', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
+    it('renders the staged thumbnail legibly with preserved aspect ratio (no forced-square crop)', async () => {
+      const agent = setupAcpSession();
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
 
-      act(() => {
-        input.value = 'what is this?';
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      });
-
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
-      const payload = mockSendAcpMessage.mock.lastCall?.[0];
-      expect(payload.agent).toBe('NextPert');
-      expect(payload.sessionId).toBe('s1');
-      expect(payload.content).toHaveLength(2);
-      expect(payload.content[0]).toEqual({ type: 'text', text: 'what is this?' });
-      expect(payload.content[1].type).toBe('image');
-      expect(payload.content[1].mimeType).toBe('image/png');
-      expect(payload.content[1].data).toMatch(/^[A-Za-z0-9+/=]+$/);
-      expect(input.value).toBe('');
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
-
-      const sentEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_sent');
-      expect(sentEvent).toBeDefined();
-      expect(sentEvent).not.toHaveProperty('provider');
-
+      const img = container.querySelector('[data-testid="staged-image-chip"] img');
+      expect(img).not.toBeNull();
+      const cls = img?.getAttribute('class') ?? '';
+      expect(cls).toContain('object-contain');
+      expect(cls).not.toContain('object-cover');
+      expect(cls).not.toContain('w-8 h-8');
       cleanup(root, container);
     });
 
-    it('allows image paste in ACP mode regardless of provider name', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'custom-acp-harness' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Custom ACP' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'custom-acp-harness' as any,
-      };
-
+    it('attaches a pasted image even when Enter is pressed before encoding finishes', async () => {
+      const agent = setupAcpSession();
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
       await act(async () => {
         input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-      expect(container.querySelector('[data-testid="terminal-acp-only"]')).toBeNull();
-
-      act(() => {
-        input.value = 'what is this?';
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      });
-
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
-      const payload = mockSendAcpMessage.mock.lastCall?.[0];
-      expect(payload.agent).toBe('NextPert');
-      expect(payload.sessionId).toBe('s1');
-      expect(payload.content).toHaveLength(2);
-      expect(payload.content[0]).toEqual({ type: 'text', text: 'what is this?' });
-      expect(payload.content[1].type).toBe('image');
-
-      cleanup(root, container);
-    });
-
-    it('clears staged images when Escape is pressed in ACP mode', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
-      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
-      cleanup(root, container);
-    });
-
-    it('emits image_paste_failed telemetry when ACP send rejects', async () => {
-      mockSendAcpMessage.mockRejectedValueOnce(new Error('IPC failure'));
-
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
-      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      act(() => {
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      });
-
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      const failedEvent = getTelemetryQueue().find((e) => e.event === 'image_paste_failed');
-      expect(failedEvent).toBeDefined();
-      expect((failedEvent as any).errorCode).toBe('IPC_ERROR');
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-
-      const session = useAcpSessionStore.getState().getSession('NextPert');
-      expect(session?.activeTurnId).toBeNull();
-      const assistantTurn = session?.turns.find((t) => t.role === 'assistant');
-      expect(assistantTurn?.status).toBe('error');
-      expect(assistantTurn?.contentText).toContain('IPC failure');
-      cleanup(root, container);
-    });
-
-    it('stages both image and text when the clipboard contains both in ACP mode', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
-      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()], 'look at this');
-        await new Promise((r) => setTimeout(r, 50));
-      });
-
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).not.toBeNull();
-      expect(input.value).toBe('look at this');
-      cleanup(root, container);
-    });
-
-    it('shows a validation error for oversized images in ACP mode', async () => {
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
-
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
-      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
-      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
-
-      await act(async () => {
-        input.focus();
-        const file = new File(['x'], 'huge.png', { type: 'image/png' });
-        Object.defineProperty(file, 'size', { value: 11 * 1024 * 1024 });
         pasteFilesOnInput(input, [file]);
-        await new Promise((r) => setTimeout(r, 50));
+        // No settle wait — send while staging is still in flight. The send
+        // must await the pending staging instead of silently going text-only.
+        input.value = 'Look at this';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 30));
       });
 
-      const errorEl = container.querySelector('[data-testid="terminal-image-error"]');
-      expect(errorEl).not.toBeNull();
-      expect(errorEl?.textContent).toContain('max 10.0 MB');
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith({
+        agent: 'NextPert',
+        sessionId: 's1',
+        text: 'Look at this',
+        images: [{ data: 'aGVsbG8=', mimeType: 'image/png', name: 'shot.png' }],
+      });
       cleanup(root, container);
     });
 
-    it('instant-sends a pasted image in ACP mode when the composer is empty', async () => {
-      useAppStore.setState({ settings: { instantSendPastedImages: true } as any });
-      useProjectStore.setState({
-        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
-      });
-      useAcpSessionStore.getState().applyEvent({
-        agent: 'NextPert',
-        sessionId: 's1',
-        update: {
-          sessionUpdate: 'initialized',
-          sessionId: 's1',
-          capabilities: {},
-          agentInfo: { name: 'Kimi Code CLI' },
-        },
-      });
+    it('surfaces a composer error and blocks the next send when the pasted image cannot be read', async () => {
+      class FailingImage {
+        onload: (() => void) | null = null;
+        onerror: ((err: unknown) => void) | null = null;
+        set src(_value: string) {
+          queueMicrotask(() => this.onerror?.(new Error('decode failed')));
+        }
+      }
+      vi.stubGlobal('Image', FailingImage);
 
-      const agent: AgentState = {
-        id: '1',
-        name: 'NextPert',
-        displayName: 'NextPert',
-        workDir: '',
-        autoStart: false,
-        position: 'top-left',
-        status: 'busy',
-        provider: 'kimi',
-      };
-
+      const agent = setupAcpSession();
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
-      await act(async () => {
-        input.focus();
-        pasteFilesOnInput(input, [createImageFile()]);
-        await new Promise((r) => setTimeout(r, 100));
+      const file = new File(['garbage'], 'image.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+
+      // No chip staged; a visible composer error names the failed image.
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).toBeNull();
+      expect(container.querySelector('[data-testid="terminal-image-error"]')?.textContent).toContain('image.png');
+
+      // The next Enter is swallowed with the error re-surfaced — the text must
+      // not silently leave without the attachment.
+      act(() => {
+        input.value = 'Look at this';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      expect(mockSendAcpPrompt).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="terminal-image-error"]')?.textContent).toContain('image.png');
+      cleanup(root, container);
+    });
+
+    it('removes a staged chip via its remove button', async () => {
+      const agent = setupAcpSession();
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).not.toBeNull();
+
+      const removeButton = container.querySelector('[data-testid="staged-image-remove"]') as HTMLButtonElement;
+      act(() => {
+        removeButton.click();
       });
 
-      expect(mockSendAcpMessage).toHaveBeenCalledTimes(1);
-      const payload = mockSendAcpMessage.mock.lastCall?.[0];
-      expect(payload.content).toHaveLength(1);
-      expect(payload.content[0].type).toBe('image');
-      expect(input.value).toBe('');
-      expect(container.querySelector('[data-testid="terminal-image-previews"]')).toBeNull();
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).toBeNull();
       cleanup(root, container);
+    });
+
+    it('sends staged images with the prompt (base64 prefix stripped) and clears staging', async () => {
+      const agent = setupAcpSession();
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).not.toBeNull();
+
+      act(() => {
+        input.value = 'Look at this';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith({
+        agent: 'NextPert',
+        sessionId: 's1',
+        text: 'Look at this',
+        images: [{ data: 'aGVsbG8=', mimeType: 'image/png', name: 'shot.png' }],
+      });
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).toBeNull();
+
+      // The user turn in the transcript store carries the same image.
+      const session = useAcpSessionStore.getState().getSession('NextPert');
+      const userTurn = session?.turns.find((t) => t.role === 'user');
+      expect(userTurn?.content[1]).toEqual({
+        type: 'content',
+        content: { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+      });
+      cleanup(root, container);
+    });
+
+    it('sends staged images when imageIn is true', async () => {
+      const agent = setupAcpSession(true);
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+
+      act(() => {
+        input.value = 'Look at this';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ images: [{ data: 'aGVsbG8=', mimeType: 'image/png', name: 'shot.png' }] }),
+      );
+      cleanup(root, container);
+    });
+
+    it('refuses to send staged images when the active model has imageIn: false', async () => {
+      const agent = setupAcpSession(false);
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).not.toBeNull();
+
+      act(() => {
+        input.value = 'Look at this';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Current model can't see images");
+      // Staging survives the refusal so the user can keep or remove the chips.
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).not.toBeNull();
+      // No half-sent turn was started in the transcript store.
+      const session = useAcpSessionStore.getState().getSession('NextPert');
+      expect(session?.turns ?? []).toHaveLength(0);
+      cleanup(root, container);
+    });
+
+    it('still handles a text-only paste in ACP mode', async () => {
+      const agent = setupAcpSession();
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      await pasteImageAndFlush(input, [], 'plain text only');
+
+      expect(input.value).toBe('plain text only');
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    it('does not stage images in PTY mode', async () => {
+      const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+      await pasteImageAndFlush(input, [file]);
+
+      expect(container.querySelector('[data-testid="staged-image-chip"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    describe('encodeImageForTransport', () => {
+      it('passes a small PNG through untouched (no canvas re-encode)', async () => {
+        const canvas = mockCanvas();
+        const file = new File(['hello'], 'shot.png', { type: 'image/png' });
+
+        const result = await encodeImageForTransport(file);
+
+        expect(result.mimeType).toBe('image/png');
+        expect(result.dataUrl).toBe('data:image/png;base64,aGVsbG8=');
+        expect(canvas.getContextSpy).not.toHaveBeenCalled();
+      });
+
+      it('re-encodes a non-PNG to PNG via canvas', async () => {
+        const canvas = mockCanvas();
+        const file = new File(['hello'], 'shot.bmp', { type: 'image/bmp' });
+
+        const result = await encodeImageForTransport(file);
+
+        expect(result).toEqual({
+          dataUrl: 'data:image/png;base64,UKVFTkNPREVE',
+          mimeType: 'image/png',
+        });
+        expect(canvas.drawImage).toHaveBeenCalled();
+        expect(canvas.getCaptured()).toEqual({ width: 100, height: 100 });
+      });
+
+      it('downscales images whose longest edge exceeds 2000px (transport cost only)', async () => {
+        const canvas = mockCanvas();
+        mockImageWithSize(4000, 2000);
+        const file = new File(['hello'], 'big.png', { type: 'image/png' });
+
+        const result = await encodeImageForTransport(file);
+
+        expect(result.mimeType).toBe('image/png');
+        expect(result.dataUrl).toBe('data:image/png;base64,UKVFTkNPREVE');
+        expect(canvas.getCaptured()).toEqual({ width: 2000, height: 1000 });
+      });
+
+      it('rejects when the renderer cannot decode the bytes (corrupt clipboard data)', async () => {
+        class FailingImage {
+          onload: (() => void) | null = null;
+          onerror: ((err: unknown) => void) | null = null;
+          set src(_value: string) {
+            queueMicrotask(() => this.onerror?.(new Error('decode failed')));
+          }
+        }
+        vi.stubGlobal('Image', FailingImage);
+        const file = new File(['hello'], 'weird.avif', { type: 'image/avif' });
+
+        // Undecodable bytes can never be previewed and shipping them raw was
+        // the silent-loss vector — the composer must fail loudly instead.
+        await expect(encodeImageForTransport(file)).rejects.toThrow('image decode failed');
+      });
     });
   });
 
