@@ -91,6 +91,22 @@ vi.mock('./AcpProcess', () => ({
   },
 }));
 
+// In-memory stand-in for the electron-store settings module. AcpRuntimeManager
+// reads/writes `acpSessionIds` for crash-safe session resume; tests must not
+// touch the real user settings file.
+const mockSettings = vi.hoisted(() => ({
+  data: { acpSessionIds: {} as Record<string, string> },
+}));
+
+vi.mock('../store', () => ({
+  getSettings: vi.fn(() => ({ acpSessionIds: mockSettings.data.acpSessionIds })),
+  setSettings: vi.fn((patch: Record<string, unknown>) => {
+    if ('acpSessionIds' in patch) {
+      mockSettings.data.acpSessionIds = patch.acpSessionIds as Record<string, string>;
+    }
+  }),
+}));
+
 describe('AcpRuntimeManager', () => {
   let manager: AcpRuntimeManager;
   let events: AcpEventPayload[] = [];
@@ -98,6 +114,7 @@ describe('AcpRuntimeManager', () => {
   beforeEach(() => {
     mockState.responses.clear();
     mockState.lastInstance = null;
+    mockSettings.data.acpSessionIds = {};
     events = [];
     manager = new AcpRuntimeManager('rt-1', getProviderConfig('kimi'), {
       agentName: 'NextPert',
@@ -201,6 +218,147 @@ describe('AcpRuntimeManager', () => {
         }),
       }),
     );
+  });
+
+  it('appends image blocks after the text block in the same session/prompt', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-img' });
+    await manager.start();
+
+    await manager.prompt('look at these', [
+      { data: 'QUJD', mimeType: 'image/png', name: 'one.png' },
+      { data: 'REVG', mimeType: 'image/png', name: 'two.png' },
+    ]);
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-img',
+          prompt: [
+            { type: 'text', text: 'look at these' },
+            { type: 'image', data: 'QUJD', mimeType: 'image/png' },
+            { type: 'image', data: 'REVG', mimeType: 'image/png' },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('keeps prompt() text-only when no images are passed', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-text-only' });
+    await manager.start();
+
+    await manager.prompt('just text', []);
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/prompt',
+        params: expect.objectContaining({
+          sessionId: 'sess-text-only',
+          prompt: [{ type: 'text', text: 'just text' }],
+        }),
+      }),
+    );
+  });
+
+  it('fails loud when the spawned kimi is below the 0.23.5 version floor', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: {},
+      agentInfo: { name: 'Kimi Code CLI', version: '0.20.0' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-old' });
+
+    await expect(manager.start()).rejects.toThrow(/kimi >= 0\.23\.5 required/);
+
+    expect(manager.isInitialized()).toBe(false);
+    const errorEvent = events.find((e) => e.update.sessionUpdate === 'error');
+    expect(errorEvent?.update).toMatchObject({
+      sessionUpdate: 'error',
+      error: expect.stringContaining('0.23.5'),
+    });
+    // The runtime must fail before establishing a session.
+    expect(getProcess().requests.some((r) => r.method === 'session/new')).toBe(false);
+  });
+
+  it('accepts a kimi version exactly at the 0.23.5 floor', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: {},
+      agentInfo: { name: 'Kimi Code CLI', version: '0.23.5' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-floor' });
+
+    await manager.start();
+
+    expect(manager.isInitialized()).toBe(true);
+  });
+
+  it('accepts a kimi version above the floor', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: {},
+      agentInfo: { name: 'Kimi Code CLI', version: '0.27.0' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-new' });
+
+    await manager.start();
+
+    expect(manager.isInitialized()).toBe(true);
+  });
+
+  it('warns and proceeds when agentInfo.version is absent or unparseable', async () => {
+    mockState.setResponse('initialize', {
+      agentCapabilities: {},
+      agentInfo: { name: 'Kimi Code CLI', version: '1.0' },
+    });
+    mockState.setResponse('session/new', { sessionId: 'sess-unparseable' });
+
+    await manager.start();
+
+    expect(manager.isInitialized()).toBe(true);
+  });
+
+  it('surfaces the active model imageIn capability from session configOptions', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', {
+      sessionId: 'sess-imagein',
+      configOptions: [
+        {
+          type: 'select',
+          id: 'model',
+          currentValue: 'kimi-for-coding',
+          options: [
+            { value: 'k2', name: 'K2', imageIn: true },
+            { value: 'kimi-for-coding', name: 'Kimi For Coding', imageIn: false },
+          ],
+        },
+      ],
+    });
+
+    await manager.start();
+
+    const initialized = events.find((e) => e.update.sessionUpdate === 'initialized');
+    expect(initialized?.update).toMatchObject({
+      sessionUpdate: 'initialized',
+      sessionId: 'sess-imagein',
+      imageIn: false,
+    });
+  });
+
+  it('leaves imageIn unknown when configOptions is absent (older runtimes)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-no-config' });
+
+    await manager.start();
+
+    const initialized = events.find((e) => e.update.sessionUpdate === 'initialized');
+    expect(initialized?.update).toMatchObject({
+      sessionUpdate: 'initialized',
+      sessionId: 'sess-no-config',
+    });
+    expect(
+      initialized?.update.sessionUpdate === 'initialized' && initialized.update.imageIn,
+    ).toBeUndefined();
   });
 
   it('emits turn_complete when session/prompt resolves with stopReason', async () => {
@@ -439,7 +597,7 @@ describe('AcpRuntimeManager', () => {
     expect(
       events.some(
         (e) => e.update.sessionUpdate === 'turn_complete'
-          && (e.update as Record<string, unknown>).stopReason === 'cancel',
+          && (e.update as Record<string, unknown>).stopReason === 'cancelled',
       ),
     ).toBe(true);
     expect(manager.getSessionId()).toBe('sess-fail');
@@ -487,6 +645,234 @@ describe('AcpRuntimeManager', () => {
     vi.useRealTimers();
   });
 
+  it('treats wait_state updates as meaningful activity and forwards them to the renderer', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-wait' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
+    const process = getProcess();
+
+    let resolveTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { resolveTurn = resolve; }));
+    manager.prompt('slow provider');
+
+    // 7 minutes of provider retry backoff reported as wait_state frames
+    // (420s > the 300s idle budget): each frame is meaningful activity, so
+    // the watchdog must not fire while the runtime is reporting its waits.
+    for (let i = 0; i < 7; i++) {
+      process.emit('notification', 'session/update', {
+        sessionId: 'sess-wait',
+        update: {
+          sessionUpdate: 'wait_state',
+          kind: 'provider_retry',
+          failedAttempt: i + 1,
+          nextAttempt: i + 2,
+          maxAttempts: 10,
+          delayMs: 12_000,
+          errorName: 'APITimeoutError',
+          statusCode: 408,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    resolveTurn({ stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(restartSpy).not.toHaveBeenCalled();
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+    const waitEvents = events.filter((e) => e.update.sessionUpdate === 'wait_state');
+    expect(waitEvents).toHaveLength(7);
+    expect(waitEvents[3]?.update).toMatchObject({
+      sessionUpdate: 'wait_state',
+      sessionId: 'sess-wait',
+      waitState: {
+        kind: 'provider_retry',
+        failedAttempt: 4,
+        nextAttempt: 5,
+        maxAttempts: 10,
+        delayMs: 12_000,
+        errorName: 'APITimeoutError',
+        statusCode: 408,
+      },
+    });
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('forwards awaiting_first_token wait_state and drops malformed frames', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-ws-first-token' });
+    await manager.start();
+
+    const process = getProcess();
+    process.emit('notification', 'session/update', {
+      sessionId: 'sess-ws-first-token',
+      update: { sessionUpdate: 'wait_state', kind: 'awaiting_first_token' },
+    });
+    // Missing kind: malformed — must not reach the renderer.
+    process.emit('notification', 'session/update', {
+      sessionId: 'sess-ws-first-token',
+      update: { sessionUpdate: 'wait_state', delayMs: 500 },
+    });
+
+    const waitEvents = events.filter((e) => e.update.sessionUpdate === 'wait_state');
+    expect(waitEvents).toHaveLength(1);
+    expect(waitEvents[0]?.update).toMatchObject({
+      sessionUpdate: 'wait_state',
+      sessionId: 'sess-ws-first-token',
+      waitState: { kind: 'awaiting_first_token' },
+    });
+
+    manager.kill();
+  });
+
+  it('does not let a malformed wait_state frame reset the idle watchdog (WO 11498)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-ws-malformed' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
+    const process = getProcess();
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+    await manager.prompt('slow provider');
+
+    // 250s of silence, then a malformed wait_state frame (no kind — dropped
+    // from the UI). If it fed the idle budget, the watchdog would fire at
+    // ~550s instead of 300s.
+    await vi.advanceTimersByTimeAsync(250_000);
+    process.emit('notification', 'session/update', {
+      sessionId: 'sess-ws-malformed',
+      update: { sessionUpdate: 'wait_state', delayMs: 500 },
+    });
+
+    // 100s more: the 300s watchdog, measured from the last MEANINGFUL activity
+    // (the prompt, not the malformed frame), must have tripped.
+    await vi.advanceTimersByTimeAsync(100_000);
+
+    expect(restartSpy).toHaveBeenCalled();
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('re-syncs and retries dispatch on turn.agent_busy without cancelling or failing the prompt', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-resync' });
+    await manager.start();
+    events = []; // drop boot-prompt artifacts
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
+    const process = getProcess();
+
+    // First dispatch rejected: the runtime still runs a turn we believed over.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 20) is active (code -32600)'),
+    );
+    await manager.prompt('mission bravo');
+    await vi.advanceTimersByTimeAsync(0); // let the rejection settle
+
+    // No cancel, no surfaced failure, no restart — the prompt waits instead.
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(0);
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+    expect(events.find((e) => e.update.sessionUpdate === 'turn_complete')).toBeUndefined();
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    // The zombie turn ends — the runtime accepts the retried dispatch.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const promptTexts = process.requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+    expect(promptTexts.filter((t) => t === 'mission bravo')).toHaveLength(2);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && (e.update as Record<string, unknown>).stopReason === 'end_turn',
+      ),
+    ).toBe(true);
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('dispatches queued prompts in order after the busy turn ends (no cascade)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-order' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('first');
+    const secondDispatched = manager.prompt('second');
+    await vi.advanceTimersByTimeAsync(0);
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(5_000); // retry re-dispatches 'first'
+    await expect(secondDispatched).resolves.toBeUndefined(); // 'second' drains next
+    await vi.advanceTimersByTimeAsync(0);
+
+    const promptTexts = process.requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+    expect(promptTexts.filter((t) => t === 'first')).toHaveLength(2);
+    expect(promptTexts.indexOf('second')).toBeGreaterThan(promptTexts.lastIndexOf('first'));
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('trips the idle watchdog and restarts when the busy turn never ends', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-wedged' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+    const process = getProcess();
+
+    // The runtime never accepts a dispatch and never emits a notification.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('stuck');
+
+    // 19 ticks (285s): retries every 5s must not reset the idle clock.
+    for (let i = 0; i < 19; i++) {
+      await vi.advanceTimersByTimeAsync(15_000);
+    }
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(0);
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    // Past 300s of true silence, the watchdog trips and restarts as today.
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = events.find((e) => e.update.sessionUpdate === 'error');
+    expect(error?.update).toMatchObject({
+      sessionUpdate: 'error',
+      error: expect.stringContaining('No response'),
+    });
+    expect(restartSpy).toHaveBeenCalled();
+
+    restartSpy.mockRestore();
+    manager.kill();
+    vi.useRealTimers();
+  });
+
   it('preserves recent user prompts in boot prompt after restart', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-restart-context' });
@@ -508,79 +894,327 @@ describe('AcpRuntimeManager', () => {
     expect(latestBootPrompt.prompt[0].text).toContain('Restart context');
   });
 
-  it('forwards structured content blocks when runtime declares image support', async () => {
-    mockState.setResponse('initialize', {
-      agentCapabilities: { promptCapabilities: { image: true } },
-      agentInfo: { name: 'Kimi' },
+  it('hydrates the persisted session id and resumes it on start', async () => {
+    mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-persisted' };
+    manager = new AcpRuntimeManager('rt-persist', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
     });
-    mockState.setResponse('session/new', { sessionId: 'sess-img' });
-    await manager.start();
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
 
-    await manager.sendMessage([
-      { type: 'text', text: 'what is this?' },
-      { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
-    ]);
+    await manager.start();
 
     expect(getProcess().requests).toContainEqual(
       expect.objectContaining({
-        method: 'session/prompt',
-        params: expect.objectContaining({
-          sessionId: 'sess-img',
-          prompt: [
-            { type: 'text', text: 'what is this?' },
-            { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
-          ],
-        }),
+        method: 'session/resume',
+        params: expect.objectContaining({ sessionId: 'sess-persisted' }),
       }),
     );
+    expect(getProcess().requests.find((r) => r.method === 'session/new')).toBeUndefined();
+    expect(manager.getSessionId()).toBe('sess-persisted');
+    // App-launch resume: a lightweight wake-up nudge goes out so the agent
+    // visibly comes online — but NOT the full boot prompt (the resumed
+    // session already carries identity and history).
+    const nudgeRequest = getProcess().requests.find((r) => r.method === 'session/prompt');
+    expect(nudgeRequest).toBeDefined();
+    const nudgeText = ((nudgeRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
+    expect(nudgeText).toContain('NextPert');
+    expect(nudgeText).toContain('session resumed');
+    expect(nudgeText).not.toContain('Load Identity');
   });
 
-  it('builds markdown data-URI fallback when runtime does not declare image support', async () => {
-    mockState.setResponse('initialize', {
-      agentCapabilities: { promptCapabilities: {} },
-      agentInfo: { name: 'Kimi' },
+  it('does not re-nudge after an in-process restart of a resumed session', async () => {
+    mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-persisted' };
+    manager = new AcpRuntimeManager('rt-persist-restart', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
     });
-    mockState.setResponse('session/new', { sessionId: 'sess-fallback' });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+
+    await manager.start();
+    // App-launch resume sent exactly one wake-up nudge.
+    expect(getProcess().requests.filter((r) => r.method === 'session/prompt')).toHaveLength(1);
+
+    await manager.restart();
+
+    // In-process restart resumes again (new process), but stays silent: the
+    // renderer still holds the transcript, so no nudge and no boot prompt.
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({ method: 'session/resume' }),
+    );
+    expect(getProcess().requests.find((r) => r.method === 'session/prompt')).toBeUndefined();
+  });
+
+  it('persists a fresh session id for crash-safe resume', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/new', { sessionId: 'sess-new-persist' });
+
     await manager.start();
 
-    await manager.sendMessage([
-      { type: 'text', text: 'explain this error' },
-      { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
-    ]);
-
-    const promptRequests = getProcess().requests.filter((r) => r.method === 'session/prompt');
-    expect(promptRequests.length).toBeGreaterThanOrEqual(1);
-    const promptRequest = promptRequests[promptRequests.length - 1];
-    const prompt = ((promptRequest?.params as any).prompt as Array<{ type: string; text?: string }>);
-    expect(prompt).toHaveLength(1);
-    expect(prompt[0].type).toBe('text');
-    expect(prompt[0].text).toContain('[Image pasted into chat context]');
-    expect(prompt[0].text).toContain('explain this error');
-    expect(prompt[0].text).toContain('data:image/png;base64,aGVsbG8=');
+    expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-new-persist');
   });
 
-  it('falls back to plain text when no images are present and image support is missing', async () => {
+  it('falls back to session/new and re-persists when resume of the persisted id fails', async () => {
+    mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-stale' };
+    manager = new AcpRuntimeManager('rt-stale', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/resume', new Error('invalid params: session not found'));
+    mockState.setResponse('session/new', { sessionId: 'sess-fresh' });
+
+    await manager.start();
+
+    expect(getProcess().requests).toContainEqual(
+      expect.objectContaining({ method: 'session/new' }),
+    );
+    expect(manager.getSessionId()).toBe('sess-fresh');
+    expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-fresh');
+  });
+
+  it('emits queue-state events on enqueue and dispatch (WO-ACP-QUEUED-PROMPT-VISIBILITY)', async () => {
     mockState.setResponse('initialize', {});
-    mockState.setResponse('session/new', { sessionId: 'sess-text' });
+    mockState.setResponse('session/new', { sessionId: 'sess-queue-vis' });
     await manager.start();
+    events = [];
 
-    await manager.sendMessage([{ type: 'text', text: 'just text' }]);
+    const process = getProcess();
+    // First prompt stays in flight until we resolve it manually.
+    let resolveTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { resolveTurn = resolve; }));
+    await manager.prompt('in-flight');
+    const queuedPromise = manager.prompt('queued behind');
 
-    expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({
-        method: 'session/prompt',
-        params: expect.objectContaining({
-          sessionId: 'sess-text',
-          prompt: [{ type: 'text', text: 'just text' }],
-        }),
-      }),
-    );
+    const queuedEvents = events.filter((e) => e.update.sessionUpdate === 'prompt_queued');
+    expect(queuedEvents).toHaveLength(1);
+    expect(queuedEvents[0]?.update).toMatchObject({
+      sessionUpdate: 'prompt_queued',
+      sessionId: 'sess-queue-vis',
+      queueDepth: 1,
+    });
+    expect(events.find((e) => e.update.sessionUpdate === 'prompt_dequeued')).toBeUndefined();
+
+    // Turn completes → the queued prompt dispatches with depth back to 0.
+    resolveTurn({ stopReason: 'end_turn' });
+    await queuedPromise;
+
+    const dequeuedEvents = events.filter((e) => e.update.sessionUpdate === 'prompt_dequeued');
+    expect(dequeuedEvents).toHaveLength(1);
+    expect(dequeuedEvents[0]?.update).toMatchObject({
+      sessionUpdate: 'prompt_dequeued',
+      sessionId: 'sess-queue-vis',
+      queueDepth: 0,
+    });
+
+    manager.kill();
+    void process;
   });
 
-  it('throws when sending a message before initialization', async () => {
-    await expect(
-      manager.sendMessage([{ type: 'text', text: 'too early' }]),
-    ).rejects.toThrow('ACP runtime not initialized');
+  it('emits queue_cleared when a watchdog restart drops queued prompts', async () => {
+    // No loadSession capability → restart never resumes → fresh session →
+    // queued prompts drop (and the renderer must hear queue_cleared).
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-queue-drop' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+    await manager.prompt('in-flight');
+    void manager.prompt('queued one');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+
+    // Trip the 300s idle watchdog: failPendingTurn + restart. The restart
+    // starts a FRESH session (no resume capability), so the queue drops.
+    await vi.advanceTimersByTimeAsync(320_000);
+    await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill 500ms pause + start
+
+    const cleared = events.filter((e) => e.update.sessionUpdate === 'queue_cleared');
+    expect(cleared.length).toBeGreaterThan(0);
+
+    manager.kill();
+    vi.useRealTimers();
+    void process;
+  });
+
+  it('settles a queued injectMail as false when a restart drops the queue (WO 11462)', async () => {
+    // No loadSession capability → restart never resumes → queue drops.
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-drop' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+    await manager.prompt('in-flight');
+    const mailPromise = manager.injectMail('you have mail');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+
+    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The queued
+    // mail inject must settle false (not hang) so the renderer's retry /
+    // delivery-failed path can fire.
+    await vi.advanceTimersByTimeAsync(320_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(mailPromise).resolves.toBe(false);
+
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('settles a queued injectMail as false on intentional kill (WO 11483)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-kill' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+    await manager.prompt('in-flight');
+    const mailPromise = manager.injectMail('you have mail');
+    await Promise.resolve();
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+
+    // An intentional kill has no later drain path — the queued notice must
+    // settle false immediately, not hang.
+    manager.kill();
+
+    await expect(mailPromise).resolves.toBe(false);
+  });
+
+  it('settles queued prompts as false when the restart budget is exhausted (WO 11483)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-exhaust' });
+    await manager.start();
+
+    // Fake clock BEFORE any prompt traffic so the inactivity watchdog is fake
+    // from creation (mirrors the queue_cleared test above).
+    vi.useFakeTimers();
+    try {
+      mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+      await manager.prompt('in-flight');
+      const mailPromise = manager.injectMail('you have mail');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+
+      // Every subsequent start attempt fails → each restart re-schedules until
+      // the budget (MAX_RESTARTS = 5) is spent and the give-up path drops the
+      // queue.
+      mockState.setResponse('initialize', new Error('spawn boom'));
+      mockState.setResponse('session/new', new Error('spawn boom'));
+
+      // Trip the 300s idle watchdog → first restart; then cascade through the
+      // restart backoff chain + start()'s internal 2s/4s retry delays.
+      await vi.advanceTimersByTimeAsync(320_000);
+      await vi.advanceTimersByTimeAsync(180_000);
+
+      expect(events.some((e) =>
+        e.update.sessionUpdate === 'error' &&
+        typeof e.update.error === 'string' &&
+        e.update.error.includes('keeps failing'),
+      )).toBe(true);
+      await expect(mailPromise).resolves.toBe(false);
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('spawns with -m alias when model_override is set (WO-KIMI-MODEL-OVERRIDE)', async () => {
+    manager = new AcpRuntimeManager('rt-model', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      modelOverride: 'kimi-for-coding-highspeed',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-model' });
+
+    await manager.start();
+
+    const args = getProcess().options.args;
+    const mIndex = args.indexOf('-m');
+    expect(mIndex).toBeGreaterThan(-1);
+    expect(args[mIndex + 1]).toBe('kimi-code/kimi-for-coding-highspeed');
+    expect(args[args.length - 1]).toBe('acp');
+  });
+
+  it('keeps the spawn byte-identical when model_override is null', async () => {
+    manager = new AcpRuntimeManager('rt-model-null', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      modelOverride: null,
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-model-null' });
+
+    await manager.start();
+
+    expect(getProcess().options.args).toEqual(['--yolo', 'acp']);
+    expect(getProcess().options.env).not.toHaveProperty('KIMI_MODEL_THINKING_EFFORT');
+  });
+
+  it('fails loud on an unknown model id — no spawn, no silent fallback', async () => {
+    manager = new AcpRuntimeManager('rt-model-bad', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      modelOverride: 'kimi-turbo-typo',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+
+    await expect(manager.start()).rejects.toThrow(/not a recognized kimi model/);
+    // No process may ever exist for an unrecognized id.
+    expect(mockState.lastInstance).toBeNull();
+  });
+
+  it('injects KIMI_MODEL_THINKING_EFFORT for k3 with an effort override', async () => {
+    manager = new AcpRuntimeManager('rt-k3-effort', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      effort: 'high',
+      modelOverride: 'k3',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-k3' });
+
+    await manager.start();
+
+    expect(getProcess().options.env?.KIMI_MODEL_THINKING_EFFORT).toBe('high');
+    expect(getProcess().options.args).toContain('kimi-code/k3');
+  });
+
+  it('does not inject thinking effort for non-k3 models', async () => {
+    manager = new AcpRuntimeManager('rt-k27-effort', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      effort: 'high',
+      modelOverride: 'kimi-for-coding',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-k27' });
+
+    await manager.start();
+
+    expect(getProcess().options.env).not.toHaveProperty('KIMI_MODEL_THINKING_EFFORT');
+    expect(getProcess().options.args).toContain('kimi-code/kimi-for-coding');
   });
 
   it('cancels the active turn and emits turn_complete', async () => {
@@ -598,7 +1232,7 @@ describe('AcpRuntimeManager', () => {
     expect(complete?.update).toMatchObject({
       sessionUpdate: 'turn_complete',
       sessionId: 'sess-4',
-      stopReason: 'cancel',
+      stopReason: 'cancelled',
     });
   });
 
