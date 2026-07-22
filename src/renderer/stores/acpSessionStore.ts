@@ -223,19 +223,55 @@ function ensureAssistantTurn(session: AcpSessionState, agent: string, sessionId:
   return { ...session, turns: [...session.turns, turn], activeTurnId: turn.id };
 }
 
+/**
+ * Updates that prove the runtime is producing output again (or is now
+ * blocked on the user), ending any recorded provider wait-state. Mirrors
+ * the meaningful-activity set in AcpRuntimeManager, minus `plan` (not
+ * handled by this store) and `wait_state` itself.
+ */
+const WAIT_STATE_CLEARING_UPDATES = new Set([
+  'agent_thought_chunk',
+  'agent_message_chunk',
+  'tool_call',
+  'tool_call_update',
+  'permission_request',
+  'turn_complete',
+  'error',
+]);
+
 function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | null | undefined, agent: string): AcpSessionState {
   if (!update || typeof update !== 'object') {
     console.warn(`[acpSessionStore] Ignoring malformed update for ${agent}: update is null or not an object`);
     return session;
   }
+  // Any content-bearing or terminal update means the runtime is producing
+  // again (or now waiting on the user): the recorded wait-state — provider
+  // first-token latency or retry backoff — is over.
+  if (WAIT_STATE_CLEARING_UPDATES.has(update.sessionUpdate)) {
+    session = { ...session, waitState: undefined };
+  }
   switch (update.sessionUpdate) {
     case 'initialized': {
+      // Runtime (re)start: any queue/wait state from the previous process is
+      // gone — clear both so no stale indicators survive the restart.
       return {
         ...session,
         sessionId: update.sessionId,
         capabilities: update.capabilities,
         agentInfo: update.agentInfo,
+        imageIn: update.imageIn,
+        queuedCount: 0,
+        waitState: undefined,
       };
+    }
+
+    case 'prompt_queued':
+    case 'prompt_dequeued': {
+      return { ...session, queuedCount: update.queueDepth };
+    }
+
+    case 'queue_cleared': {
+      return { ...session, queuedCount: 0 };
     }
 
     case 'available_commands_update': {
@@ -349,6 +385,14 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
           toolCall: update.toolCall,
         },
       };
+    }
+
+    case 'wait_state': {
+      if (!update.waitState || typeof update.waitState.kind !== 'string' || update.waitState.kind === '') {
+        console.warn(`[acpSessionStore] Ignoring wait_state for ${agent}: missing or invalid kind`);
+        return session;
+      }
+      return { ...session, waitState: update.waitState };
     }
 
     case 'turn_complete': {

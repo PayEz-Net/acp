@@ -74,14 +74,40 @@ export interface AcpAvailableCommand {
   description: string;
 }
 
+/**
+ * What the runtime is currently waiting on, forwarded from the adapter's
+ * custom `wait_state` session update (kimi-code acp-adapter). `kind` is a
+ * plain string so newer runtimes can add kinds without breaking older
+ * clients; known values today:
+ *
+ *  - `'awaiting_first_token'`: a step's LLM request is in flight but no
+ *    assistant output has streamed yet (provider latency).
+ *  - `'provider_retry'`: a provider request failed retryably and the
+ *    runtime is backing off before the next attempt; the attempt/delay
+ *    fields are only present for this kind.
+ */
+export interface AcpWaitState {
+  kind: string;
+  failedAttempt?: number;
+  nextAttempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  errorName?: string;
+  statusCode?: number;
+}
+
 export type AcpSessionUpdate =
-  | { sessionUpdate: 'initialized'; sessionId: string; capabilities: AcpAgentCapabilities; agentInfo: AcpAgentInfo }
+  | { sessionUpdate: 'initialized'; sessionId: string; capabilities: AcpAgentCapabilities; agentInfo: AcpAgentInfo; imageIn?: boolean }
   | { sessionUpdate: 'available_commands_update'; sessionId: string; availableCommands?: AcpAvailableCommand[] }
   | { sessionUpdate: 'agent_thought_chunk'; sessionId: string; content: AcpContentBlock }
   | { sessionUpdate: 'agent_message_chunk'; sessionId: string; content: AcpContentBlock }
   | { sessionUpdate: 'tool_call'; sessionId: string; toolCall: AcpToolCall }
   | { sessionUpdate: 'tool_call_update'; sessionId: string; toolCall: AcpToolCall }
   | { sessionUpdate: 'permission_request'; sessionId: string; requestId: number | string; options: AcpPermissionOption[]; toolCall: AcpToolCall }
+  | { sessionUpdate: 'wait_state'; sessionId: string; waitState: AcpWaitState }
+  | { sessionUpdate: 'prompt_queued'; sessionId: string; queueDepth: number }
+  | { sessionUpdate: 'prompt_dequeued'; sessionId: string; queueDepth: number }
+  | { sessionUpdate: 'queue_cleared'; sessionId: string }
   | { sessionUpdate: 'turn_complete'; sessionId: string; stopReason: string }
   | { sessionUpdate: 'error'; sessionId?: string; error: string }
   | { sessionUpdate: 'stderr'; sessionId?: string; text: string };
@@ -92,10 +118,22 @@ export interface AcpEventPayload {
   update: AcpSessionUpdate;
 }
 
+/**
+ * Outgoing image attachment for an ACP prompt. `data` is base64 WITHOUT the
+ * data-URL prefix, matching the adapter's `{ type: 'image', data, mimeType }`
+ * content-block contract.
+ */
+export interface AcpPromptImage {
+  data: string;
+  mimeType: string;
+  name?: string;
+}
+
 export interface AcpPromptPayload {
   agent: string;
   sessionId: string;
   text: string;
+  images?: AcpPromptImage[];
 }
 
 export interface AcpInjectMailPayload {
@@ -166,6 +204,26 @@ export interface AcpSessionState {
   availableCommands?: AcpAvailableCommand[];
   turns: AcpTurn[];
   activeTurnId: string | null;
+  /**
+   * Prompts serialized behind the in-flight turn for this agent (from the
+   * main-process queue-state events). 0/undefined = nothing queued; the UI
+   * shows a quiet "Queued behind current turn (N)" indicator while > 0.
+   */
+  queuedCount?: number;
+  /**
+   * Current runtime wait-state (provider latency / retry backoff), set by
+   * `wait_state` updates and cleared by the next content-bearing update or
+   * turn end. Absent on older runtimes that never emit wait-state frames.
+   */
+  waitState?: AcpWaitState;
+  /**
+   * Whether the active model accepts image input, from the `model` arm of the
+   * runtime's session configOptions (kimi-code fork delta). `undefined` means
+   * unknown (older runtime that does not advertise it) — the composer allows
+   * image sends and lets the server gate decide; only an explicit `false`
+   * refuses locally.
+   */
+  imageIn?: boolean;
   pendingPermission?: {
     requestId: number | string;
     options: AcpPermissionOption[];

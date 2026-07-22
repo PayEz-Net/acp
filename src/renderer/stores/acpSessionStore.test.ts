@@ -160,6 +160,129 @@ describe('acpSessionStore', () => {
     expect(session?.activeTurnId).toBeNull();
   });
 
+  it('records wait_state and clears it when content arrives', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'wait_state',
+        sessionId: 's1',
+        waitState: {
+          kind: 'provider_retry',
+          failedAttempt: 2,
+          nextAttempt: 3,
+          maxAttempts: 10,
+          delayMs: 12_000,
+          errorName: 'APITimeoutError',
+          statusCode: 408,
+        },
+      }),
+    );
+
+    let session = store.getSession('NextPert');
+    expect(session?.waitState).toMatchObject({
+      kind: 'provider_retry',
+      nextAttempt: 3,
+      maxAttempts: 10,
+      delayMs: 12_000,
+    });
+
+    // The retry succeeded and content is streaming again — the wait is over.
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'agent_message_chunk',
+        sessionId: 's1',
+        content: { type: 'content', content: { type: 'text', text: 'Recovered.' } },
+      }),
+    );
+    session = store.getSession('NextPert');
+    expect(session?.waitState).toBeUndefined();
+  });
+
+  it('clears wait_state on turn_complete', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'wait_state',
+        sessionId: 's1',
+        waitState: { kind: 'awaiting_first_token' },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'turn_complete',
+        sessionId: 's1',
+        stopReason: 'end_turn',
+      }),
+    );
+
+    expect(store.getSession('NextPert')?.waitState).toBeUndefined();
+  });
+
+  it('ignores a wait_state update with a missing kind', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'wait_state',
+        sessionId: 's1',
+        waitState: { kind: '' },
+      }),
+    );
+
+    expect(store.getSession('NextPert')?.waitState).toBeUndefined();
+  });
+
+  it('tracks queuedCount from queue-state events and clears on queue_cleared', () => {
+    const store = useAcpSessionStore.getState();
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 1 }),
+    );
+    expect(store.getSession('NextPert')?.queuedCount).toBe(1);
+
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 2 }),
+    );
+    expect(store.getSession('NextPert')?.queuedCount).toBe(2);
+
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'prompt_dequeued', sessionId: 's1', queueDepth: 1 }),
+    );
+    expect(store.getSession('NextPert')?.queuedCount).toBe(1);
+
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'queue_cleared', sessionId: 's1' }),
+    );
+    expect(store.getSession('NextPert')?.queuedCount).toBe(0);
+  });
+
+  it('clears queuedCount and waitState on initialized (runtime restart)', () => {
+    const store = useAcpSessionStore.getState();
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 2 }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'wait_state',
+        sessionId: 's1',
+        waitState: { kind: 'provider_retry', nextAttempt: 3, maxAttempts: 10 },
+      }),
+    );
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'initialized',
+        sessionId: 's1',
+        capabilities: {},
+        agentInfo: { name: 'Kimi' },
+      }),
+    );
+
+    const session = store.getSession('NextPert');
+    expect(session?.queuedCount).toBe(0);
+    expect(session?.waitState).toBeUndefined();
+  });
+
   it('marks in-progress tools as completed on turn_complete', () => {
     const store = useAcpSessionStore.getState();
     store.startAssistantTurn('NextPert', 's1');

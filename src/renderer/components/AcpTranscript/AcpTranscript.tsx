@@ -1,5 +1,5 @@
 import { useRef, useEffect } from 'react';
-import type { AcpTurn, AcpSessionState } from '@shared/acpTypes';
+import type { AcpTurn, AcpSessionState, AcpWaitState } from '@shared/acpTypes';
 import { useAcpSessionStore } from '../../stores/acpSessionStore';
 import { AssistantTurn } from './AssistantTurn';
 import { UserTurn } from './UserTurn';
@@ -12,6 +12,8 @@ interface AcpTranscriptProps {
   agent?: string;
   sessionId?: string;
   pendingPermission?: AcpSessionState['pendingPermission'];
+  waitState?: AcpWaitState;
+  queuedCount?: number;
   cancelRequested?: boolean;
 }
 
@@ -21,6 +23,8 @@ export function AcpTranscript({
   agent,
   sessionId,
   pendingPermission: pendingPermissionProp,
+  waitState: waitStateProp,
+  queuedCount: queuedCountProp,
   cancelRequested,
 }: AcpTranscriptProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -37,6 +41,14 @@ export function AcpTranscript({
     derivedAgent ? s.sessions.get(derivedAgent)?.pendingPermission : undefined,
   );
   const pendingPermission = pendingPermissionProp ?? storePermission;
+  const storeWaitState = useAcpSessionStore((s) =>
+    derivedAgent ? s.sessions.get(derivedAgent)?.waitState : undefined,
+  );
+  const waitState = waitStateProp ?? storeWaitState;
+  const storeQueuedCount = useAcpSessionStore((s) =>
+    derivedAgent ? s.sessions.get(derivedAgent)?.queuedCount : undefined,
+  );
+  const queuedCount = queuedCountProp ?? storeQueuedCount ?? 0;
 
   const handlePermissionResponse = (optionId: string) => {
     if (!derivedAgent || !derivedSessionId || !pendingPermission) return;
@@ -76,8 +88,14 @@ export function AcpTranscript({
         />
       )}
 
+      {queuedCount > 0 && (
+        <div className="flex items-center gap-2 text-slate-500 text-xs py-1" data-testid="queued-indicator">
+          <span className="italic">Queued behind current turn ({queuedCount})</span>
+        </div>
+      )}
+
       {activeTurn && activeTurn.status !== 'done' && activeTurn.status !== 'error' && (
-        <ActivityIndicator status={activeTurn.status} />
+        <ActivityIndicator status={activeTurn.status} waitState={waitState} />
       )}
 
       {cancelRequested && (
