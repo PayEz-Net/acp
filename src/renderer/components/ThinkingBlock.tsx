@@ -80,7 +80,7 @@ export function ThinkingBlock({
           }`}
         >
           {markdown ? (
-            <div className="p-2 pl-[1.125rem] prose prose-invert prose-xs max-w-none break-words text-slate-400 italic">
+            <div className="p-2 pl-[1.125rem] prose prose-invert prose-xs max-w-none break-words [&_pre]:whitespace-pre-wrap [&_pre]:break-words text-slate-400 italic">
               <ReactMarkdown>{expanded ? content : preview}</ReactMarkdown>
             </div>
           ) : (

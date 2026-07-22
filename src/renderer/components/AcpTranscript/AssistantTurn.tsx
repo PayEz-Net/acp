@@ -15,7 +15,7 @@ export function isShellToolCall(toolCall: AcpToolCall): boolean {
 
 function MarkdownProse({ children }: { children: string }) {
   return (
-    <div className="prose prose-invert prose-sm max-w-none min-w-0 whitespace-pre-wrap break-words text-slate-200">
+    <div className="prose prose-invert prose-sm max-w-none min-w-0 whitespace-pre-wrap break-words [&_pre]:whitespace-pre-wrap [&_pre]:break-words text-slate-200">
       <ReactMarkdown>{children}</ReactMarkdown>
     </div>
   );

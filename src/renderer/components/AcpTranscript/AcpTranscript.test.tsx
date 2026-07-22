@@ -90,6 +90,79 @@ describe('AcpTranscript', () => {
     cleanup(root, container);
   });
 
+  it('shows the provider-retry wait-state in place of the generic status label', () => {
+    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+    const { container, root } = render(
+      <AcpTranscript
+        turns={turns}
+        activeTurnId="a1"
+        waitState={{
+          kind: 'provider_retry',
+          failedAttempt: 2,
+          nextAttempt: 3,
+          maxAttempts: 10,
+          delayMs: 12_000,
+        }}
+      />,
+    );
+    const indicator = container.querySelector('[data-testid="activity-indicator"]');
+    expect(indicator?.textContent).toContain('Retrying provider (attempt 3/10)');
+    expect(indicator?.textContent).toContain('12s');
+    cleanup(root, container);
+  });
+
+  it('surfaces the provider error name in the retry wait-state label', () => {
+    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+    const { container, root } = render(
+      <AcpTranscript
+        turns={turns}
+        activeTurnId="a1"
+        waitState={{
+          kind: 'provider_retry',
+          failedAttempt: 1,
+          nextAttempt: 2,
+          maxAttempts: 10,
+          delayMs: 5_000,
+          errorName: 'RateLimitError',
+        }}
+      />,
+    );
+    const indicator = container.querySelector('[data-testid="activity-indicator"]');
+    expect(indicator?.textContent).toContain('Retrying provider (attempt 2/10)');
+    expect(indicator?.textContent).toContain('RateLimitError');
+    cleanup(root, container);
+  });
+
+  it('shows the first-token wait-state label', () => {
+    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+    const { container, root } = render(
+      <AcpTranscript
+        turns={turns}
+        activeTurnId="a1"
+        waitState={{ kind: 'awaiting_first_token' }}
+      />,
+    );
+    expect(container.querySelector('[data-testid="activity-indicator"]')?.textContent).toContain(
+      'Waiting on provider',
+    );
+    cleanup(root, container);
+  });
+
+  it('shows the queued indicator with depth and hides it at zero', () => {
+    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+    const { container, root } = render(
+      <AcpTranscript turns={turns} activeTurnId="a1" queuedCount={2} />,
+    );
+    expect(container.querySelector('[data-testid="queued-indicator"]')?.textContent).toContain(
+      'Queued behind current turn (2)',
+    );
+    cleanup(root, container);
+
+    const empty = render(<AcpTranscript turns={turns} activeTurnId="a1" queuedCount={0} />);
+    expect(empty.container.querySelector('[data-testid="queued-indicator"]')).toBeNull();
+    cleanup(empty.root, empty.container);
+  });
+
   it('shows a stopping indicator when cancel is requested', () => {
     const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
     const { container, root } = render(
@@ -243,6 +316,22 @@ describe('AssistantTurn', () => {
     expect(prose).not.toBeNull();
     expect(prose?.classList.contains('break-words')).toBe(true);
     expect(prose?.classList.contains('min-w-0')).toBe(true);
+    cleanup(root, container);
+  });
+
+  it('wraps fenced code blocks instead of letting them overflow into a horizontal scrollbar', () => {
+    const longLine = 'NextPert back (session resumed). 2 unread messages. What\'s the mission?';
+    const turn = makeTurn({ contentText: `\`\`\`\n${longLine}\n\`\`\`` });
+    const { container, root } = render(<AssistantTurn turn={turn} />);
+    const prose = container.querySelector('.prose');
+    expect(prose).not.toBeNull();
+    // The typography plugin is not installed, so a fenced block renders as a
+    // bare UA <pre> (white-space: pre, no own scrollbar). Without an override
+    // its single long line overflows and the transcript root (overflow-y-auto,
+    // which computes overflow-x to auto) grows a horizontal scrollbar.
+    expect(prose?.querySelector('pre')).not.toBeNull();
+    expect(prose?.classList.contains('[&_pre]:whitespace-pre-wrap')).toBe(true);
+    expect(prose?.classList.contains('[&_pre]:break-words')).toBe(true);
     cleanup(root, container);
   });
 
