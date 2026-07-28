@@ -14,7 +14,9 @@ export interface AgentInstance {
   id: string;
   teamId: string;
   archetypeId: string;
-  teamUniqueName: string;
+  // The member's canonical agent name (#207 one-name: team_unique_name /
+  // team_display_name are GONE — a member's name IS the canonical agent name).
+  name: string;
   displayName: string;
   role: string;
   identityPrompt: string;
@@ -41,7 +43,9 @@ export interface Team {
 export interface TeamEditorProject {
   id: number;
   name: string;
-  assignedTeamId?: string;
+  // Live-team model: the engaged standing team (null = no team engaged).
+  engaged_team_id?: number | string | null;
+  engaged_team_name?: string | null;
 }
 
 export interface TeamAssignment {
@@ -52,7 +56,7 @@ export interface TeamAssignment {
 // Form state for create/edit agent instance
 export interface AgentInstanceFormData {
   archetypeId: string;
-  teamUniqueName: string;
+  name: string;
   displayName: string;
   role: string;
   identityPrompt: string;

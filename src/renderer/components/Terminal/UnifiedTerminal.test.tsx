@@ -21,6 +21,7 @@ const mockTriggerPaste = vi.fn();
 
 const mockSendAcpPrompt = vi.fn().mockResolvedValue(undefined);
 const mockSendAcpCancel = vi.fn().mockResolvedValue(undefined);
+const mockPurgeAcpQueue = vi.fn().mockResolvedValue(0);
 const mockSendAcpPermissionResponse = vi.fn().mockResolvedValue(undefined);
 
 class ResizeObserverMock {
@@ -57,6 +58,7 @@ beforeEach(() => {
     triggerPaste: mockTriggerPaste,
     sendAcpPrompt: mockSendAcpPrompt,
     sendAcpCancel: mockSendAcpCancel,
+    purgeAcpQueue: mockPurgeAcpQueue,
     sendAcpPermissionResponse: mockSendAcpPermissionResponse,
   });
   vi.stubGlobal('ResizeObserver', ResizeObserverMock);
@@ -1144,6 +1146,327 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
+    it("cancels the in-flight turn when the human types 'stop' mid-turn (WO 11569)", async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 3 },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      // Start a turn so there is an in-flight assistant turn to interrupt.
+      act(() => {
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      expect(mockSendAcpPrompt).toHaveBeenCalledTimes(1);
+      mockSendAcpPrompt.mockClear();
+
+      act(() => {
+        input.value = 'stop';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      // TIER 1 (WO 11635): the typed word interrupts — cancel fires
+      // immediately; the queue is PRESERVED, never purged.
+      expect(mockSendAcpCancel).toHaveBeenCalledWith({ agent: 'NextPert', sessionId: 's1' });
+      expect(mockPurgeAcpQueue).not.toHaveBeenCalled();
+      expect(mockSendAcpPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+      expect(container.querySelector('[data-testid="terminal-interrupt-flash"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="purge-offer"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    it('flushes input into the running turn on Ctrl+S (native steer parity, WO 11647)', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.value = 'first task';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      expect(mockSendAcpPrompt).toHaveBeenCalledTimes(1);
+
+      // Ctrl+S mid-turn: the input flushes into the running turn and clears.
+      act(() => {
+        input.value = 'listen to this now';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).toHaveBeenCalledTimes(2);
+      expect(mockSendAcpPrompt).toHaveBeenLastCalledWith(
+        expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'listen to this now' }),
+      );
+      expect(input.value).toBe('');
+      cleanup(root, container);
+    });
+
+    it('does nothing on Ctrl+S when idle (native guard)', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.value = 'draft';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('draft');
+      cleanup(root, container);
+    });
+
+    it('treats Escape as a tier-1 interrupt — cancel immediately, queue preserved (WO 11635)', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 3 },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      // Escape interrupts: cancel fires; the queue is PRESERVED, never purged
+      // (WO 11635 — the agent reads all 3 queued messages after the halt).
+      expect(mockSendAcpCancel).toHaveBeenCalledWith({ agent: 'NextPert', sessionId: 's1' });
+      expect(mockPurgeAcpQueue).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="purge-offer"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    it('shows the interrupt flash on Ctrl+C as well (QAPert 11611 minor 1)', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.value = 'List files';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }));
+      });
+
+      expect(mockSendAcpCancel).toHaveBeenCalledWith({ agent: 'NextPert', sessionId: 's1' });
+      expect(mockPurgeAcpQueue).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-testid="terminal-interrupt-flash"]')).not.toBeNull();
+      cleanup(root, container);
+    });
+
+    it('does nothing destructive on an idle Escape — no cancel, no purge (QAPert 11611 minor 2)', async () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 4 },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+      input.value = 'draft text';
+
+      // No turn in flight: Escape clears the draft but MUST NOT cancel or
+      // purge the backlog — the destructive path is never accidental.
+      act(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(mockSendAcpCancel).not.toHaveBeenCalled();
+      expect(mockPurgeAcpQueue).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+      expect(container.querySelector('[data-testid="terminal-interrupt-flash"]')).toBeNull();
+      cleanup(root, container);
+    });
+
+    it("sends 'stop' as a normal message when no turn is in-flight", () => {
+      useProjectStore.setState({
+        activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'initialized',
+          sessionId: 's1',
+          capabilities: {},
+          agentInfo: { name: 'Kimi Code CLI' },
+        },
+      });
+      const agent: AgentState = {
+        id: '1',
+        name: 'NextPert',
+        displayName: 'NextPert',
+        workDir: '',
+        autoStart: false,
+        position: 'top-left',
+        status: 'busy',
+        provider: 'kimi',
+      };
+
+      const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
+      const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
+
+      act(() => {
+        input.value = 'stop';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+
+      expect(mockSendAcpPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'stop' }),
+      );
+      expect(mockSendAcpCancel).not.toHaveBeenCalled();
+      cleanup(root, container);
+    });
+
     it('cancels the active ACP turn and shows an interrupt flash when Escape is pressed', () => {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
@@ -1173,9 +1496,15 @@ describe('UnifiedTerminal', () => {
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
+      // Start a turn so the Escape has something to cancel (idle Escape is a
+      // deliberate no-op per QAPert 11611).
       act(() => {
         input.focus();
         input.value = 'partial command';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      act(() => {
+        input.value = 'draft';
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       });
 
@@ -1185,7 +1514,7 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('stops an active assistant turn when the user sends a new message', () => {
+    it('keeps the active assistant turn when the user sends mid-turn (slice B steer)', () => {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
       });
@@ -1226,6 +1555,8 @@ describe('UnifiedTerminal', () => {
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
+      const activeTurnIdBefore = useAcpSessionStore.getState().getSession('NextPert')?.activeTurnId;
+
       act(() => {
         input.focus();
         input.value = 'Second';
@@ -1233,13 +1564,14 @@ describe('UnifiedTerminal', () => {
       });
 
       const session = useAcpSessionStore.getState().getSession('NextPert');
-      expect(session?.turns).toHaveLength(4);
+      // The steered message joins the ACTIVE turn — no 'interrupted' kill, no
+      // second assistant turn. activeTurnId is unchanged.
+      expect(session?.activeTurnId).toBe(activeTurnIdBefore);
+      expect(session?.turns).toHaveLength(3);
       expect(session?.turns[1].role).toBe('assistant');
-      expect(session?.turns[1].status).toBe('done');
-      expect(session?.turns[1].stopReason).toBe('interrupted');
-      expect(session?.activeTurnId).toBe(session?.turns[3].id);
-      expect(session?.turns[3].role).toBe('assistant');
-      expect(session?.turns[3].status).toBe('thinking');
+      expect(session?.turns[1].status).not.toBe('done');
+      expect(session?.turns[2].role).toBe('user');
+      expect(session?.turns[2].contentText).toBe('Second');
       expect(mockSendAcpPrompt).toHaveBeenCalledWith(
         expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'Second' }),
       );

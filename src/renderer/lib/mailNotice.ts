@@ -13,16 +13,32 @@
 /** API base the renderer talks to (matches the SSE stream URL in useAcpSse). */
 const ACP_API_BASE = 'http://127.0.0.1:3001';
 
+/** Cap for an inlined mail body — keeps injected turns bounded (WO: agents act on content, not pointers). */
+export const MAIL_BODY_INLINE_CAP = 4000;
+
 export function buildMailNoticeText(
   agentName: string,
   from: string,
   subject: string,
   id: string | number,
+  body?: string,
 ): string {
+  const header = `[ACP Mail] You have a message from ${from}: "${subject}" (id: ${id}).`;
+  if (!body) {
+    return (
+      `${header} Read it NOW with: curl -s "${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true" ` +
+      `-H "X-ACP-Agent: ${agentName}" and act on actionable messages — do not wait for the human.`
+    );
+  }
+  const trimmed = body.trim();
+  const truncated =
+    trimmed.length > MAIL_BODY_INLINE_CAP
+      ? `${trimmed.slice(0, MAIL_BODY_INLINE_CAP)}\n…(truncated — full text: curl -s "${ACP_API_BASE}/v1/mail/messages/${id}" -H "X-ACP-Agent: ${agentName}")`
+      : trimmed;
   return (
-    `[ACP Mail] You have a message from ${from}: "${subject}" (id: ${id}). ` +
-    `Read it NOW with: curl -s "${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true" ` +
-    `-H "X-ACP-Agent: ${agentName}" and act on actionable messages — do not wait for the human.`
+    `${header}\n\n${truncated}\n\n` +
+    `Act on it per mail discipline — reply via POST ${ACP_API_BASE}/v1/mail/send as ${agentName} if it needs an answer; ` +
+    `do not wait for the human.`
   );
 }
 
@@ -67,7 +83,10 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  * while a full app restart (fresh sessionStorage) correctly re-notifies
  * unreads that may have landed in the down window.
  */
-export function createMailEventDeduper(cap = 200, persistKey?: string): (agentName: string, id: string | number) => boolean {
+export function createMailEventDeduper(
+  cap = 200,
+  persistKey?: string,
+): ((agentName: string, id: string | number) => boolean) & { unsee: (agentName: string, id: string | number) => void } {
   const seen = new Set<string>();
   if (persistKey && typeof sessionStorage !== 'undefined') {
     try {
@@ -87,7 +106,7 @@ export function createMailEventDeduper(cap = 200, persistKey?: string): (agentNa
       // Quota/security errors are non-fatal — dedupe still works in-memory.
     }
   };
-  return (agentName, id) => {
+  const mark = (agentName: string, id: string | number): boolean => {
     const key = `${agentName}:${id}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -101,6 +120,13 @@ export function createMailEventDeduper(cap = 200, persistKey?: string): (agentNa
     persist();
     return true;
   };
+  // Remove an id so a later catch-up may re-fire it (WO 11629): a DEFERRED
+  // mail inject (old runtime, busy-reject) must not be pinned as 'seen' —
+  // the notice is owed redelivery at the next idle/connect.
+  mark.unsee = (agentName: string, id: string | number): void => {
+    if (seen.delete(`${agentName}:${id}`)) persist();
+  };
+  return mark;
 }
 
 /** Where a mail notice should go, decided off the LIVE surface first (WO 11472). */

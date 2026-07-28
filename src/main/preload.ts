@@ -13,9 +13,11 @@ const IPC_CHANNELS = {
   PTY_KILL: 'pty:kill',
   PTY_DATA: 'pty:data',
   PTY_EXIT: 'pty:exit',
+  TERMINAL_FRAME: 'terminal:frame',
   PTY_LIST: 'pty:list',
   PTY_SPAWNED: 'pty:spawned',
   PTY_SPAWN_FAILED: 'PTY_SPAWN_FAILED',
+  PROJECT_NO_TEAM_ENGAGED: 'project:no-team-engaged',
   AGENT_SESSION_START_FAILED: 'agent-session:start-failed',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
@@ -39,8 +41,6 @@ const IPC_CHANNELS = {
   ACP_RETRY_BACKEND: 'acp:retryBackend',
   ACP_GET_LOGS: 'acp:getLogs',
   ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
-  VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
-  VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN: 'vsql-cache:getActiveSessionToken',
   ACP_RELAUNCH: 'acp:relaunch',
   // Wave C/2 (msg 1155 + 1156)
   PROJECT_SWITCH: 'project:switch',
@@ -60,19 +60,40 @@ const IPC_CHANNELS = {
   ACP_EVENT: 'acp:event',
   ACP_PROMPT: 'acp:prompt',
   ACP_CANCEL: 'acp:cancel',
+  ACP_PURGE_QUEUE: 'acp:purge-queue',
   ACP_SET_MODE: 'acp:set-mode',
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
-  ACP_SEND_MESSAGE: 'acp:send-message',
   ACP_INJECT_MAIL: 'acp:inject-mail',
+  // Terminal Replay v1
+  TERMINAL_LOAD_HISTORY: 'terminal:load-history',
+  TERMINAL_LOAD_SESSIONS: 'terminal:load-sessions',
+  TERMINAL_LOAD_EXPORT: 'terminal:export',
+  TERMINAL_HISTORY: 'terminal:history',
+  TERMINAL_SESSIONS: 'terminal:sessions',
+  TERMINAL_EXPORT: 'terminal:export',
 } as const;
 
 // Type aliases for preload (avoid importing from shared)
 type AppSettings = Record<string, unknown>;
 type TerminalData = { terminalId: string; data: string };
+// Coalesced screen-frame update from the main-process screen model
+// (src/main/terminalScreen.ts). Keep in sync with TerminalFrameUpdate in
+// src/shared/types.ts.
+type TerminalFrameUpdate = {
+  terminalId: string;
+  agentName: string;
+  screen: string[];
+  historyAppended: string[];
+  historyCleared: boolean;
+};
 // Mirrors SpawnFailedPayload in ../shared/types (preload can't import shared).
 // Fixed event contract (BAPert WO #84034) for IPC_CHANNELS.PTY_SPAWN_FAILED.
 type SpawnFailedPayload = { code: 'WORKDIR_INVALID' | 'RUNTIME_NOT_SET'; agent_name: string; work_dir?: string; project_id?: number; message: string };
+// Mirrors NoTeamEngagedPayload in ../shared/types (preload can't import shared).
+// Main → renderer: spawn aborted because the project has NO engaged standing
+// team (empty roster = default for fresh projects, not an error).
+type NoTeamEngagedPayload = { project_id: number; project_name: string; message: string };
 type AuthStatus = { isAuthenticated: boolean; user: unknown; requires2FA: boolean; twoFactorComplete: boolean; expiresAt: string | null };
 type LoginRequest = { email: string; password: string };
 type LoginResult = { success: boolean; error?: string; requires2FA?: boolean; available2FAMethods?: string[] };
@@ -83,14 +104,22 @@ type TwoFactorResult = { success: boolean; error?: string };
 type AgentSessionStartFailedPayload = { agentName: string; terminalId: string; status?: number; message: string };
 
 // ACP transport type aliases (mirrors ../shared/acpTypes).
-type AcpPromptPayload = { agent: string; sessionId: string; text: string };
+type AcpPromptPayload = { agent: string; sessionId: string; text: string; images?: { data: string; mimeType: string; name?: string }[] };
 type AcpInjectMailPayload = { agent: string; sessionId: string; text: string };
 type AcpCancelPayload = { agent: string; sessionId: string };
+type AcpPurgeQueuePayload = { agent: string };
 type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
 type AcpKillPayload = { agent: string; sessionId: string };
 type AcpPermissionResponsePayload = { agent: string; sessionId: string; permissionRequestId: number | string; outcome: string; optionId?: string };
-type AcpSendMessagePayload = { agent: string; sessionId: string; content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> };
 type AcpEventPayload = { agent: string; sessionId: string; update: unknown };
+
+// Terminal Replay v1 type aliases (mirrors ../shared/types).
+type TerminalReplayLine = { agent: string; terminal_id: string; provider: string; line: string; ts: string; session_id: string };
+type TerminalReplayHistoryParams = { projectId: number; agents?: string[]; terminals?: string[]; sessionId?: string; since?: string; until?: string; limit?: number; cursor?: string };
+type TerminalReplayHistoryResult = { lines: TerminalReplayLine[]; next_cursor?: string };
+type TerminalReplaySession = { agent: string; terminal_id: string; session_id: string; first_ts: string; last_ts: string };
+type TerminalReplaySessionsResult = { sessions: TerminalReplaySession[] };
+type TerminalReplayExportParams = { projectId: number; format: 'ndjson' | 'json'; agents?: string[]; terminals?: string[]; sessionId?: string; since?: string; until?: string };
 
 
 // Expose protected methods to renderer via contextBridge
@@ -127,6 +156,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
     ipcRenderer.on(IPC_CHANNELS.PTY_DATA, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_DATA, handler);
+  },
+
+  onTerminalFrame: (callback: (frame: TerminalFrameUpdate) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, frame: TerminalFrameUpdate) => {
+      if (!isValidPayload<TerminalFrameUpdate>(frame, ['terminalId', 'agentName', 'screen', 'historyAppended'])) {
+        console.warn('[preload] Dropping malformed terminal-frame payload:', frame);
+        return;
+      }
+      callback(frame);
+    };
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_FRAME, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_FRAME, handler);
   },
 
   onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void): () => void => {
@@ -166,6 +207,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
     ipcRenderer.on(IPC_CHANNELS.PTY_SPAWN_FAILED, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.PTY_SPAWN_FAILED, handler);
+  },
+
+  // Main → renderer: the orchestrator aborted a spawn because the project
+  // has no engaged standing team (live-team model; WO ACP-2). The renderer
+  // surfaces the "No team engaged — pick a team" CTA. Returns an unsubscribe fn.
+  onNoTeamEngaged: (callback: (payload: NoTeamEngagedPayload) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, payload: NoTeamEngagedPayload) => {
+      if (!isValidPayload<NoTeamEngagedPayload>(payload, ['project_id', 'project_name', 'message'])) {
+        console.warn('[preload] Dropping malformed no-team-engaged payload:', payload);
+        return;
+      }
+      callback(payload);
+    };
+    ipcRenderer.on(IPC_CHANNELS.PROJECT_NO_TEAM_ENGAGED, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.PROJECT_NO_TEAM_ENGAGED, handler);
   },
 
   onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void): () => void => {
@@ -317,6 +373,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_CANCEL, payload);
   },
 
+  purgeAcpQueue: (payload: AcpPurgeQueuePayload): Promise<number> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.ACP_PURGE_QUEUE, payload);
+  },
+
   sendAcpSetMode: (payload: AcpSetModePayload): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_SET_MODE, payload);
   },
@@ -329,10 +389,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_PERMISSION_RESPONSE, payload);
   },
 
-  sendAcpMessage: (payload: AcpSendMessagePayload): Promise<void> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.ACP_SEND_MESSAGE, payload);
-  },
-
   onAcpEvent: (callback: (payload: AcpEventPayload) => void): () => void => {
     const handler = (_: Electron.IpcRendererEvent, payload: AcpEventPayload) => {
       if (!isValidPayload<AcpEventPayload>(payload, ['agent', 'sessionId', 'update'])) {
@@ -343,6 +399,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
     ipcRenderer.on(IPC_CHANNELS.ACP_EVENT, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ACP_EVENT, handler);
+  },
+
+  // Terminal Replay v1
+  loadTerminalHistory: (params: TerminalReplayHistoryParams): Promise<TerminalReplayHistoryResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_LOAD_HISTORY, params);
+  },
+  loadTerminalSessions: (projectId: number): Promise<TerminalReplaySessionsResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_LOAD_SESSIONS, projectId);
+  },
+  loadTerminalExport: (params: TerminalReplayExportParams): Promise<{ blob: string; filename: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_LOAD_EXPORT, params);
+  },
+  onTerminalHistory: (callback: (result: TerminalReplayHistoryResult) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, result: TerminalReplayHistoryResult) => callback(result);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_HISTORY, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_HISTORY, handler);
+  },
+  onTerminalSessions: (callback: (result: TerminalReplaySessionsResult) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, result: TerminalReplaySessionsResult) => callback(result);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_SESSIONS, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_SESSIONS, handler);
+  },
+  onTerminalExport: (callback: (result: { blob: string; filename: string }) => void): () => void => {
+    const handler = (_: Electron.IpcRendererEvent, result: { blob: string; filename: string }) => callback(result);
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_EXPORT, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_EXPORT, handler);
   },
 
   // ACP backend
@@ -360,14 +442,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getApiLogs: (): Promise<string[]> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_GET_LOGS);
-  },
-
-  getVsqlCacheAuthHeaders: (method: string, path: string): Promise<Record<string, string | boolean>> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, method, path);
-  },
-
-  getActiveSessionToken: (projectId: number): Promise<{ token: string | null; error?: string }> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN, projectId);
   },
 
   onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void): () => void => {
@@ -488,6 +562,7 @@ declare global {
       onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void) => () => void;
       onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void) => () => void;
       onPtySpawnFailed: (callback: (payload: SpawnFailedPayload) => void) => () => void;
+      onNoTeamEngaged: (callback: (payload: NoTeamEngagedPayload) => void) => () => void;
       onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
@@ -520,18 +595,23 @@ declare global {
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
       injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
+      purgeAcpQueue: (payload: AcpPurgeQueuePayload) => Promise<number>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
       sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
-      sendAcpMessage: (payload: AcpSendMessagePayload) => Promise<void>;
       onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
+      // Terminal Replay v1
+      loadTerminalHistory: (params: TerminalReplayHistoryParams) => Promise<TerminalReplayHistoryResult>;
+      loadTerminalSessions: (projectId: number) => Promise<TerminalReplaySessionsResult>;
+      loadTerminalExport: (params: TerminalReplayExportParams) => Promise<{ blob: string; filename: string }>;
+      onTerminalHistory: (callback: (result: TerminalReplayHistoryResult) => void) => () => void;
+      onTerminalSessions: (callback: (result: TerminalReplaySessionsResult) => void) => () => void;
+      onTerminalExport: (callback: (result: { blob: string; filename: string }) => void) => () => void;
       // ACP backend
       getBackendStatus: () => Promise<{ available: boolean }>;
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
-      getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
-      getActiveSessionToken: (projectId: number) => Promise<{ token: string | null; error?: string }>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
       // Wave C project-switch + lifecycle event subscribers

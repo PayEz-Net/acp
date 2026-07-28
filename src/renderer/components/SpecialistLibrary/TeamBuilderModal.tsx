@@ -25,8 +25,6 @@ export function TeamBuilderModal({ isOpen, onClose }: TeamBuilderModalProps) {
     disengageAgent,
     reorderRoster,
     saveRosterOrder,
-    addToProjectTeam,
-    removeFromProjectTeam,
   } = useSpecialistStore();
 
   const activeProject = useProjectStore((s) => s.activeProject);
@@ -86,18 +84,17 @@ export function TeamBuilderModal({ isOpen, onClose }: TeamBuilderModalProps) {
 
   const engagedIds = useMemo(() => new Set(roster.map((r) => r.id)), [roster]);
 
-  const handleEngage = async (agent: SpecialistAgent) => {
+  // ACP-4 (WO-ACP-LIVE-TEAM-MERGE): project-direct membership writes are GONE
+  // (upstream removed POST/DELETE /v1/projects/:id/team; per-project membership
+  // edits contradict live-team semantics). Engage/disengage here is LOCAL bench
+  // curation only; membership is edited on the standing team (/v1/teams, Team
+  // Editor) and projects reflect it live.
+  const handleEngage = (agent: SpecialistAgent) => {
     engageAgent(agent);
-    if (activeProject) {
-      await addToProjectTeam(activeProject.id, agent.id);
-    }
   };
 
-  const handleRemove = async (agentId: number) => {
+  const handleRemove = (agentId: number) => {
     disengageAgent(agentId);
-    if (activeProject) {
-      await removeFromProjectTeam(activeProject.id, agentId);
-    }
   };
 
   const handleSave = async () => {

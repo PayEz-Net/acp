@@ -334,6 +334,19 @@ export interface AppSettings {
   acpSessionIds?: Record<string, string>;
 }
 
+/** Coalesced screen-frame update emitted by the main-process screen model
+ *  (src/main/terminalScreen.ts) on IPC_CHANNELS.TERMINAL_FRAME. */
+export interface TerminalFrameUpdate {
+  terminalId: string;
+  agentName: string;
+  /** Current visible screen rows (trailing blank rows trimmed). */
+  screen: string[];
+  /** Rows that scrolled into history since the previous update. */
+  historyAppended: string[];
+  /** ED 3 was seen: drop stored history for this terminal before appends. */
+  historyCleared: boolean;
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // PTY management
@@ -343,6 +356,11 @@ export const IPC_CHANNELS = {
   PTY_KILL: 'pty:kill',
   PTY_DATA: 'pty:data',
   PTY_EXIT: 'pty:exit',
+  // Main → renderer: coalesced screen-frame update from the per-terminal
+  // screen model (see src/main/terminalScreen.ts). Carries replace-semantics
+  // screen rows plus append-semantics history, so panes render repaints
+  // (resize, spinner, \r redraws) in place instead of accumulating fragments.
+  TERMINAL_FRAME: 'terminal:frame',
   // Renderer → main (invoke): list live terminals WITH the provider each
   // was launched with (SPEC-team-runtime §3.2). Backs reconcile-on-switch:
   // the renderer compares each running agent's provider to the team runtime
@@ -360,6 +378,14 @@ export const IPC_CHANNELS = {
   // Wire value is the literal contract string (fixed event contract,
   // BAPert WO #84034) so any direct listener matches verbatim.
   PTY_SPAWN_FAILED: 'PTY_SPAWN_FAILED',
+
+  // Main → renderer: the spawn-orchestrator aborted because the project's
+  // roster is EMPTY. Under the live-team model an empty roster simply means
+  // no standing team is engaged on the project (HTTP 200, NOT an error) —
+  // the default for fresh projects. The renderer surfaces a "No team
+  // engaged — pick a team" CTA instead of a silent empty grid
+  // (WO-ACP-LIVE-TEAM-MERGE ACP-2).
+  PROJECT_NO_TEAM_ENGAGED: 'project:no-team-engaged',
 
   // PayEzVibe agent session start failure (main → renderer). Surfaces a
   // non-fatal session-start error (e.g. missing agent_mail capability) as a
@@ -408,9 +434,6 @@ export const IPC_CHANNELS = {
   ACP_GET_LOGS: 'acp:getLogs',
   ACP_BACKEND_STATUS_CHANGED: 'acp:backendStatusChanged',
 
-  // vsql-cache (PayEz Vibe SQL agent-output store)
-  VSQL_CACHE_GET_AUTH_HEADERS: 'vsql-cache:getAuthHeaders',
-  VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN: 'vsql-cache:getActiveSessionToken',
   // Renderer → main: trigger app.relaunch() + app.exit(0). Originally
   // Ship F-bis fail-loud-stub Restart-ACP affordance. Stays for
   // diagnostic / manual relaunch needs (e.g., backend recovery).
@@ -472,11 +495,19 @@ export const IPC_CHANNELS = {
   ACP_EVENT: 'acp:event',
   ACP_PROMPT: 'acp:prompt',
   ACP_CANCEL: 'acp:cancel',
+  ACP_PURGE_QUEUE: 'acp:purge-queue',
   ACP_SET_MODE: 'acp:set-mode',
   ACP_KILL: 'acp:kill',
   ACP_PERMISSION_RESPONSE: 'acp:permission-response',
-  ACP_SEND_MESSAGE: 'acp:send-message',
   ACP_INJECT_MAIL: 'acp:inject-mail',
+
+  // Terminal Replay v1 (main <-> renderer)
+  TERMINAL_LOAD_HISTORY: 'terminal:load-history',
+  TERMINAL_LOAD_SESSIONS: 'terminal:load-sessions',
+  TERMINAL_LOAD_EXPORT: 'terminal:export',
+  TERMINAL_HISTORY: 'terminal:history',
+  TERMINAL_SESSIONS: 'terminal:sessions',
+  TERMINAL_EXPORT: 'terminal:export',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event
@@ -494,6 +525,20 @@ export interface SpawnFailedPayload {
   work_dir?: string;
   /** Present for RUNTIME_NOT_SET (the project whose runtime is unset). */
   project_id?: number;
+  message: string;
+}
+
+// Payload for IPC_CHANNELS.PROJECT_NO_TEAM_ENGAGED (main → renderer). Sent
+// when the spawn-orchestrator aborts on an empty roster — under the
+// live-team model that means NO standing team is engaged on the project
+// (the default for fresh projects), not an error. The renderer routes it to
+// projectStore.noTeamEngaged so the "pick a team" CTA surfaces
+// (WO-ACP-LIVE-TEAM-MERGE ACP-2).
+export interface NoTeamEngagedPayload {
+  /** The project whose spawn was aborted. */
+  project_id: number;
+  /** Display name for the CTA surface (best-effort from the project DTO). */
+  project_name: string;
   message: string;
 }
 
@@ -577,6 +622,57 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enableTerminalImagePaste: true,
   instantSendPastedImages: false,
 };
+
+// ============================================
+// Terminal Replay v1 Types
+// ============================================
+
+export interface TerminalReplayLine {
+  agent: string;
+  terminal_id: string;
+  provider: string;
+  line: string;
+  ts: string;
+  session_id: string;
+}
+
+export interface TerminalReplayHistoryParams {
+  projectId: number;
+  agents?: string[];
+  terminals?: string[];
+  sessionId?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TerminalReplayHistoryResult {
+  lines: TerminalReplayLine[];
+  next_cursor?: string;
+}
+
+export interface TerminalReplaySession {
+  agent: string;
+  terminal_id: string;
+  session_id: string;
+  first_ts: string;
+  last_ts: string;
+}
+
+export interface TerminalReplaySessionsResult {
+  sessions: TerminalReplaySession[];
+}
+
+export interface TerminalReplayExportParams {
+  projectId: number;
+  format: 'ndjson' | 'json';
+  agents?: string[];
+  terminals?: string[];
+  sessionId?: string;
+  since?: string;
+  until?: string;
+}
 
 // ============================================
 // ACP (Agent Collaboration Platform) Types

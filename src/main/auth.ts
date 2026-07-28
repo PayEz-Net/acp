@@ -135,6 +135,11 @@ export function setupAuthHandlers(mainWindow: BrowserWindow | null): void {
     return getAuthStatus();
   });
 
+  // Get access token for renderer-side authenticated API calls
+  ipcMain.handle('auth:getAccessToken', async () => {
+    return getAccessToken();
+  });
+
   // Refresh token
   ipcMain.handle(IPC_CHANNELS.AUTH_REFRESH, async () => {
     return handleRefresh();

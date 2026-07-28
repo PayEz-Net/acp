@@ -1,5 +1,5 @@
-import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload, AgentSessionStartFailedPayload } from '@shared/types';
-import type { AcpEventPayload, AcpPromptPayload, AcpInjectMailPayload, AcpSendMessagePayload, AcpCancelPayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
+import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload, NoTeamEngagedPayload, AgentSessionStartFailedPayload, TerminalReplayHistoryParams, TerminalReplayHistoryResult, TerminalReplaySessionsResult, TerminalReplayExportParams, TerminalFrameUpdate } from '@shared/types';
+import type { AcpEventPayload, AcpPromptPayload, AcpInjectMailPayload, AcpCancelPayload, AcpPurgeQueuePayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
 
 export {};
 
@@ -15,12 +15,20 @@ declare global {
       // (SPEC-team-runtime §3.2). Backs reconcile-on-switch.
       listTerminals: () => Promise<Array<{ id: string; agentName: string; projectId?: number; provider: 'claude' | 'kimi' | 'codex' }>>;
       onTerminalData: (callback: (data: TerminalData) => void) => () => void;
+      // Main → renderer: coalesced screen-frame updates from the per-terminal
+      // screen model. PTY-mode panes render these instead of the cloud stream.
+      onTerminalFrame: (callback: (frame: TerminalFrameUpdate) => void) => () => void;
       onAgentSpawned: (callback: (data: { agentName: string; terminalId: string; provider?: string }) => void) => () => void;
       onTerminalExit: (callback: (data: { terminalId: string; exitCode: number }) => void) => () => void;
       // Main → renderer: a spawn failed with a typed cause (WORKDIR_INVALID).
       // The orchestrator path has no renderer fetch to catch the throw, so this
       // carries it to the shared WorkdirCorrection surface (SPEC-workdir §3.4).
       onPtySpawnFailed: (callback: (payload: SpawnFailedPayload) => void) => () => void;
+      // Main → renderer: the orchestrator aborted because the project has NO
+      // engaged standing team (empty roster = default for fresh projects under
+      // the live-team model, not an error). Routed to projectStore.noTeamEngaged
+      // so the "pick a team" CTA surfaces (WO-ACP-LIVE-TEAM-MERGE ACP-2).
+      onNoTeamEngaged: (callback: (payload: NoTeamEngagedPayload) => void) => () => void;
       onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
 
       // Settings
@@ -61,10 +69,10 @@ declare global {
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
       injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
+      purgeAcpQueue: (payload: AcpPurgeQueuePayload) => Promise<number>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;
       sendAcpKill: (payload: AcpKillPayload) => Promise<void>;
       sendAcpPermissionResponse: (payload: AcpPermissionResponsePayload) => Promise<void>;
-      sendAcpMessage: (payload: AcpSendMessagePayload) => Promise<void>;
       onAcpEvent: (callback: (payload: AcpEventPayload) => void) => () => void;
 
       // ACP backend
@@ -72,8 +80,6 @@ declare global {
       getLocalSecret: () => Promise<string | null>;
       retryBackend: () => Promise<{ available: boolean }>;
       getApiLogs: () => Promise<string[]>;
-      getVsqlCacheAuthHeaders: (method: string, path: string) => Promise<Record<string, string | boolean>>;
-      getActiveSessionToken: (projectId: number) => Promise<{ token: string | null; error?: string }>;
       onBackendStatusChanged: (callback: (data: { available: boolean; message?: string }) => void) => () => void;
       relaunchApp: () => void;
 
@@ -88,6 +94,14 @@ declare global {
       // Wave C/2 boot overlay (sync IPC)
       getNextBootOverlay: () => { project_id: number; project_name: string } | null;
       clearNextBootOverlay: () => void;
+
+      // Terminal Replay v1 (WO #84135)
+      loadTerminalHistory: (params: TerminalReplayHistoryParams) => Promise<TerminalReplayHistoryResult>;
+      loadTerminalSessions: (projectId: number) => Promise<TerminalReplaySessionsResult>;
+      loadTerminalExport: (params: TerminalReplayExportParams) => Promise<{ blob: string; filename: string }>;
+      onTerminalHistory: (callback: (result: TerminalReplayHistoryResult) => void) => () => void;
+      onTerminalSessions: (callback: (result: TerminalReplaySessionsResult) => void) => () => void;
+      onTerminalExport: (callback: (result: { blob: string; filename: string }) => void) => () => void;
     };
   }
 }

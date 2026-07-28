@@ -1,12 +1,12 @@
 import { useEffect } from 'react';
-import { Mail, FileText, ClipboardList, Settings, LayoutList, FolderOpen } from 'lucide-react';
+import { Mail, FileText, ClipboardList, Settings, LayoutList, FolderOpen, History } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useMailStore } from '../../stores/mailStore';
 
 export function BottomBar() {
-  const { showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, toggleStandup, showLogs, toggleLogs } = useAppStore();
+  const { showSidebar, toggleSidebar, showKanban, toggleKanban, showStandup, toggleStandup, showLogs, toggleLogs, showReplay, toggleReplay } = useAppStore();
   const { showDocuments, toggleDocuments, documents } = useDocumentStore();
   const { showSettings, setShowSettings, activeProject } = useProjectStore();
   const { mailboxes } = useMailStore();
@@ -85,6 +85,13 @@ export function BottomBar() {
       label: 'Kanban',
       active: showKanban,
       onClick: toggleKanban,
+    },
+    {
+      id: 'replay',
+      icon: History,
+      label: 'Replay',
+      active: showReplay,
+      onClick: toggleReplay,
     },
     {
       id: 'settings',

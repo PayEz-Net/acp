@@ -1,0 +1,14 @@
+From Jon — research brief for a WO you should author.
+
+Image paste in acp-desktop broke again (Ctrl+V stages nothing, renderer-side; all 80 paste unit tests green). Jon's direction: stop patching our custom pipeline — the kimi CLI has native image paste, evaluate replacing our custom chat-input image handling with kimi's native pipeline.
+
+Full research with file:line evidence is in the repo:
+E:/repos/acp-desktop/docs/RESEARCH-KIMI-NATIVE-IMAGE-PASTE-20260720.md
+
+Headlines:
+1. kimi TUI has native clipboard image paste since 0.20.0 (Ctrl+V Linux/mac, Alt+V Windows), with paste-time compression, staged attachments, and inline previews.
+2. Over ACP — what acp-desktop uses — session/prompt image blocks already flow through kimi's full native pipeline: format gate (PNG/JPEG/GIF/WebP, byte-sniffed), 2000px/3.75MB compression, captions, persisted originals, ReadMediaFile region readback. Our custom format/size/dimension validation is redundant.
+3. Recommendation (Option A in the brief): keep our composer, delegate all correctness to the server, delete our duplicate validation. Option B (embedding kimi's TUI input wholesale) means PTY mode and abandoning the ACP transcript — documented but not recommended.
+4. One real gap found: image_in model capability is NOT surfaced over ACP — non-vision models silently degrade images to text markers. With model overrides (k3 / kimi-for-coding / -highspeed) live, the WO must define the UX gate; a small fork delta to expose image_in in the ACP model catalog is the candidate fix.
+
+Please draft the WO (Option A, unless Jon says otherwise) with the acceptance criteria sketched in §6 of the brief, and confirm scope with Jon before cutting code.

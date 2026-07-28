@@ -2,7 +2,8 @@
  * TeamEditor.tsx
  * Main team management screen. Lists all teams with inline agent instance management.
  *
- * API base: local acp-api sidecar /v1/agent-teams
+ * API base: local acp-api sidecar /v1/teams (bearer proxy for the cloud's
+ * relational standing-team routes — WO-ACP-LIVE-TEAM-MERGE ACP-6)
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -12,6 +13,7 @@ import { SkillChipRow } from '../Skills';
 import { InlineEditField } from './InlineEditField';
 import { useAppStore } from '../../stores/appStore';
 import { useNotificationStore } from '../../stores/notificationStore';
+import { extractTeamList } from '../../stores/api-helpers';
 import { api } from './api';
 import './TeamEditor.css';
 
@@ -30,9 +32,10 @@ export const TeamEditor: React.FC = () => {
     setError(null);
     try {
       const body = await api.listTeams();
-      // Deduplicate by ID as a safety net (see WO-duplicate-render-bug-fix.md)
+      // Envelope-tolerant (shared helper) + deduplicate by ID as a safety
+      // net (see WO-duplicate-render-bug-fix.md)
       const unique = Array.from(
-        new Map((body.data ?? []).map((t: Team) => [t.id, t])).values()
+        new Map(extractTeamList(body).map((t: Team) => [t.id, t])).values()
       );
       setTeams(unique);
     } catch (e) {
@@ -230,24 +233,11 @@ const TeamCard: React.FC<TeamCardProps> = ({
               <div className="instance-info">
                 <span className="instance-avatar">👤</span>
                 <div className="flex-1 min-w-0">
+                  {/* #207 one-name: the member's name IS the canonical agent
+                      name (team_unique_name is gone) — plain label, no inline
+                      rename / uniqueness check. */}
                   <div className="instance-name">
-                    <InlineEditField
-                      value={inst.teamUniqueName}
-                      onSave={(val) =>
-                        onUpdateInstance(inst.id, { teamUniqueName: val })
-                      }
-                      validate={(val) => {
-                        if (!val) return 'Name is required';
-                        const dup = team.instances?.some(
-                          (i) =>
-                            i.id !== inst.id && i.teamUniqueName === val
-                        );
-                        if (dup) return 'Name must be unique within team';
-                        return null;
-                      }}
-                      className="instance-name-text"
-                      placeholder="Agent name"
-                    />
+                    <span className="instance-name-text">{inst.name}</span>
                   </div>
                   <div className="instance-role">
                     <InlineEditField

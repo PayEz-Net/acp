@@ -2,12 +2,18 @@
  * ProjectTeamAssignment.tsx
  * One-active-team-per-project widget. Lives in project detail panel.
  *
- * API: POST/DELETE /v1/projects/{id}/team-assignment
+ * Live-team model (WO-ACP-LIVE-TEAM-MERGE ACP-6): assignment state IS the
+ * project DTO's `engaged_team_id`, and assignment goes through the EngageTeam
+ * route (POST /v1/projects/:id/teams) — the SINGLE assignment path. There is
+ * no unassign: swapping teams = engaging another (re-engaging over an
+ * existing team without ?confirm=true → 409 ENGAGE_CONFIRM_REQUIRED →
+ * consent dialog → re-POST with confirm).
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import type { Team } from './types';
 import { api } from './api';
+import { teamDisplayName, extractTeamList, type EngageConflictInfo } from '../../stores/api-helpers';
 import './TeamEditor.css';
 
 interface Props {
@@ -17,8 +23,9 @@ interface Props {
 
 export const ProjectTeamAssignment: React.FC<Props> = ({ projectId, projectName }) => {
   const [teams, setTeams] = useState<Team[]>([]);
-  const [assignedTeamId, setAssignedTeamId] = useState<string | null>(null);
+  const [engagedTeamId, setEngagedTeamId] = useState<string | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
+  const [changing, setChanging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,14 +34,19 @@ export const ProjectTeamAssignment: React.FC<Props> = ({ projectId, projectName 
     setLoading(true);
     setError(null);
     try {
-      // Fetch all teams
+      // Fetch all teams (envelope-tolerant — {data:[…]} / {data:{teams:[…]}}
+      // / {teams:[…]}; an assumed list shape would crash the renderer).
       const teamsBody = await api.listTeams();
-      setTeams(teamsBody.data ?? []);
+      setTeams(extractTeamList(teamsBody));
 
-      // Fetch current assignment for this project
+      // Fetch current engagement for this project. The project detail may be
+      // nested under data.project (sidecar success envelope) — unwrap like
+      // the other consumers do. Read engaged_team_id, NOT a legacy
+      // assignment field.
       const projBody = await api.getProject(projectId);
-      const teamId = projBody.data?.assignedTeamId ?? null;
-      setAssignedTeamId(teamId);
+      const proj = projBody.data?.project ?? projBody.data ?? {};
+      const teamId = proj.engaged_team_id != null ? String(proj.engaged_team_id) : null;
+      setEngagedTeamId(teamId);
       if (teamId) setSelectedTeamId(teamId);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load');
@@ -48,42 +60,41 @@ export const ProjectTeamAssignment: React.FC<Props> = ({ projectId, projectName 
   }, [load]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
-  const assign = async () => {
-    if (!selectedTeamId || selectedTeamId === assignedTeamId) return;
+  const engage = async (confirm: boolean) => {
+    if (!selectedTeamId || (!changing && selectedTeamId === engagedTeamId)) return;
     setLoading(true);
+    setError(null);
     try {
-      await api.assignTeam(projectId, selectedTeamId);
-      setAssignedTeamId(selectedTeamId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Assign failed');
+      const result = await api.assignTeam(projectId, selectedTeamId, { confirm });
+      if (result.ok) {
+        setEngagedTeamId(selectedTeamId);
+        setChanging(false);
+      } else if ('conflict' in result) {
+        // 409 ENGAGE_CONFIRM_REQUIRED — swap consent using the cloud's
+        // verbatim current/incoming/lost_overrides, then re-POST confirmed.
+        if (confirmSwap(result.conflict)) {
+          await engage(true);
+        }
+      } else {
+        setError(result.error);
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const unassign = async () => {
-    const team = teams.find(t => t.id === assignedTeamId);
-    const confirmed = confirm(
-      `Remove "${team?.name}" from "${projectName}"?\n\n` +
-      `Agents will no longer receive mail for this project.`
+  const confirmSwap = (conflict: EngageConflictInfo): boolean => {
+    const lost = Array.isArray(conflict.lost_overrides) ? conflict.lost_overrides.length : 0;
+    return confirm(
+      `"${projectName}" already has "${teamDisplayName(conflict.current_team)}" engaged.\n\n` +
+      `Swap to "${teamDisplayName(conflict.incoming_team)}"?` +
+      (lost > 0 ? `\n\n${lost} per-agent override(s) on the current team will be lost.` : '')
     );
-    if (!confirmed) return;
-
-    setLoading(true);
-    try {
-      await api.unassignTeam(projectId);
-      setAssignedTeamId(null);
-      setSelectedTeamId('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unassign failed');
-    } finally {
-      setLoading(false);
-    }
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
-  const assignedTeam = teams.find(t => t.id === assignedTeamId);
-  const availableTeams = teams.filter(t => t.id !== assignedTeamId);
+  const engagedTeam = teams.find(t => t.id === engagedTeamId);
+  const availableTeams = teams.filter(t => t.id !== engagedTeamId);
 
   return (
     <div className="project-team-assignment">
@@ -91,26 +102,30 @@ export const ProjectTeamAssignment: React.FC<Props> = ({ projectId, projectName 
 
       {error && <div className="error-banner">{error}</div>}
 
-      {assignedTeam ? (
+      {engagedTeam && !changing ? (
         <div className="assigned-team-card">
-          <div className="team-badge">🏆 {assignedTeam.name}</div>
+          <div className="team-badge">🏆 {engagedTeam.name}</div>
           <div className="team-meta">
-            {assignedTeam.instances?.length ?? 0} agents
+            {engagedTeam.instances?.length ?? 0} agents
           </div>
           <button
             className="btn-secondary"
-            onClick={unassign}
+            onClick={() => setChanging(true)}
             disabled={loading}
           >
-            {loading ? '…' : 'Change Team'}
+            Change Team
           </button>
         </div>
       ) : (
         <div className="unassigned-state">
-          <p>No team assigned.</p>
-          <p className="hint">
-            Agents cannot receive project mail until a team is assigned.
-          </p>
+          {!engagedTeam && (
+            <>
+              <p>No team engaged.</p>
+              <p className="hint">
+                Agents cannot receive project mail until a team is engaged.
+              </p>
+            </>
+          )}
 
           <div className="assign-controls">
             <select
@@ -128,11 +143,24 @@ export const ProjectTeamAssignment: React.FC<Props> = ({ projectId, projectName 
 
             <button
               className="btn-primary"
-              onClick={assign}
+              onClick={() => engage(false)}
               disabled={loading || !selectedTeamId}
             >
-              {loading ? '…' : 'Assign Team'}
+              {loading ? '…' : engagedTeam ? 'Swap Team' : 'Engage Team'}
             </button>
+
+            {changing && (
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  setChanging(false);
+                  setSelectedTeamId(engagedTeamId ?? '');
+                }}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         </div>
       )}

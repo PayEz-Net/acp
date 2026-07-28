@@ -14,6 +14,7 @@ interface AppStore {
   showTeamEditor: boolean;
   showTeamBuilder: boolean;
   showLogs: boolean;
+  showReplay: boolean;
 
   // Agents
   agents: AgentState[];
@@ -43,6 +44,7 @@ interface AppStore {
   toggleTeamEditor: () => void;
   toggleTeamBuilder: () => void;
   toggleLogs: () => void;
+  toggleReplay: () => void;
   setActiveAgent: (id: string | null) => void;
   setAgents: (agents: AgentConfig[]) => void;
   updateAgentStatus: (id: string, status: AgentState['status']) => void;
@@ -69,6 +71,7 @@ export const useAppStore = create<AppStore>((set) => ({
   showTeamEditor: false,
   showTeamBuilder: false,
   showLogs: false,
+  showReplay: false,
   agents: [],
   activeAgentId: null,
   backendAvailable: false,
@@ -89,6 +92,7 @@ export const useAppStore = create<AppStore>((set) => ({
   toggleTeamEditor: () => set((s) => ({ showTeamEditor: !s.showTeamEditor })),
   toggleTeamBuilder: () => set((s) => ({ showTeamBuilder: !s.showTeamBuilder })),
   toggleLogs: () => set((s) => ({ showLogs: !s.showLogs })),
+  toggleReplay: () => set((s) => ({ showReplay: !s.showReplay })),
   setActiveAgent: (activeAgentId) => set({ activeAgentId }),
 
   setAgents: (configs) => set((state) => {

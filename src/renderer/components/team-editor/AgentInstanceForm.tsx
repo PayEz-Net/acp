@@ -36,7 +36,7 @@ export const AgentInstanceForm: React.FC<Props> = ({
 
   const [form, setForm] = useState<AgentInstanceFormData>({
     archetypeId: '',
-    teamUniqueName: '',
+    name: '',
     displayName: '',
     role: '',
     identityPrompt: '',
@@ -54,7 +54,7 @@ export const AgentInstanceForm: React.FC<Props> = ({
     if (instance) {
       setForm({
         archetypeId: instance.archetypeId,
-        teamUniqueName: instance.teamUniqueName,
+        name: instance.name,
         displayName: instance.displayName,
         role: instance.role,
         identityPrompt: instance.identityPrompt,
@@ -68,7 +68,7 @@ export const AgentInstanceForm: React.FC<Props> = ({
       // Reset for create
       setForm({
         archetypeId: archetypes[0]?.id ?? '',
-        teamUniqueName: '',
+        name: '',
         displayName: '',
         role: '',
         identityPrompt: '',
@@ -93,14 +93,14 @@ export const AgentInstanceForm: React.FC<Props> = ({
       identityPrompt: archetype.basePrompt,
       personalityPreset: archetype.defaultPersonality,
       rolePreset: archetype.role.toLowerCase().replace(/\s+/g, '_'),
-      teamUniqueName: `${archetype.name}-2`,
+      name: archetype.name,
     }));
   }, [form.archetypeId, isEdit, archetypes]);
 
   const validate = (): boolean => {
     const nextErrors: Partial<Record<keyof AgentInstanceFormData, string>> = {};
-    if (!form.teamUniqueName.trim()) {
-      nextErrors.teamUniqueName = 'Team-unique name is required';
+    if (!form.name.trim()) {
+      nextErrors.name = 'Agent name is required';
     }
     if (!form.archetypeId && !isEdit) {
       nextErrors.archetypeId = 'Archetype is required';
@@ -163,18 +163,19 @@ export const AgentInstanceForm: React.FC<Props> = ({
             {errors.archetypeId && <span className="field-error">{errors.archetypeId}</span>}
           </div>
 
-          {/* Team-Unique Name */}
+          {/* Agent Name — the canonical agent name (#207 one-name:
+              team_unique_name is gone; the name identifies the member) */}
           <div className="form-group">
-            <label>Team-Unique Name *</label>
+            <label>Agent Name *</label>
             <input
               type="text"
-              value={form.teamUniqueName}
-              onChange={e => update('teamUniqueName', e.target.value)}
-              placeholder="e.g. NextPert-2"
-              className={errors.teamUniqueName ? 'input-error' : ''}
+              value={form.name}
+              onChange={e => update('name', e.target.value)}
+              placeholder="e.g. NextPert"
+              className={errors.name ? 'input-error' : ''}
             />
-            <span className="field-hint">Mail-addressable within this team</span>
-            {errors.teamUniqueName && <span className="field-error">{errors.teamUniqueName}</span>}
+            <span className="field-hint">Canonical agent name — mail-addressable</span>
+            {errors.name && <span className="field-error">{errors.name}</span>}
           </div>
 
           {/* Display Name */}

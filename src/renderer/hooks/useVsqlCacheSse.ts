@@ -1,13 +1,14 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { useProjectStore } from '../stores/projectStore';
-import { useAgentOutputStore } from '../stores/agentOutputStore';
+import { useAgentOutputStore, isFrameBackedTerminal } from '../stores/agentOutputStore';
 import { terminalStreamNormalizer, type StreamLine } from '../lib/terminalStream';
 import { perfMark, perfMeasure } from '../lib/perf';
 
 export type VsqlCacheConnectionState = 'connected' | 'reconnecting' | 'disconnected';
 
 const BATCH_WINDOW_MS = 50;
+const CONNECT_TIMEOUT_MS = 10000;
 
 export function useVsqlCacheSse(): {
   connectionState: React.MutableRefObject<VsqlCacheConnectionState>;
@@ -62,7 +63,6 @@ export function useVsqlCacheSse(): {
     let disposed = false;
     abortRef.current = new AbortController();
     let retryCount = 0;
-    let vsqlCacheBaseUrl = '';
     // Use the shared normalizer so renderer lifecycle (kill/restart) can drop
     // per-terminal history and avoid stale frames bleeding into a new PTY.
     const streamNormalizer = terminalStreamNormalizer;
@@ -72,7 +72,7 @@ export function useVsqlCacheSse(): {
 
       const projectIdStr = projectId != null ? String(projectId) : '';
       if (!projectIdStr) {
-        // vsql-cache requires projectId; wait until a project is active.
+        // PayEzVibe API stream requires projectId; wait until a project is active.
         setConn('disconnected');
         setTimeout(() => {
           if (!disposed) connect();
@@ -80,29 +80,20 @@ export function useVsqlCacheSse(): {
         return;
       }
 
-      const path = '/v1/agent-output/stream';
-      let authHeaders: Record<string, string | boolean> = {};
+      let token: string | null = null;
+      let vibeApiUrl: string | null = null;
       try {
-        const rawAuthHeaders = (await window.electronAPI.getVsqlCacheAuthHeaders('GET', path)) || {};
-        if (rawAuthHeaders.error) {
-          throw new Error(`auth headers error: ${rawAuthHeaders.error}`);
+        token = await window.electronAPI.authGetAccessToken();
+        if (!token) {
+          throw new Error('no authenticated user token available');
         }
-        if (rawAuthHeaders.disabled) {
-          // vsql-cache reporting is disabled in the main process. Stay
-          // disconnected and do not retry — otherwise we would spam the log.
-          setConn('disconnected');
-          return;
+        const endpoints = await window.electronAPI.getCloudEndpoints();
+        vibeApiUrl = endpoints.vibeApiUrl;
+        if (!vibeApiUrl) {
+          throw new Error('PayEzVibe API URL missing from cloud endpoints');
         }
-
-        const { url: cacheBaseUrl, ...authHeaderEntries } = rawAuthHeaders;
-        if (!cacheBaseUrl || typeof cacheBaseUrl !== 'string') {
-          throw new Error('vsql-cache base URL missing from main process response');
-        }
-
-        vsqlCacheBaseUrl = cacheBaseUrl;
-        authHeaders = authHeaderEntries;
       } catch (err) {
-        console.error('[VsqlCacheSse] Failed to build auth headers:', err);
+        console.error('[VsqlCacheSse] Failed to prepare stream connection:', err);
         setConn('disconnected');
         retryCount++;
         const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000) + Math.random() * 1000;
@@ -112,17 +103,7 @@ export function useVsqlCacheSse(): {
         return;
       }
 
-      if (!vsqlCacheBaseUrl) {
-        // Defensive: should have thrown above, but keep TypeScript narrow.
-        setConn('disconnected');
-        return;
-      }
-
-      const sessionTokenResult = await window.electronAPI.getActiveSessionToken(Number(projectIdStr));
-      if (sessionTokenResult.error) {
-        console.error('[VsqlCacheSse] Failed to get active session token:', sessionTokenResult.error);
-      }
-
+      const path = '/v1/agent-output/stream';
       const params = new URLSearchParams();
       params.set('projectId', projectIdStr);
       if (agentsKey) {
@@ -131,24 +112,43 @@ export function useVsqlCacheSse(): {
       if (lastTsRef.current) {
         params.set('since', lastTsRef.current);
       }
-      const url = `${vsqlCacheBaseUrl}${path}?${params.toString()}`;
+      const url = `${vibeApiUrl}${path}?${params.toString()}`;
       const headers: Record<string, string> = {
         Accept: 'text/event-stream',
-        'X-Vibe-Project-Id': projectIdStr,
-        ...(authHeaders as Record<string, string>),
+        Authorization: `Bearer ${token}`,
       };
-      if (sessionTokenResult.token) {
-        headers['X-Session-Token'] = sessionTokenResult.token;
-      }
 
       console.log(`[VsqlCacheSse] Connecting... (attempt ${retryCount + 1})`);
       setConn('reconnecting');
 
+      // Set when the 10s time-to-headers cap fires — lets the catch below
+      // distinguish "server slow/stuck" from a mid-stream abort.
+      let connectTimedOut = false;
       try {
-        const response = await fetch(url, {
-          headers,
-          signal: abortRef.current!.signal,
-        });
+        // AC6: cap time-to-headers at 10s so a stalled backend cannot hang
+        // the reconnect path. The cap must NOT bound the stream's lifetime:
+        // AbortSignal.timeout() keeps ticking after connect and would kill a
+        // healthy SSE at the cap (that was the retry-116 AbortError loop).
+        // Cloud cold starts can exceed 2s to first byte, hence 10s. Once
+        // headers arrive the timer is cleared and only the lifecycle abortRef
+        // governs the stream, so a clean disconnect/reset still cancels it.
+        const connectAbort = new AbortController();
+        const connectTimer = setTimeout(() => {
+          connectTimedOut = true;
+          connectAbort.abort();
+        }, CONNECT_TIMEOUT_MS);
+        let response: Response;
+        try {
+          response = await fetch(url, {
+            headers,
+            signal: AbortSignal.any([
+              abortRef.current!.signal,
+              connectAbort.signal,
+            ]),
+          });
+        } finally {
+          clearTimeout(connectTimer);
+        }
 
         if (!response.ok) {
           console.error(`[VsqlCacheSse] Connection failed: ${response.status}`);
@@ -193,13 +193,20 @@ export function useVsqlCacheSse(): {
             if (eventType === 'agent-output' && data) {
               try {
                 const line = JSON.parse(data);
-                const normalized = streamNormalizer.process(line);
-                const deferred = streamNormalizer.drain();
-                if (normalized) {
-                  enqueue(normalized);
-                }
-                if (deferred) {
-                  enqueue(deferred);
+                // Frame-backed terminals are driven by the local screen model
+                // (useTerminalFrames). Skip their cloud rows entirely — the
+                // normalizer must not see them (dedup state) and the pane must
+                // not double-render them. lastTs still advances so reconnects
+                // do not replay the skipped backlog.
+                if (!isFrameBackedTerminal(line?.terminal_id)) {
+                  const normalized = streamNormalizer.process(line);
+                  const deferred = streamNormalizer.drain();
+                  if (normalized) {
+                    enqueue(normalized);
+                  }
+                  if (deferred) {
+                    enqueue(deferred);
+                  }
                 }
                 if (line.ts && typeof line.ts === 'string') {
                   lastTsRef.current = line.ts;
@@ -225,7 +232,11 @@ export function useVsqlCacheSse(): {
         setConn('reconnecting');
         abortRef.current = new AbortController();
         const delay = Math.min(2000 * Math.pow(2, retryCount - 1), 30000) + Math.random() * 1000;
-        console.error(`[VsqlCacheSse] Error (retry ${retryCount}, next in ${Math.round(delay)}ms):`, err);
+        if (connectTimedOut) {
+          console.error(`[VsqlCacheSse] Connect timed out after ${CONNECT_TIMEOUT_MS}ms waiting for response headers (retry ${retryCount}, next in ${Math.round(delay)}ms) — backend slow or stuck, not the client`);
+        } else {
+          console.error(`[VsqlCacheSse] Error (retry ${retryCount}, next in ${Math.round(delay)}ms):`, err);
+        }
         setTimeout(() => {
           if (!disposed) connect();
         }, delay);

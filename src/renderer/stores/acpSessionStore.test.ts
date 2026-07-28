@@ -234,30 +234,26 @@ describe('acpSessionStore', () => {
     expect(store.getSession('NextPert')?.waitState).toBeUndefined();
   });
 
-  it('tracks queuedCount from queue-state events and clears on queue_cleared', () => {
+  it('ignores queue-state events without tracking depth — queue UX is cut (WO 11645)', () => {
     const store = useAcpSessionStore.getState();
     store.applyEvent(
       makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 1 }),
     );
-    expect(store.getSession('NextPert')?.queuedCount).toBe(1);
-
     store.applyEvent(
       makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 2 }),
     );
-    expect(store.getSession('NextPert')?.queuedCount).toBe(2);
-
     store.applyEvent(
       makeUpdate('NextPert', { sessionUpdate: 'prompt_dequeued', sessionId: 's1', queueDepth: 1 }),
     );
-    expect(store.getSession('NextPert')?.queuedCount).toBe(1);
-
     store.applyEvent(
       makeUpdate('NextPert', { sessionUpdate: 'queue_cleared', sessionId: 's1' }),
     );
-    expect(store.getSession('NextPert')?.queuedCount).toBe(0);
+
+    // Events are consumed without error and no queue depth is tracked.
+    expect(store.getSession('NextPert')).not.toHaveProperty('queuedCount');
   });
 
-  it('clears queuedCount and waitState on initialized (runtime restart)', () => {
+  it('clears waitState on initialized (runtime restart)', () => {
     const store = useAcpSessionStore.getState();
     store.applyEvent(
       makeUpdate('NextPert', { sessionUpdate: 'prompt_queued', sessionId: 's1', queueDepth: 2 }),
@@ -279,7 +275,7 @@ describe('acpSessionStore', () => {
     );
 
     const session = store.getSession('NextPert');
-    expect(session?.queuedCount).toBe(0);
+    expect(session).not.toHaveProperty('queuedCount');
     expect(session?.waitState).toBeUndefined();
   });
 

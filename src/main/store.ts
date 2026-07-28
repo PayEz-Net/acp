@@ -173,6 +173,11 @@ export function getSettings(): AppSettings {
       ?? DEFAULT_SETTINGS.enableTerminalImagePaste,
     instantSendPastedImages: (store.get('instantSendPastedImages' as keyof AppSettings) as boolean | undefined)
       ?? DEFAULT_SETTINGS.instantSendPastedImages,
+    // ACP session ids for crash-safe resume (WO runtime wait-state visibility).
+    // Must be whitelisted here like every other key — setSettings persists it,
+    // but a missing getSettings line would silently drop it on read-back
+    // (same bug class as installerWorkspaceRoot/hasSeenWelcome above).
+    acpSessionIds: store.get('acpSessionIds' as keyof AppSettings) as Record<string, string> | undefined,
   };
 }
 

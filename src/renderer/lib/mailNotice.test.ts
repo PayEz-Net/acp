@@ -8,6 +8,7 @@ import {
   deliverAcpMailNotice,
   mailDedupeKey,
   renderMailLineWithRetry,
+  MAIL_BODY_INLINE_CAP,
   MAIL_NOTICE_DELAYS_MS,
 } from './mailNotice';
 
@@ -15,13 +16,28 @@ const noSleep = async () => {};
 const DELAYS = [1, 2, 3];
 
 describe('buildMailNoticeText', () => {
-  it('carries the read-it-now instruction with the agent-scoped curl command', () => {
+  it('carries the read-it-now instruction with the agent-scoped curl command (no body)', () => {
     const text = buildMailNoticeText('NextPert', 'BAPert', 'WORK ORDER', 11444);
     expect(text).toContain('[ACP Mail] You have a message from BAPert: "WORK ORDER" (id: 11444).');
     expect(text).toContain(
       'curl -s "http://127.0.0.1:3001/v1/mail/inbox/NextPert?unread=true" -H "X-ACP-Agent: NextPert"',
     );
     expect(text).toContain('do not wait for the human');
+  });
+
+  it('inlines the mail body so the agent acts on content, not a pointer', () => {
+    const text = buildMailNoticeText('NextPert', 'BAPert', 'WORK ORDER', 11444, 'Fix the composer preview.\nReport back.');
+    expect(text).toContain('[ACP Mail] You have a message from BAPert: "WORK ORDER" (id: 11444).');
+    expect(text).toContain('Fix the composer preview.\nReport back.');
+    expect(text).toContain('do not wait for the human');
+    expect(text).not.toContain('Read it NOW with: curl');
+  });
+
+  it('truncates an oversized body with a pointer to the full text', () => {
+    const huge = 'x'.repeat(MAIL_BODY_INLINE_CAP + 500);
+    const text = buildMailNoticeText('NextPert', 'BAPert', 'BIG', 1, huge);
+    expect(text).toContain('…(truncated — full text:');
+    expect(text.length).toBeLessThan(huge.length);
   });
 });
 
@@ -188,6 +204,21 @@ describe('createMailEventDeduper persistence (WO 11473)', () => {
     const seen = createMailEventDeduper(10);
     seen('NextPert', 1);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  it('unsee lets a deferred mail re-fire (WO 11629)', () => {
+    const seen = createMailEventDeduper(200, 'acp.mail.seen');
+    expect(seen('NextPert', 42)).toBe(true);
+    expect(seen('NextPert', 42)).toBe(false);
+
+    seen.unsee('NextPert', 42);
+    expect(seen('NextPert', 42)).toBe(true); // re-fires after deferral
+
+    // Unsee persists across a simulated reload too.
+    const second = createMailEventDeduper(200, 'acp.mail.seen');
+    second.unsee('NextPert', 42);
+    const third = createMailEventDeduper(200, 'acp.mail.seen');
+    expect(third('NextPert', 42)).toBe(true);
   });
 });
 

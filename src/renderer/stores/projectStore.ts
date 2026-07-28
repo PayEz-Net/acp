@@ -31,6 +31,13 @@ export interface Project {
   stack_topology?: string | null;
   compliance?: unknown[] | null;
   advisor_output?: unknown | null;
+  // Live-team model (WO-ACP-LIVE-TEAM-MERGE): the project's engaged standing
+  // team. null engaged_team_id = NO team engaged (fresh-project default) —
+  // the roster read then returns empty (200, not an error) and the renderer
+  // shows the "pick a team" CTA (ACP-2) instead of a bare empty grid.
+  engaged_team_id?: number | string | null;
+  engaged_team_name?: string | null;
+  is_complete?: boolean;
 }
 
 // Cloud-authoritative current-project resolution state. Spec §5.4.
@@ -43,9 +50,13 @@ export interface Project {
 // label with no HTTP mirror.
 export type CurrentProjectState = 'stored' | 'unset' | 'empty';
 
-// Per-project agent record (from `GET /v1/projects/:id/team`). Mirrors
-// the acp-api MappedProjectTeamMember shape (which is itself the cloud
-// `vibe_projects.project_team_members` row joined with `vibe_agents.agents`).
+// Per-project agent record (from `GET /v1/projects/:id/team`). Under the
+// live-team model the roster IS the engaged standing team's roster, read
+// live — it mirrors the acp-api MappedProjectTeamMember shape (the cloud's
+// `team_agent_instances` row for the engaged team, joined with the agents
+// table). No engagement → empty roster (200, not an error). Per-placement
+// overrides (model/effort/runtime/work_dir/position_hint) live on the team
+// instance and follow the team across projects.
 // Settings panel team table + Wave C instantiation lifecycle both consume.
 export interface ProjectTeamMember {
   agent_id: number;
@@ -153,6 +164,13 @@ interface ProjectStore {
   // user must set one (web) before agents can start. Never a silent default.
   runtimeNotSet: { projectId: number | null; projectName: string } | null;
 
+  // No-team-engaged surface (WO-ACP-LIVE-TEAM-MERGE ACP-2). Non-null when the
+  // spawn-orchestrator aborted because the project's roster is empty — under
+  // the live-team model that means NO standing team is engaged (the default
+  // for fresh projects), not an error. The CTA reads this plus the DTO's
+  // engaged_team_id == null to render "No team engaged — pick a team".
+  noTeamEngaged: { projectId: number | null; projectName: string } | null;
+
   // Actions
   setShowPicker: (show: boolean) => void;
   setShowSettings: (show: boolean) => void;
@@ -180,6 +198,10 @@ interface ProjectStore {
   // Runtime-not-set block surface (SPEC-team-runtime §3.3).
   setRuntimeNotSet: (issue: { projectId: number | null; projectName: string }) => void;
   clearRuntimeNotSet: () => void;
+
+  // No-team-engaged surface (WO-ACP-LIVE-TEAM-MERGE ACP-2).
+  setNoTeamEngaged: (issue: { projectId: number | null; projectName: string }) => void;
+  clearNoTeamEngaged: () => void;
 
   // API
   fetchProjects: () => Promise<void>;
@@ -227,6 +249,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   workdirInvalid: null,
   runtimeReconcile: null,
   runtimeNotSet: null,
+  noTeamEngaged: null,
 
   setShowPicker: (show) => set({ showPicker: show }),
   setShowSettings: (show) => set({ showSettings: show }),
@@ -242,6 +265,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   setRuntimeNotSet: (issue) => set({ runtimeNotSet: issue }),
   clearRuntimeNotSet: () => set({ runtimeNotSet: null }),
+
+  setNoTeamEngaged: (issue) => set({ noTeamEngaged: issue }),
+  clearNoTeamEngaged: () => set({ noTeamEngaged: null }),
 
   // SPEC-team-runtime §3.2 — reconcile-on-switch. Renderer-side resolveTeamRuntime
   // = the active project's runtime_choice (the single authority). Find RUNNING
@@ -444,6 +470,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
       set({ activeProject: project, current_project_state, pickerMode, showPicker });
       applyProjectAgentProvider(project);
+
+      // ACP-2: the no-team abort surface is stale once it no longer applies —
+      // clear it when the fetched project IS engaged (engage path, 60s poll,
+      // or web-side engage all converge here), or when the slice belongs to a
+      // DIFFERENT project (project switch — never surface a stale abort for
+      // the newly active project).
+      const nte = get().noTeamEngaged;
+      if (project && nte && (nte.projectId !== project.id || project.engaged_team_id != null)) {
+        set({ noTeamEngaged: null });
+      }
 
       // SPEC-team-runtime §3.2 — reconcile on a detected team-runtime CHANGE
       // for the already-running active project. Fires once on the change

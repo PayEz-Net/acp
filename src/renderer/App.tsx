@@ -3,6 +3,7 @@ import { MailSidebar } from './components/Mail';
 import { LoginScreen, TwoFactorScreen, SessionExpiredOverlay } from './components/Auth';
 import { SplashScreen } from './components/SplashScreen';
 import { TerminalGrid } from './components/Terminal/TerminalGrid';
+import { ReplayPanel } from './components/Terminal/ReplayPanel';
 import { TitleBar } from './components/Layout/TitleBar';
 // import { TeamSyncBanner } from './components/Layout/TeamSyncBanner'; // disabled — see mount-site comment below
 import { KanbanBoard } from './components/Kanban/KanbanBoard';
@@ -21,6 +22,7 @@ import { BackendStatusBanner } from './components/Layout/BackendStatusBanner';
 import { WorkdirCorrection } from './components/Layout/WorkdirCorrection';
 import { RuntimeReconcileDialog } from './components/Layout/RuntimeReconcileDialog';
 import { RuntimeNotSet } from './components/Layout/RuntimeNotSet';
+import { EngageTeamCTA } from './components/Layout/EngageTeamCTA';
 import { OverlayPanel } from './components/Layout/OverlayPanel';
 import { AgentConfig, AgentSessionStartFailedPayload } from '@shared/types';
 import type { AcpEventPayload } from '@shared/acpTypes';
@@ -34,8 +36,9 @@ import { useAgentOutputStore } from './stores/agentOutputStore';
 import { useNotificationStore } from './stores/notificationStore';
 import { useAcpSse } from './hooks/useAcpSse';
 import { useVsqlCacheSse } from './hooks/useVsqlCacheSse';
+import { useTerminalFrames } from './hooks/useTerminalFrames';
 import { useTeamPoll } from './hooks/useTeamPoll';
-import { agentReconcile } from './lib/agentReconcile';
+import { applyCloudRosterToAgents } from './lib/applyCloudRoster';
 
 // Spec §4.4 — local fallback fires only when localhost acp-stable-api is
 // unreachable. Backend `team.ts` owns the same BAPert+QAPert seed when
@@ -48,7 +51,7 @@ const DEFAULT_AGENTS = [
 export default function App() {
   const { agents, showSidebar, toggleSidebar, showKanban, toggleKanban, showChat, toggleChat, showStandup, toggleStandup, showContractors, toggleContractors, showTeamEditor, toggleTeamEditor, showLogs, toggleLogs, activeAgentId, setAgents, setSettings } = useAppStore();
   const { showDocuments, toggleDocuments } = useDocumentStore();
-  const { showPicker, setShowPicker, showSettings, setShowSettings, fetchActiveProject, fetchProjects, activeProject, pickerHasStarted, workdirInvalid } = useProjectStore();
+  const { showPicker, setShowPicker, showSettings, setShowSettings, fetchActiveProject, fetchProjects, activeProject, pickerHasStarted, workdirInvalid, noTeamEngaged } = useProjectStore();
   const { showTeamBuilder, toggleTeamBuilder } = useAppStore();
   const { authFlowState, isLoading: authLoading, loadStatus, user } = useAuthStore();
   const isAuthenticated = authFlowState === AuthFlowState.AUTHENTICATED;
@@ -340,29 +343,45 @@ export default function App() {
     (async () => {
       await useTeamStore.getState().syncTeam(activeProject.id);
       if (cancelled) return;
-      const cloud = useTeamStore.getState().cloudAgents;
-      if (cloud.length === 0) {
-        // Spec AC-9: empty cloud roster is authoritative — render empty
-        // grid; do NOT fall through to DEFAULT_AGENTS. Banner UX (if
-        // source !== 'cloud') still surfaces via TeamSyncBanner.
-        useAppStore.getState().setAgents([]);
-        return;
-      }
-      const localPrefs = useAppStore.getState().settings.agents ?? [];
-      const reconciled = agentReconcile(cloud, localPrefs);
-      useAppStore.getState().setAgents(reconciled);
-      window.electronAPI.setSettings({ agents: reconciled });
+      // Spec AC-9: empty cloud roster is authoritative — applyCloudRoster
+      // renders the empty grid; it never falls through to DEFAULT_AGENTS.
+      // Under the live-team model an empty roster + engaged_team_id == null
+      // shows the engage CTA (render branch below) instead of the grid.
+      applyCloudRosterToAgents();
     })();
     return () => {
       cancelled = true;
     };
   }, [settingsLoaded, activeProject?.id, pickerHasStarted]);
 
+  // ACP-2 (WO-ACP-LIVE-TEAM-MERGE) — the orchestrator aborted a spawn because
+  // the project has NO engaged standing team (empty roster = fresh-project
+  // default, not an error). Route the typed IPC into the projectStore slice so
+  // the "No team engaged — pick a team" CTA surfaces instead of a silent
+  // console.warn. Also force-refresh the DTO so engaged_team_id tracks reality.
+  useEffect(() => {
+    if (!window.electronAPI?.onNoTeamEngaged) return;
+    const unsub = window.electronAPI.onNoTeamEngaged((payload) => {
+      const proj = useProjectStore.getState().activeProject;
+      useProjectStore.getState().setNoTeamEngaged({
+        projectId: payload.project_id ?? proj?.id ?? null,
+        projectName: payload.project_name || proj?.name || 'the current project',
+      });
+      void useProjectStore.getState().fetchActiveProject({ force: true });
+    });
+    return unsub;
+  }, []);
+
   // Phase 1b: Single centralized SSE connection through acp-api (mail / lifecycle events)
   useAcpSse();
 
   // BAPert #10583: vsql-cache agent-output stream
   useVsqlCacheSse();
+
+  // Local screen-model frames (main-process PTY screen model). PTY-mode
+  // panes render these instead of the cloud stream; useVsqlCacheSse skips
+  // frame-backed terminals so the two paths never double-render.
+  useTerminalFrames();
 
   // 60s background poll — keeps active-project + team auto-converged
   // across surfaces (web GSD / CLI → desktop). Spec §4.6 / Decision 7.
@@ -418,6 +437,18 @@ export default function App() {
     );
   }
 
+  // ACP-2 (WO-ACP-LIVE-TEAM-MERGE): a project with engaged_team_id == null
+  // has NO standing team engaged — the fresh-project default. Its (correctly
+  // empty) roster must not render as a bare empty grid; show the explicit
+  // engage affordance instead (locked decision: explicit engage only). The
+  // orchestrator's noTeamEngaged abort covers the same surface when the DTO
+  // field hasn't hydrated yet. A non-empty roster always wins the grid.
+  const showEngageCTA =
+    !!activeProject &&
+    pickerHasStarted &&
+    agents.length === 0 &&
+    (activeProject.engaged_team_id == null || noTeamEngaged?.projectId === activeProject.id);
+
   return (
     <div className="h-full flex flex-col bg-acp-bg text-acp-text-secondary">
       {/* Title Bar */}
@@ -442,9 +473,11 @@ export default function App() {
 
       {/* Main: Terminals + Panels */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        {/* Terminal Grid */}
+        {/* Terminal Grid — or the engage-team CTA when the project has no
+            standing team engaged (ACP-2; empty roster is authoritative but
+            must not render as silent emptiness). */}
         <div className="flex-1 min-w-0">
-          <TerminalGrid agents={agents} />
+          {showEngageCTA ? <EngageTeamCTA /> : <TerminalGrid agents={agents} />}
         </div>
 
         {/* Mail Sidebar */}
@@ -559,6 +592,9 @@ export default function App() {
 
       {/* Document Viewer Modal — fixed overlay */}
       <DocumentModal />
+
+      {/* Terminal Replay v1 panel */}
+      <ReplayPanel />
     </div>
   );
 }

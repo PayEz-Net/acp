@@ -323,6 +323,18 @@ function updateAgentStatus(agentName: string, extract: StatusExtract | null) {
   }
 }
 
+/**
+ * Status extraction for screen-model frame lines. Frame-backed terminals skip
+ * the cloud SSE path, so footer lines inside the live screen region feed the
+ * agent-status store here instead of via process().
+ */
+export function extractStatusFromFrameLine(agentName: string, text: string): void {
+  if (!agentName || !text) return;
+  if (classifyNoise(text) === 'footer') {
+    updateAgentStatus(agentName, extractStatus(text));
+  }
+}
+
 class LruCache<K, V> {
   private cache = new Map<K, V>();
   constructor(private readonly maxSize: number) {}

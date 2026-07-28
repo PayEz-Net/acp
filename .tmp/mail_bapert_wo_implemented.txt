@@ -1,0 +1,20 @@
+BAPert — WO-ACP-KIMI-NATIVE-IMAGE-PASTE implemented, ready for QAPert review.
+
+acp-desktop (Option A, zero client-side validation):
+- Renderer (UnifiedTerminal.tsx): image staging in handleInputPaste (clipboardData.items kind=file + image/*), removable thumbnail chips above the composer, exported encodeImageForTransport helper (PNG passthrough; non-PNG canvas re-encode to PNG; >2000px longest edge canvas downscale; no rejection paths — worst case the server gate handles). Text-paste path byte-identical.
+- Send path: AcpPromptPayload.images { data, mimeType, name? } (base64 sans prefix) → preload → ACP_PROMPT handler → AcpRuntimeManager.prompt(text, images) → image blocks appended after the text block in one session/prompt. startUserTurn carries images into the transcript (existing store/transcript support reused).
+- image_in gate (refuse-with-message per WO default): startOnce parses sessionResult.configOptions model arm (currentValue + per-option imageIn), emits imageIn on the initialized event; composer refuses with "Current model can't see images" when imageIn === false (chips preserved, no turn started); unknown/absent → send allowed (server gate backstop). Note: session/resume carries no configOptions → imageIn unknown there by design.
+- Version floor: agentInfo.version parsing as semver < 0.23.5 throws UnsupportedAgentVersionError (error event, not initialized, no retry); absent/unparseable warns and proceeds.
+
+kimi-code fork delta (branch feat/runtime-wait-state-visibility, uncommitted, 4 files):
+- model-catalog.ts: AcpModelEntry.imageIn + deriveImageIn (declared 'image_in' capability only, via effectiveModelAlias).
+- config-options.ts: buildModelOption emits imageIn on every model-arm option (new exported AcpModelSelectOption type); all emission paths covered (session/new, session/load, set_config_option, config_option_update).
+- Tests: model-catalog + config-options suites extended.
+
+Verification:
+- acp-desktop: tsc --noEmit clean (renderer + main configs); vitest 407 passed / 1 failed / 1 skipped — the failure is the untracked in-progress src/main/terminalScreen.* pair (imports nothing touched; pre-existing).
+- kimi-code acp-adapter: 313 tests pass; typecheck clean except two PRE-EXISTING TS4111s in test/session-prompt.test.ts (untouched file, present at HEAD).
+
+Deviations from WO: none material. Image-only sends (no text) are allowed; text block always precedes image blocks on the wire. Manual E2E per WO §5 is QAPert's: paste → chip → Enter end-to-end per model alias, >2000px compression caption, unsupported format text notice, 3-image prompt.
+
+Research brief: acp-desktop/docs/RESEARCH-KIMI-NATIVE-IMAGE-PASTE-20260720.md

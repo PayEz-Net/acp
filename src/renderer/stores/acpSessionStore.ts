@@ -260,18 +260,8 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
         capabilities: update.capabilities,
         agentInfo: update.agentInfo,
         imageIn: update.imageIn,
-        queuedCount: 0,
         waitState: undefined,
       };
-    }
-
-    case 'prompt_queued':
-    case 'prompt_dequeued': {
-      return { ...session, queuedCount: update.queueDepth };
-    }
-
-    case 'queue_cleared': {
-      return { ...session, queuedCount: 0 };
     }
 
     case 'available_commands_update': {
@@ -484,7 +474,11 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
           });
         }
         const turn = createTurn(agent, sessionId, 'user', contentBlocks, ts);
-        sessions.set(agent, { ...session, turns: [...session.turns, turn], activeTurnId: null });
+        // A user message does NOT end the active assistant turn — only
+        // turn_complete / cancel does. Nulling activeTurnId here orphaned the
+        // live turn and fragmented the transcript on the next chunk (slice B:
+        // steered messages arrive mid-turn by design).
+        sessions.set(agent, { ...session, turns: [...session.turns, turn] });
         return { sessions };
       });
     },

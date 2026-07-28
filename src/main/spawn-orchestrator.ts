@@ -19,13 +19,13 @@
  */
 
 import * as fs from 'fs';
-import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed } from './pty';
+import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed, emitNoTeamEngaged } from './pty';
 import { endAgentSession } from './agentSessionLifecycle';
 import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
-import { acpApiGetAgentProfile, acpApiGetUnreadMailCount } from './acp-api-client';
+import { acpApiGetAgentProfile, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
 
 const ACP_API_BASE = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -230,7 +230,25 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     return;
   }
   if (team.length === 0) {
-    console.warn(`[SpawnOrch] project=${projectId} has no team members — aborting spawn`);
+    // Live-team model (WO-ACP-LIVE-TEAM-MERGE ACP-2): a project's roster IS
+    // its engaged standing team's roster, read live — an EMPTY roster just
+    // means NO team is engaged (HTTP 200, NOT an error) and is the DEFAULT
+    // for fresh projects. This must be a renderer-visible state, not a
+    // swallowed console line: push the typed event so projectStore surfaces
+    // the "No team engaged — pick a team" CTA. Explicit engage only — no
+    // auto-engage magic (locked decision).
+    console.warn(`[SpawnOrch] project=${projectId} has no engaged team (empty roster) — aborting spawn; surfacing NO_TEAM_ENGAGED`);
+    emitNoTeamEngaged({
+      project_id: projectId,
+      project_name: project.name,
+      message: `Project "${project.name}" has no team engaged — engage a standing team to start its agents.`,
+    });
+    // Leave the RUNNING transition UNCONSUMED (the handler recorded it in
+    // lastSeenState before dispatching here): a post-engage reseed re-emits
+    // project-lifecycle-changed RUNNING and only re-fires orchestrateSpawn
+    // when oldS !== 'RUNNING'. Deleting the marker lets that re-fire happen
+    // once the user has engaged a team.
+    lastSeenState.delete(projectId);
     return;
   }
 
@@ -387,6 +405,23 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
         spawnedAt: new Date().toISOString(),
       });
       console.log(`[SpawnOrch] spawned ${member.agent_name} → terminal=${terminalId} workDir=${workDir} effort=${effort ?? '(global default)'} project=${projectId}`);
+
+      // Seed the sidecar's lifecycle state so /internal/pty/output can resolve
+      // project_id/session_id for live SSE emission, and so the health monitor /
+      // crash auto-restart path has the correct project mapping.
+      // spawn-orchestrator bypasses the normal /v1/lifecycle/agents/:name/spawn
+      // route, so BackoffManager is otherwise empty.
+      try {
+        await registerPtyTerminal({
+          agentName: member.agent_name,
+          terminalId,
+          projectId,
+          provider: runtime,
+        });
+        console.log(`[SpawnOrch] registered ${member.agent_name} terminal=${terminalId} with sidecar`);
+      } catch (err) {
+        console.warn(`[SpawnOrch] failed to register ${member.agent_name} with sidecar:`, err);
+      }
     } catch (err) {
       // Orchestrator-path parity (SPEC-workdir-invalid §3.4): this path has
       // NO renderer fetch to catch the throw, so a bad project repo_path

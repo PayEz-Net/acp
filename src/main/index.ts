@@ -10,7 +10,7 @@ import path from 'path';
 import { setupPtyHandlers, killAllPty } from './pty';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
-import { acpApiGetStatus } from './acp-api-client';
+import { acpApiGetStatus, acpApiCall, ACP_API_URL } from './acp-api-client';
 import { startOAuthServer, stopOAuthServer, OAUTH_PORT } from './oauth-server';
 import { startApiServer, stopApiServer, getLocalSecret, getApiLogs, setOnBackendStatusChange } from './api-server';
 import { startLifecycleServer, stopLifecycleServer } from './lifecycle-server';
@@ -20,10 +20,13 @@ import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
 import { IPC_CHANNELS } from '../shared/types';
+import type {
+  TerminalReplayHistoryParams,
+  TerminalReplayExportParams,
+} from '../shared/types';
 import { colonizeWorkspace } from './colonize';
 import { VIBE_API_URL, cloudEndpointsSnapshot } from './env';
-import { buildVsqlCacheAuthHeaders } from './vsql-cache-client';
-import { getActiveSessionTokenForProject } from './agentSessionLifecycle';
+
 
 // --- Install-time / headless colonization (NSIS customInstall) -------------
 // The installer invokes the just-installed exe headless:
@@ -359,29 +362,64 @@ function setupIpcHandlers() {
     return getApiLogs();
   });
 
-  // Agent-output auth/context headers (PayEzVibe API mediated)
-  ipcMain.handle(IPC_CHANNELS.VSQL_CACHE_GET_AUTH_HEADERS, async (_, method: string, path: string) => {
+  // Terminal Replay v1 — renderer → main request handlers.
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_LOAD_HISTORY, async (_, params: TerminalReplayHistoryParams) => {
     try {
-      const headers = await buildVsqlCacheAuthHeaders(method, path);
-      // Return the active PayEzVibe API base URL and bearer token. The desktop
-      // never holds the backend cache container secret.
-      return { url: VIBE_API_URL, ...headers };
+      const query = new URLSearchParams();
+      query.set('project_id', String(params.projectId));
+      if (params.agents && params.agents.length > 0) query.set('agents', params.agents.join(','));
+      if (params.terminals && params.terminals.length > 0) query.set('terminals', params.terminals.join(','));
+      if (params.sessionId) query.set('session_id', params.sessionId);
+      if (params.since) query.set('since', params.since);
+      if (params.until) query.set('until', params.until);
+      if (params.limit) query.set('limit', String(params.limit));
+      if (params.cursor) query.set('cursor', params.cursor);
+      const result = await acpApiCall(`/v1/terminal/replay?${query.toString()}`);
+      const data = result.data ?? { lines: [], next_cursor: undefined };
+      mainWindow?.webContents.send(IPC_CHANNELS.TERMINAL_HISTORY, data);
+      return data;
     } catch (e) {
-      console.error('[vibe-api] agent-output auth headers error:', e);
-      return { error: String(e) };
+      console.error('[TerminalReplay] load history error:', e);
+      return { error: String(e), lines: [] };
     }
   });
 
-  // Agent-output stream session token: return any active PayEzVibe session
-  // token for the requested project so the renderer SSE stream can resolve
-  // without relying on agent name/id lookups.
-  ipcMain.handle(IPC_CHANNELS.VSQL_CACHE_GET_ACTIVE_SESSION_TOKEN, (_, projectId: number) => {
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_LOAD_SESSIONS, async (_, projectId: number) => {
     try {
-      const token = getActiveSessionTokenForProject(projectId);
-      return { token: token ?? null };
+      const result = await acpApiCall(`/v1/terminal/sessions?project_id=${projectId}`);
+      const data = result.data ?? { sessions: [] };
+      mainWindow?.webContents.send(IPC_CHANNELS.TERMINAL_SESSIONS, data);
+      return data;
     } catch (e) {
-      console.error('[vibe-api] get active session token error:', e);
-      return { error: String(e) };
+      console.error('[TerminalReplay] load sessions error:', e);
+      return { error: String(e), sessions: [] };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_LOAD_EXPORT, async (_, params: TerminalReplayExportParams) => {
+    try {
+      const query = new URLSearchParams();
+      query.set('project_id', String(params.projectId));
+      query.set('format', params.format);
+      if (params.agents && params.agents.length > 0) query.set('agents', params.agents.join(','));
+      if (params.terminals && params.terminals.length > 0) query.set('terminals', params.terminals.join(','));
+      if (params.sessionId) query.set('session_id', params.sessionId);
+      if (params.since) query.set('since', params.since);
+      if (params.until) query.set('until', params.until);
+      const secret = getLocalSecret() || process.env.ACP_LOCAL_SECRET || '';
+      const res = await fetch(`${ACP_API_URL}/v1/terminal/export?${query.toString()}`, {
+        headers: secret ? { Authorization: `Bearer ${secret}` } : {},
+      });
+      if (!res.ok) {
+        throw new Error(`export HTTP ${res.status}`);
+      }
+      const blob = await res.text();
+      const data = { blob, filename: `terminal-replay-${params.projectId}.${params.format}` };
+      mainWindow?.webContents.send(IPC_CHANNELS.TERMINAL_EXPORT, data);
+      return data;
+    } catch (e) {
+      console.error('[TerminalReplay] load export error:', e);
+      return { error: String(e), blob: '', filename: '' };
     }
   });
 

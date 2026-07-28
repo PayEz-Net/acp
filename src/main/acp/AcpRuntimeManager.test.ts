@@ -398,12 +398,11 @@ describe('AcpRuntimeManager', () => {
     );
   });
 
-  it('queues mail notices while a prompt is in flight', async () => {
+  it('defers a mail inject instead of queueing when the runtime busy-rejects (mail never stacks, WO 11622)', async () => {
     mockState.setResponse('initialize', {});
-    mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-defer' });
     await manager.start();
 
-    // Hold the first user prompt open so mail gets queued against it.
     let deferredResolve: (value: unknown) => void = () => {};
     const deferredPromise = new Promise<unknown>((resolve) => {
       deferredResolve = resolve;
@@ -412,27 +411,94 @@ describe('AcpRuntimeManager', () => {
     const userPrompt = manager.prompt('hello');
     await Promise.resolve();
 
-    // Mail that arrives while the prompt is in flight should be queued.
+    // The runtime busy-rejects the steer: mail DEFERS (no queue, no stacked
+    // turn) — it will be picked up by the catch-up synthesis at idle.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const mailPromise = manager.injectMail('you have mail');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await expect(mailPromise).resolves.toBe(false);
+    const process = getProcess();
+    // Boot + user + the rejected steer attempt — and nothing more, ever.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
+
+    // After the turn ends, the deferred mail is NOT re-dispatched.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    deferredResolve({ stopReason: 'end_turn' });
+    await userPrompt;
+    await new Promise((r) => setImmediate(r));
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+    manager.kill();
+  });
+
+  it('migrates pendingSteers into the queue on restart-resume without a false settle from the old process (WO 11652)', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/resume', { sessionId: 'sess-steer-resume' });
+    mockState.setResponse('session/new', { sessionId: 'sess-steer-new' });
+    await manager.start();
+
+    // In-flight user turn (never settles) → mail steers through and pends.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    await manager.prompt('in-flight');
+    const mailPromise = manager.injectMail('you have mail');
+    await Promise.resolve();
+
+    // Restart: the resume succeeds, so the pending steer migrates into the
+    // queue and drains — it must resolve TRUE via dispatch, never false-settle
+    // from the old process's rejected steer request.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.restart();
+
+    await expect(mailPromise).resolves.toBe(true);
+    const mailDispatches = getProcess().requests.filter(
+      (r) =>
+        r.method === 'session/prompt' &&
+        (r.params as { prompt: Array<{ text: string }> }).prompt[0].text === 'you have mail',
+    );
+    expect(mailDispatches.length).toBeGreaterThan(0);
+
+    manager.kill();
+  });
+
+  it('steers mail notices through while a prompt is in flight (slice B)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
+    await manager.start();
+
+    // Hold the first user prompt open so mail arrives mid-turn.
+    let deferredResolve: (value: unknown) => void = () => {};
+    const deferredPromise = new Promise<unknown>((resolve) => {
+      deferredResolve = resolve;
+    });
+    mockState.setResponse('session/prompt', deferredPromise);
+    const userPrompt = manager.prompt('hello');
+    await Promise.resolve();
+
+    // Mail that arrives while the prompt is in flight is STEERED through
+    // immediately — never manager-queued.
     const mailPromise = manager.injectMail('you have mail');
     await Promise.resolve();
 
     const process = getProcess();
-    // Boot prompt + first user prompt have been dispatched; mail is still queued.
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Complete the first prompt; the queued mail should then be sent.
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     deferredResolve({ stopReason: 'end_turn' });
     await userPrompt;
-    await mailPromise;
+    await expect(mailPromise).resolves.toBe(true);
 
     const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
-    expect(promptRequests.length).toBe(3);
-    expect((promptRequests[1].params as any).prompt[0].text).toBe('hello');
     expect((promptRequests[2].params as any).prompt[0].text).toBe('you have mail');
   });
 
-  it('serializes concurrent prompts so only one session/prompt is in flight at a time', async () => {
+  it('falls back to queueing when the runtime busy-rejects a steer (slice B backstop)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-serial' });
     await manager.start();
@@ -441,7 +507,7 @@ describe('AcpRuntimeManager', () => {
     const deferredPromise = new Promise<unknown>((resolve) => {
       deferredResolve = resolve;
     });
-    // Hold the first user prompt open so we can queue a second one against it.
+    // Hold the first user prompt open so the steer attempt happens mid-turn.
     mockState.setResponse('session/prompt', deferredPromise);
 
     await manager.prompt('first');
@@ -451,21 +517,30 @@ describe('AcpRuntimeManager', () => {
     // Boot prompt + first user prompt have both been dispatched.
     expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
 
-    // Queue a second prompt while the first is still in flight.
+    // The runtime busy-rejects the steer (it predates the adapter steer):
+    // the manager falls back to queue + drain — the ONLY prompt_queued path.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
     const secondDispatched = manager.prompt('second');
     await Promise.resolve();
-    // No new request should have been issued while the first is pending.
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+    await Promise.resolve();
 
-    // Complete the first prompt; the second should then be sent.
+    // The runtime busy-rejects the steer attempt: the prompt takes the
+    // backstop queue path (request #3 IS the rejected steer attempt).
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+    // The turn ends; the queued prompt drains as request #4.
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     deferredResolve({ stopReason: 'end_turn' });
     await secondDispatched;
 
     const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
-    expect(promptRequests.length).toBe(3);
+    expect(promptRequests.length).toBe(4);
     expect((promptRequests[1].params as any).prompt[0].text).toBe('first');
-    expect((promptRequests[2].params as any).prompt[0].text).toBe('second');
+    expect((promptRequests[3].params as any).prompt[0].text).toBe('second');
 
     const completes = events.filter((e) => e.update.sessionUpdate === 'turn_complete');
     expect(completes.length).toBeGreaterThanOrEqual(2);
@@ -573,10 +648,17 @@ describe('AcpRuntimeManager', () => {
     let rejectTurn: (err: Error) => void = () => {};
     mockState.setResponse('session/prompt', new Promise<unknown>((_, reject) => { rejectTurn = reject; }));
     await manager.prompt('first');
+    // Force the steer attempt to busy-reject so 'second' takes the queue path.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
     const secondDispatched = manager.prompt('second');
     await Promise.resolve();
-    // Boot prompt + first user prompt dispatched; second is queued in flight.
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+    await Promise.resolve();
+    // Boot prompt + first user prompt dispatched; the steer attempt
+    // busy-rejected and the prompt queued (request #3 is the failed attempt).
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
 
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     rejectTurn(new Error('boom'));
@@ -605,8 +687,8 @@ describe('AcpRuntimeManager', () => {
     expect(restartSpy).not.toHaveBeenCalled();
 
     const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
-    expect(promptRequests.length).toBe(3);
-    expect((promptRequests[2].params as any).prompt[0].text).toBe('second');
+    expect(promptRequests.length).toBe(4);
+    expect((promptRequests[3].params as any).prompt[0].text).toBe('second');
 
     restartSpy.mockRestore();
     manager.kill();
@@ -830,47 +912,288 @@ describe('AcpRuntimeManager', () => {
       .filter((r) => r.method === 'session/prompt')
       .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
     expect(promptTexts.filter((t) => t === 'first')).toHaveLength(2);
-    expect(promptTexts.indexOf('second')).toBeGreaterThan(promptTexts.lastIndexOf('first'));
+    // One failed steer attempt plus the drained dispatch for 'second'.
+    expect(promptTexts.filter((t) => t === 'second')).toHaveLength(2);
+    expect(promptTexts.lastIndexOf('second')).toBeGreaterThan(promptTexts.lastIndexOf('first'));
     expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
 
     manager.kill();
     vi.useRealTimers();
   });
 
-  it('trips the idle watchdog and restarts when the busy turn never ends', async () => {
-    mockState.setResponse('initialize', {});
+  it('trips the idle watchdog mid-busy-episode and restarts with session/new (skip resume once)', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/new', { sessionId: 'sess-busy-wedged' });
     await manager.start();
     events = [];
 
     vi.useFakeTimers();
-    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
     const process = getProcess();
 
-    // The runtime never accepts a dispatch and never emits a notification.
+    // The first dispatch busy-rejects; the re-sync probe then hangs forever —
+    // the runtime never answers again (wedged busy turn). With only ONE
+    // rejection the busy-cap escalation never fires; the watchdog is the
+    // backstop that ends the episode.
     mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
     await manager.prompt('stuck');
+    await vi.advanceTimersByTimeAsync(0);
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
 
-    // 19 ticks (285s): retries every 5s must not reset the idle clock.
+    // 19 ticks (285s): the in-flight retry probe must not reset the idle
+    // clock, and no escalation may fire (one rejection only).
     for (let i = 0; i < 19; i++) {
       await vi.advanceTimersByTimeAsync(15_000);
     }
     expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(0);
     expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
-    expect(restartSpy).not.toHaveBeenCalled();
 
-    // Past 300s of true silence, the watchdog trips and restarts as today.
+    // Past 300s of true silence, the watchdog trips: best-effort cancel +
+    // failPendingTurn + restart, as today.
     await vi.advanceTimersByTimeAsync(30_000);
     const error = events.find((e) => e.update.sessionUpdate === 'error');
     expect(error?.update).toMatchObject({
       sessionUpdate: 'error',
       error: expect.stringContaining('No response'),
     });
-    expect(restartSpy).toHaveBeenCalled();
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill pause + start
 
-    restartSpy.mockRestore();
+    // A busy episode that consumed the whole idle budget is a property of the
+    // resumed session: the restart falls back to session/new exactly once
+    // instead of resuming (loadSession IS advertised and lastSessionId is
+    // set — resume was skipped, not unavailable).
+    const fresh = getProcess();
+    expect(fresh).not.toBe(process);
+    expect(fresh.requests.some((r) => r.method === 'session/new')).toBe(true);
+    expect(fresh.requests.some((r) => r.method === 'session/resume')).toBe(false);
+
     manager.kill();
     vi.useRealTimers();
+  });
+
+  it('probes immediately when turn_complete arrives mid-busy-episode (no 5s wait)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-probe' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('mission bravo');
+    await vi.advanceTimersByTimeAsync(0); // rejection settles: re-queued, retry timer armed
+
+    const promptCount = () => process.requests.filter((r) => r.method === 'session/prompt').length;
+    expect(promptCount()).toBe(2); // boot + the rejected initial dispatch
+
+    // The busy turn ends at t≈0, long before the 5s retry tick — the manager
+    // must probe NOW.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    process.emit('notification', 'session/update', {
+      sessionId: 'sess-busy-probe',
+      update: { sessionUpdate: 'turn_complete', stopReason: 'end_turn' },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(promptCount()).toBe(3); // the immediate probe — no 5s wait
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_dequeued')).toBe(true);
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && (e.update as Record<string, unknown>).stopReason === 'end_turn',
+      ),
+    ).toBe(true);
+
+    // The canceled retry timer must not fire a second probe later.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(promptCount()).toBe(3);
+
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('does not probe on turn_complete when no busy retry is pending', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-idle-tc' });
+    await manager.start();
+    events = [];
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('hello');
+
+    const process = getProcess();
+    const promptCount = () => process.requests.filter((r) => r.method === 'session/prompt').length;
+    const before = promptCount();
+
+    // An ordinary turn completion (no busy episode in progress) must not
+    // cause any extra dispatch.
+    process.emit('notification', 'session/update', {
+      sessionId: 'sess-idle-tc',
+      update: { sessionUpdate: 'turn_complete', stopReason: 'end_turn' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(promptCount()).toBe(before);
+
+    manager.kill();
+  });
+
+  it('escalates after 12 consecutive busy rejections: cancel, failPendingTurn, fresh-session restart', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-cap' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+
+    // Every dispatch busy-rejects: the initial dispatch plus 11 probes = 12
+    // consecutive rejections (≈55s of probing), then the cap escalates.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('stuck');
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    // The fresh runtime accepts prompts again.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(10_000); // restart pause + fresh start + boot
+
+    // Escalation took the watchdog path on the old process: exactly one
+    // best-effort cancel, plus failPendingTurn's error + turn_complete.
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'error'
+          && typeof e.update.error === 'string'
+          && e.update.error.includes('turn.agent_busy')
+          && e.update.error.includes('fresh session'),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && (e.update as Record<string, unknown>).stopReason === 'cancelled',
+      ),
+    ).toBe(true);
+
+    // The prompt was dispatched exactly 12 times (initial + 11 probes).
+    const stuckDispatches = process.requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text)
+      .filter((t) => t === 'stuck');
+    expect(stuckDispatches).toHaveLength(12);
+
+    // The restart skipped resume once: session/new, NOT session/resume —
+    // even though loadSession is advertised and lastSessionId is set.
+    const fresh = getProcess();
+    expect(fresh).not.toBe(process);
+    expect(fresh.requests.some((r) => r.method === 'session/new')).toBe(true);
+    expect(fresh.requests.some((r) => r.method === 'session/resume')).toBe(false);
+
+    // The re-queued prompt settled via the existing fresh-session queue
+    // handling: visible drop + queue_cleared (not silently lost).
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'error'
+          && typeof e.update.error === 'string'
+          && e.update.error.includes('runtime restarted with a fresh session'),
+      ),
+    ).toBe(true);
+    expect(events.some((e) => e.update.sessionUpdate === 'queue_cleared')).toBe(true);
+
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('sends session/cancel once at the 3rd busy rejection; a freed session dispatches without restart', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-early-cancel' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+    const cancels = () => process.notifications.filter((n) => n.method === 'session/cancel').length;
+
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('stuck');
+    await vi.advanceTimersByTimeAsync(0); // rejection 1
+    await vi.advanceTimersByTimeAsync(5_000); // rejection 2
+    expect(cancels()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(5_000); // rejection 3 → early cancel fires
+    expect(cancels()).toBe(1);
+
+    // The cancel freed the zombie turn: the next probe dispatches cleanly.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // No restart, no escalation, exactly one cancel for the whole episode.
+    expect(getProcess()).toBe(process);
+    expect(cancels()).toBe(1);
+    expect(events.some((e) => e.update.sessionUpdate === 'error')).toBe(false);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'turn_complete'
+          && (e.update as Record<string, unknown>).stopReason === 'end_turn',
+      ),
+    ).toBe(true);
+
+    // Episode state reset: a later busy episode must cancel early again.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('stuck-again');
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000); // rejection 3 of episode two
+    expect(cancels()).toBe(2);
+
+    manager.kill();
+    vi.useRealTimers();
+  });
+
+  it('skips resume exactly once: the next restart resumes the new session again', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/new', { sessionId: 'sess-busy-once' });
+    mockState.setResponse('session/resume', { sessionId: 'sess-busy-once' });
+    await manager.start();
+    events = [];
+
+    vi.useFakeTimers();
+    const process = getProcess();
+
+    // Drive a full capped episode (12 rejections) → fresh-session restart.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+    await manager.prompt('stuck');
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const fresh = getProcess();
+    expect(fresh).not.toBe(process);
+    expect(fresh.requests.some((r) => r.method === 'session/new')).toBe(true);
+    expect(fresh.requests.some((r) => r.method === 'session/resume')).toBe(false);
+
+    // Exactly once: a later restart resumes the (new) session normally.
+    vi.useRealTimers();
+    await manager.restart();
+    const third = getProcess();
+    expect(third).not.toBe(fresh);
+    expect(third.requests).toContainEqual(
+      expect.objectContaining({
+        method: 'session/resume',
+        params: expect.objectContaining({ sessionId: 'sess-busy-once' }),
+      }),
+    );
+    expect(third.requests.some((r) => r.method === 'session/new')).toBe(false);
+
+    manager.kill();
   });
 
   it('preserves recent user prompts in boot prompt after restart', async () => {
@@ -993,7 +1316,15 @@ describe('AcpRuntimeManager', () => {
     let resolveTurn: (value: unknown) => void = () => {};
     mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { resolveTurn = resolve; }));
     await manager.prompt('in-flight');
+    // The runtime busy-rejects the steer, so the prompt takes the backstop
+    // queue path — the ONLY producer of prompt_queued (slice B).
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
     const queuedPromise = manager.prompt('queued behind');
+    await Promise.resolve();
+    await Promise.resolve();
 
     const queuedEvents = events.filter((e) => e.update.sessionUpdate === 'prompt_queued');
     expect(queuedEvents).toHaveLength(1);
@@ -1005,6 +1336,7 @@ describe('AcpRuntimeManager', () => {
     expect(events.find((e) => e.update.sessionUpdate === 'prompt_dequeued')).toBeUndefined();
 
     // Turn completes → the queued prompt dispatches with depth back to 0.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     resolveTurn({ stopReason: 'end_turn' });
     await queuedPromise;
 
@@ -1034,7 +1366,9 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('in-flight');
     void manager.prompt('queued one');
     await vi.advanceTimersByTimeAsync(0);
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    // Slice B: the second prompt steers through (pendingSteer) — no
+    // prompt_queued event on the steer path.
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
     // Trip the 300s idle watchdog: failPendingTurn + restart. The restart
     // starts a FRESH session (no resume capability), so the queue drops.
@@ -1060,9 +1394,10 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('in-flight');
     const mailPromise = manager.injectMail('you have mail');
     await vi.advanceTimersByTimeAsync(0);
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    // The mail inject steers through (pendingSteer), not the queue.
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The queued
+    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The steered
     // mail inject must settle false (not hang) so the renderer's retry /
     // delivery-failed path can fire.
     await vi.advanceTimersByTimeAsync(320_000);
@@ -1083,13 +1418,39 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('in-flight');
     const mailPromise = manager.injectMail('you have mail');
     await Promise.resolve();
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    // Steered through as a pendingSteer, not queued.
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // An intentional kill has no later drain path — the queued notice must
+    // An intentional kill has no later drain path — the steered notice must
     // settle false immediately, not hang.
     manager.kill();
 
     await expect(mailPromise).resolves.toBe(false);
+  });
+
+  it('purgeQueue settles every queued prompt as false and returns the count (WO 11572)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-purge' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
+    await manager.prompt('in-flight');
+    const mailPromise = manager.injectMail('mail one');
+    const mailPromise2 = manager.injectMail('mail two');
+    await Promise.resolve();
+    // Both steer through as pendingSteers — no prompt_queued events.
+    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(0);
+
+    // The human's interrupt purges the backlog: both settle false, the count
+    // comes back for the UI flash, and queue_cleared fires for the renderer.
+    const dropped = manager.purgeQueue();
+
+    expect(dropped).toBe(2);
+    await expect(mailPromise).resolves.toBe(false);
+    await expect(mailPromise2).resolves.toBe(false);
+    expect(events.some((e) => e.update.sessionUpdate === 'queue_cleared')).toBe(true);
+
+    manager.kill();
   });
 
   it('settles queued prompts as false when the restart budget is exhausted (WO 11483)', async () => {
@@ -1105,7 +1466,8 @@ describe('AcpRuntimeManager', () => {
       await manager.prompt('in-flight');
       const mailPromise = manager.injectMail('you have mail');
       await vi.advanceTimersByTimeAsync(0);
-      expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+      // Steered through as a pendingSteer, not queued.
+      expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
       // Every subsequent start attempt fails → each restart re-schedules until
       // the budget (MAX_RESTARTS = 5) is spent and the give-up path drops the

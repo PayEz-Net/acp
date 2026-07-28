@@ -6,9 +6,16 @@
  */
 
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '../shared/idp-config';
+
+export interface RegisterPtyTerminalPayload {
+  agentName: string;
+  terminalId: string;
+  projectId: number;
+  provider?: string;
+}
 import { getLocalSecret } from './api-server';
 
-const ACP_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
+export const ACP_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
 interface AcpApiError {
   code: string;
@@ -37,7 +44,7 @@ interface StatusResponse {
   };
 }
 
-async function acpApiCall(endpoint: string, options: RequestInit = {}): Promise<any> {
+export async function acpApiCall(endpoint: string, options: RequestInit = {}): Promise<any> {
   const url = `${ACP_API_URL}${endpoint}`;
   
   const headers: Record<string, string> = {
@@ -289,3 +296,31 @@ export async function acpApiGetAgentMailUnreadCount(agentName: string): Promise<
     return null;
   }
 }
+
+/**
+ * Register a PTY terminal spawned directly by the main process with the local
+ * acp-api sidecar. Seeds the sidecar's BackoffManager lifecycle state so that
+ * the sidecar can track agent health and resolve project_id/session_id for any
+ * internal routes that still need lifecycle context. Without this,
+ * spawn-orchestrator agents bypass the lifecycle system.
+ */
+export async function registerPtyTerminal(payload: RegisterPtyTerminalPayload): Promise<void> {
+  try {
+    const data = await acpApiCall('/internal/pty/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        agentName: payload.agentName,
+        terminalId: payload.terminalId,
+        projectId: payload.projectId,
+        provider: payload.provider,
+      }),
+    });
+    if (!data?.success) {
+      throw new Error(data?.error?.message || 'Local sidecar returned non-success');
+    }
+  } catch (err: any) {
+    console.warn(`[ACP-API] PTY terminal registration failed for ${payload.agentName}:`, err.message);
+    throw err;
+  }
+}
+

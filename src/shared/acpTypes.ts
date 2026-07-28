@@ -142,15 +142,14 @@ export interface AcpInjectMailPayload {
   text: string;
 }
 
-export interface AcpSendMessagePayload {
-  agent: string;
-  sessionId: string;
-  content: AcpSendContentBlock[];
-}
-
 export interface AcpCancelPayload {
   agent: string;
   sessionId: string;
+}
+
+/** Purge the queued prompt backlog after a human interrupt (WO 11572). */
+export interface AcpPurgeQueuePayload {
+  agent: string;
 }
 
 export interface AcpSetModePayload {
@@ -204,12 +203,6 @@ export interface AcpSessionState {
   availableCommands?: AcpAvailableCommand[];
   turns: AcpTurn[];
   activeTurnId: string | null;
-  /**
-   * Prompts serialized behind the in-flight turn for this agent (from the
-   * main-process queue-state events). 0/undefined = nothing queued; the UI
-   * shows a quiet "Queued behind current turn (N)" indicator while > 0.
-   */
-  queuedCount?: number;
   /**
    * Current runtime wait-state (provider latency / retry backoff), set by
    * `wait_state` updates and cleared by the next content-bearing update or

@@ -2,6 +2,23 @@ import { create } from 'zustand';
 
 export type OutputSource = 'agent' | 'user' | 'info';
 
+// Terminals whose live display is driven by main-process screen-model frames
+// (IPC 'terminal:frame') rather than the cloud agent-output stream. Module-
+// level (non-reactive) so the SSE hook can check membership synchronously.
+const frameBackedTerminals = new Set<string>();
+
+export function markFrameBackedTerminal(terminalId: string): void {
+  frameBackedTerminals.add(terminalId);
+}
+
+export function isFrameBackedTerminal(terminalId: string | undefined | null): boolean {
+  return !!terminalId && frameBackedTerminals.has(terminalId);
+}
+
+export function unmarkFrameBackedTerminal(terminalId: string): void {
+  frameBackedTerminals.delete(terminalId);
+}
+
 let nextLineId = 1;
 
 export function generateAgentOutputLineId(): string {
@@ -28,6 +45,8 @@ export interface AgentOutputLine {
 
 interface AgentOutputStore {
   lines: AgentOutputLine[];
+  /** Live visible-screen rows per frame-backed terminal (replace semantics). */
+  frames: Record<string, string[]>;
   maxLines: number;
   paused: boolean;
   selectedAgent: string | null;
@@ -35,6 +54,11 @@ interface AgentOutputStore {
   addLine: (line: Omit<AgentOutputLine, 'id'>) => void;
   addLines: (lines: Omit<AgentOutputLine, 'id'>[]) => void;
   clear: (agentName?: string) => void;
+  setTerminalScreen: (terminalId: string, screen: string[]) => void;
+  /** Drop stored agent-output history for a terminal whose TUI erased and
+   *  re-rendered its scrollback (ED 3). User/info lines are kept: they are
+   *  app-side annotations the TUI cannot re-render. */
+  clearTerminalHistory: (terminalId: string, agentName: string) => void;
   setPaused: (paused: boolean) => void;
   setSelectedAgent: (agent: string | null) => void;
   setMaxLines: (max: number) => void;
@@ -77,6 +101,7 @@ function appendLines(state: { lines: AgentOutputLine[]; maxLines: number }, inco
 
 export const useAgentOutputStore = create<AgentOutputStore>((set) => ({
   lines: [],
+  frames: {},
   maxLines: MAX_DEFAULT,
   paused: false,
   selectedAgent: null,
@@ -105,6 +130,20 @@ export const useAgentOutputStore = create<AgentOutputStore>((set) => ({
     }
     set((state) => ({
       lines: state.lines.filter((l) => l.agent !== agentName),
+    }));
+  },
+
+  setTerminalScreen: (terminalId, screen) => {
+    set((state) => ({ frames: { ...state.frames, [terminalId]: screen } }));
+  },
+
+  clearTerminalHistory: (terminalId, agentName) => {
+    set((state) => ({
+      lines: state.lines.filter((l) => {
+        const belongs = l.terminal_id ? l.terminal_id === terminalId : l.agent === agentName;
+        if (!belongs) return true;
+        return l.source === 'user' || l.source === 'info';
+      }),
     }));
   },
 

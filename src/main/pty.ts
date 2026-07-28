@@ -8,6 +8,7 @@ import * as crypto from 'crypto';
 import * as http from 'http';
 import {
   IPC_CHANNELS,
+  type NoTeamEngagedPayload,
   type SpawnFailedPayload,
   type TerminalProvider,
 } from '../shared/types';
@@ -16,6 +17,7 @@ import {
   type AcpPromptPayload,
   type AcpInjectMailPayload,
   type AcpCancelPayload,
+  type AcpPurgeQueuePayload,
   type AcpSetModePayload,
   type AcpKillPayload,
   type AcpPermissionResponsePayload,
@@ -26,6 +28,39 @@ import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
+import { TerminalScreen } from './terminalScreen';
+
+// Per-terminal screen models (see terminalScreen.ts). Raw PTY bytes are fed
+// through a logical screen so repaint sequences (resize, spinner, \r redraws)
+// reach the renderer as frame updates instead of append-only fragments.
+const terminalScreens = new Map<string, TerminalScreen>();
+const frameFlushTimers = new Map<string, NodeJS.Timeout>();
+const FRAME_FLUSH_MS = 40;
+
+function flushTerminalFrame(terminalId: string): void {
+  const timer = frameFlushTimers.get(terminalId);
+  if (timer) {
+    clearTimeout(timer);
+    frameFlushTimers.delete(terminalId);
+  }
+  const screen = terminalScreens.get(terminalId);
+  if (!screen) return;
+  const update = screen.takeUpdate();
+  if (update) safeSend(IPC_CHANNELS.TERMINAL_FRAME, update);
+}
+
+function scheduleTerminalFrameFlush(terminalId: string): void {
+  if (frameFlushTimers.has(terminalId)) return;
+  frameFlushTimers.set(
+    terminalId,
+    setTimeout(() => flushTerminalFrame(terminalId), FRAME_FLUSH_MS),
+  );
+}
+
+function disposeTerminalScreen(terminalId: string): void {
+  flushTerminalFrame(terminalId);
+  terminalScreens.delete(terminalId);
+}
 
 
 interface ManagedPty {
@@ -100,14 +135,14 @@ export interface SpawnAgentOptions {
    *  Leg (b) of effort_override consumption (Aurum 1405):
    *  the spawn resolver defers to ONE chain —
    *    per-agent override -> single global default (settings.claudeEffort) -> 'high'.
-   *  undefined = inherit (NOT a DB-baked literal; migration 14's
-   *  effort_override column has no DEFAULT, so NULL round-trips as
-   *  "defer to the resolver"). The renderer/orchestrator reads
-   *  project_team_members.effort_override (same path as `runtime`) and
-   *  threads it here — leg (a), NextPert. Codex has no effort lever, so
-   *  this is ignored for codex. */
+   *  undefined = inherit (NOT a DB-baked literal; the effort_override column
+   *  has no DEFAULT, so NULL round-trips as "defer to the resolver"). The
+   *  renderer/orchestrator reads team_agent_instances.effort_override (the
+   *  engaged standing team's per-placement override — live-team model; same
+   *  path as `runtime`) and threads it here — leg (a), NextPert. Codex has
+   *  no effort lever, so this is ignored for codex. */
   effort?: ClaudeEffort;
-  /** Bare kimi model id from project_team_members.model_override
+  /** Bare kimi model id from team_agent_instances.model_override
    *  (WO-KIMI-MODEL-OVERRIDE) — `k3` | `kimi-for-coding` |
    *  `kimi-for-coding-highspeed`. undefined/null = inherit default_model.
    *  Passed through RAW (never narrowed upstream): unknown/mistyped ids
@@ -260,6 +295,18 @@ function safeSend(channel: string, ...args: unknown[]): void {
  */
 export function emitSpawnFailed(payload: SpawnFailedPayload): void {
   safeSend(IPC_CHANNELS.PTY_SPAWN_FAILED, payload);
+}
+
+/**
+ * Emit the no-team-engaged abort to the renderer (WO-ACP-LIVE-TEAM-MERGE
+ * ACP-2). Under the live-team model an empty roster is the DEFAULT for
+ * fresh projects (no standing team engaged — 200, not an error), so the
+ * orchestrator's spawn abort must surface as a renderer-visible "pick a
+ * team" CTA, not just a console.warn. Same safeSend authority as
+ * emitSpawnFailed above.
+ */
+export function emitNoTeamEngaged(payload: NoTeamEngagedPayload): void {
+  safeSend(IPC_CHANNELS.PROJECT_NO_TEAM_ENGAGED, payload);
 }
 
 // Exit callback — set by lifecycle-server to report PTY exits to acp-api
@@ -720,6 +767,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     writeDraining: false,
   };
   terminals.set(id, managed);
+  terminalScreens.set(id, new TerminalScreen(id, agentName, 120, 30));
 
   if (opts?.agentId != null) {
     void (async () => {
@@ -755,6 +803,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   // now that mail push is handled by the MCP Channels path.
   ptyProcess.onData((data) => {
     safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data });
+    terminalScreens.get(id)?.feed(data);
+    scheduleTerminalFrameFlush(id);
     reportPtyOutput(
       agentName,
       id,
@@ -784,6 +834,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
     cleanupBootPromptTmpFile(managed.mcpConfigTmpPath);
+    disposeTerminalScreen(id);
     terminals.delete(id);
     // Report to acp-api via callback
     if (onPtyExit) {
@@ -812,8 +863,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     if (provider === 'claude') {
       // Effort precedence (Aurum 1405, single authority — no second 'high'):
       //   per-agent override (opts.effort) -> global default (settings.claudeEffort) -> 'high'.
-      // opts.effort is undefined until leg (a) plumbs project_team_members.effort_override
-      // through the spawn payload; until then this is identical to the global default.
+      // opts.effort comes from leg (a): the orchestrator plumbs
+      // team_agent_instances.effort_override (engaged team's per-placement
+      // override) through the spawn payload; undefined = global default.
       const effort = opts?.effort || settings.claudeEffort || 'high';
       // Boot-prompt path:
       //   - Wave C orchestrator / data-driven onboarding → the system
@@ -977,6 +1029,7 @@ export function killTerminal(terminalId: string): boolean {
     // the descendants on a single-pane kill (same gap 7e9a36b fixed for
     // killAllPty).
     treeKillPty(terminal.pty);
+    disposeTerminalScreen(terminalId);
     terminals.delete(terminalId);
     return true;
   }
@@ -994,6 +1047,10 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number): 
   const terminal = terminals.get(terminalId);
   if (terminal) {
     terminal.pty.resize(cols, rows);
+    // Keep the screen model's height in sync so shrink scrolls overflow rows
+    // into history (renderer-visible) instead of silently clipping them.
+    terminalScreens.get(terminalId)?.resize(cols, rows);
+    scheduleTerminalFrameFlush(terminalId);
     return true;
   }
   return false;
@@ -1122,6 +1179,19 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
     }
     console.log(`[ACP main] cancel received for ${payload.agent}`);
     runtime.cancel();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.ACP_PURGE_QUEUE, (_, payload: AcpPurgeQueuePayload) => {
+    const runtime = getAcpRuntimeByAgent(payload.agent);
+    if (!runtime) {
+      console.warn(`[ACP main] purge-queue for unknown agent: ${payload.agent}`);
+      return 0;
+    }
+    const dropped = runtime.purgeQueue();
+    if (dropped > 0) {
+      console.log(`[ACP main] purged ${dropped} queued prompt(s) for ${payload.agent} on user interrupt`);
+    }
+    return dropped;
   });
 
   ipcMain.handle(IPC_CHANNELS.ACP_SET_MODE, (_, payload: AcpSetModePayload) => {

@@ -1,0 +1,723 @@
+diff --git a/src/main/acp/AcpRuntimeManager.test.ts b/src/main/acp/AcpRuntimeManager.test.ts
+index 040dfb9..8f69576 100644
+--- a/src/main/acp/AcpRuntimeManager.test.ts
++++ b/src/main/acp/AcpRuntimeManager.test.ts
+@@ -91,6 +91,22 @@ vi.mock('./AcpProcess', () => ({
+   },
+ }));
+ 
++// In-memory stand-in for the electron-store settings module. AcpRuntimeManager
++// reads/writes `acpSessionIds` for crash-safe session resume; tests must not
++// touch the real user settings file.
++const mockSettings = vi.hoisted(() => ({
++  data: { acpSessionIds: {} as Record<string, string> },
++}));
++
++vi.mock('../store', () => ({
++  getSettings: vi.fn(() => ({ acpSessionIds: mockSettings.data.acpSessionIds })),
++  setSettings: vi.fn((patch: Record<string, unknown>) => {
++    if ('acpSessionIds' in patch) {
++      mockSettings.data.acpSessionIds = patch.acpSessionIds as Record<string, string>;
++    }
++  }),
++}));
++
+ describe('AcpRuntimeManager', () => {
+   let manager: AcpRuntimeManager;
+   let events: AcpEventPayload[] = [];
+@@ -98,6 +114,7 @@ describe('AcpRuntimeManager', () => {
+   beforeEach(() => {
+     mockState.responses.clear();
+     mockState.lastInstance = null;
++    mockSettings.data.acpSessionIds = {};
+     events = [];
+     manager = new AcpRuntimeManager('rt-1', getProviderConfig('kimi'), {
+       agentName: 'NextPert',
+@@ -439,7 +456,7 @@ describe('AcpRuntimeManager', () => {
+     expect(
+       events.some(
+         (e) => e.update.sessionUpdate === 'turn_complete'
+-          && (e.update as Record<string, unknown>).stopReason === 'cancel',
++          && (e.update as Record<string, unknown>).stopReason === 'cancelled',
+       ),
+     ).toBe(true);
+     expect(manager.getSessionId()).toBe('sess-fail');
+@@ -487,6 +504,92 @@ describe('AcpRuntimeManager', () => {
+     vi.useRealTimers();
+   });
+ 
++  it('treats wait_state updates as meaningful activity and forwards them to the renderer', async () => {
++    mockState.setResponse('initialize', {});
++    mockState.setResponse('session/new', { sessionId: 'sess-wait' });
++    await manager.start();
++
++    vi.useFakeTimers();
++    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart');
++    const process = getProcess();
++
++    let resolveTurn: (value: unknown) => void = () => {};
++    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { resolveTurn = resolve; }));
++    manager.prompt('slow provider');
++
++    // 7 minutes of provider retry backoff reported as wait_state frames
++    // (420s > the 300s idle budget): each frame is meaningful activity, so
++    // the watchdog must not fire while the runtime is reporting its waits.
++    for (let i = 0; i < 7; i++) {
++      process.emit('notification', 'session/update', {
++        sessionId: 'sess-wait',
++        update: {
++          sessionUpdate: 'wait_state',
++          kind: 'provider_retry',
++          failedAttempt: i + 1,
++          nextAttempt: i + 2,
++          maxAttempts: 10,
++          delayMs: 12_000,
++          errorName: 'APITimeoutError',
++          statusCode: 408,
++        },
++      });
++      await vi.advanceTimersByTimeAsync(60_000);
++    }
++
++    resolveTurn({ stopReason: 'end_turn' });
++    await vi.advanceTimersByTimeAsync(1_000);
++
++    expect(restartSpy).not.toHaveBeenCalled();
++    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
++    const waitEvents = events.filter((e) => e.update.sessionUpdate === 'wait_state');
++    expect(waitEvents).toHaveLength(7);
++    expect(waitEvents[3]?.update).toMatchObject({
++      sessionUpdate: 'wait_state',
++      sessionId: 'sess-wait',
++      waitState: {
++        kind: 'provider_retry',
++        failedAttempt: 4,
++        nextAttempt: 5,
++        maxAttempts: 10,
++        delayMs: 12_000,
++        errorName: 'APITimeoutError',
++        statusCode: 408,
++      },
++    });
++
++    restartSpy.mockRestore();
++    manager.kill();
++    vi.useRealTimers();
++  });
++
++  it('forwards awaiting_first_token wait_state and drops malformed frames', async () => {
++    mockState.setResponse('initialize', {});
++    mockState.setResponse('session/new', { sessionId: 'sess-ws-first-token' });
++    await manager.start();
++
++    const process = getProcess();
++    process.emit('notification', 'session/update', {
++      sessionId: 'sess-ws-first-token',
++      update: { sessionUpdate: 'wait_state', kind: 'awaiting_first_token' },
++    });
++    // Missing kind: malformed — must not reach the renderer.
++    process.emit('notification', 'session/update', {
++      sessionId: 'sess-ws-first-token',
++      update: { sessionUpdate: 'wait_state', delayMs: 500 },
++    });
++
++    const waitEvents = events.filter((e) => e.update.sessionUpdate === 'wait_state');
++    expect(waitEvents).toHaveLength(1);
++    expect(waitEvents[0]?.update).toMatchObject({
++      sessionUpdate: 'wait_state',
++      sessionId: 'sess-ws-first-token',
++      waitState: { kind: 'awaiting_first_token' },
++    });
++
++    manager.kill();
++  });
++
+   it('preserves recent user prompts in boot prompt after restart', async () => {
+     mockState.setResponse('initialize', {});
+     mockState.setResponse('session/new', { sessionId: 'sess-restart-context' });
+@@ -508,6 +611,61 @@ describe('AcpRuntimeManager', () => {
+     expect(latestBootPrompt.prompt[0].text).toContain('Restart context');
+   });
+ 
++  it('hydrates the persisted session id and resumes it on start', async () => {
++    mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-persisted' };
++    manager = new AcpRuntimeManager('rt-persist', getProviderConfig('kimi'), {
++      agentName: 'NextPert',
++      workDir: '/repo',
++      projectId: 42,
++    });
++    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
++    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
++    mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
++
++    await manager.start();
++
++    expect(getProcess().requests).toContainEqual(
++      expect.objectContaining({
++        method: 'session/resume',
++        params: expect.objectContaining({ sessionId: 'sess-persisted' }),
++      }),
++    );
++    expect(getProcess().requests.find((r) => r.method === 'session/new')).toBeUndefined();
++    expect(manager.getSessionId()).toBe('sess-persisted');
++    // A resumed session already carries the boot context — no fresh kickoff.
++    expect(getProcess().requests.find((r) => r.method === 'session/prompt')).toBeUndefined();
++  });
++
++  it('persists a fresh session id for crash-safe resume', async () => {
++    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
++    mockState.setResponse('session/new', { sessionId: 'sess-new-persist' });
++
++    await manager.start();
++
++    expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-new-persist');
++  });
++
++  it('falls back to session/new and re-persists when resume of the persisted id fails', async () => {
++    mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-stale' };
++    manager = new AcpRuntimeManager('rt-stale', getProviderConfig('kimi'), {
++      agentName: 'NextPert',
++      workDir: '/repo',
++      projectId: 42,
++    });
++    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
++    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
++    mockState.setResponse('session/resume', new Error('invalid params: session not found'));
++    mockState.setResponse('session/new', { sessionId: 'sess-fresh' });
++
++    await manager.start();
++
++    expect(getProcess().requests).toContainEqual(
++      expect.objectContaining({ method: 'session/new' }),
++    );
++    expect(manager.getSessionId()).toBe('sess-fresh');
++    expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-fresh');
++  });
++
+   it('forwards structured content blocks when runtime declares image support', async () => {
+     mockState.setResponse('initialize', {
+       agentCapabilities: { promptCapabilities: { image: true } },
+@@ -598,7 +756,7 @@ describe('AcpRuntimeManager', () => {
+     expect(complete?.update).toMatchObject({
+       sessionUpdate: 'turn_complete',
+       sessionId: 'sess-4',
+-      stopReason: 'cancel',
++      stopReason: 'cancelled',
+     });
+   });
+ 
+diff --git a/src/main/acp/AcpRuntimeManager.ts b/src/main/acp/AcpRuntimeManager.ts
+index ae1c3aa..bccb7cc 100644
+--- a/src/main/acp/AcpRuntimeManager.ts
++++ b/src/main/acp/AcpRuntimeManager.ts
+@@ -9,6 +9,7 @@ import {
+   type AcpSendContentBlock,
+   type AcpSessionUpdate,
+   type AcpToolCall,
++  type AcpWaitState,
+ } from '../../shared/acpTypes';
+ import { IPC_CHANNELS, type AgentSessionStartFailedPayload, type TerminalProvider } from '../../shared/types';
+ import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
+@@ -17,6 +18,7 @@ import { getProviderConfig, type ProviderConfig } from './providerConfigs';
+ import { buildAgentBootPrompt } from './bootPrompt';
+ import { acpApiGetAgentProfile, acpApiGetUnreadMailCount } from '../acp-api-client';
+ import { startAgentSession, endAgentSession } from '../agentSessionLifecycle';
++import { getSettings, setSettings } from '../store';
+ 
+ export interface AcpRuntimeOptions {
+   agentName: string;
+@@ -103,6 +105,38 @@ export class AcpRuntimeManager extends EventEmitter {
+     private readonly options: AcpRuntimeOptions,
+   ) {
+     super();
++    // Hydrate the session id from the previous app run so session/resume can
++    // reattach the agent's working context after an app crash/restart, not
++    // just after in-process runtime restarts. Absent/unknown ids are a no-op:
++    // startOnce() falls back to session/new when resume fails.
++    this.lastSessionId = this.readPersistedSessionId();
++  }
++
++  /** electron-store key scoping this runtime's persisted session id. */
++  private get sessionPersistKey(): string {
++    return `${this.options.agentName}::${this.options.workDir}`;
++  }
++
++  private readPersistedSessionId(): string | null {
++    try {
++      return getSettings().acpSessionIds?.[this.sessionPersistKey] ?? null;
++    } catch (err) {
++      // Settings read failure must never block runtime startup.
++      console.warn(`[ACP ${this.options.agentName}] failed to read persisted session id:`, err);
++      return null;
++    }
++  }
++
++  private persistSessionId(sessionId: string): void {
++    try {
++      const current = getSettings().acpSessionIds ?? {};
++      if (current[this.sessionPersistKey] === sessionId) return;
++      setSettings({ acpSessionIds: { ...current, [this.sessionPersistKey]: sessionId } });
++    } catch (err) {
++      // Persistence is best-effort; losing it only means the next app
++      // restart starts a fresh session instead of resuming.
++      console.warn(`[ACP ${this.options.agentName}] failed to persist session id:`, err);
++    }
+   }
+ 
+   getId(): string {
+@@ -199,7 +233,7 @@ export class AcpRuntimeManager extends EventEmitter {
+     this.emitAcpEvent({
+       sessionUpdate: 'turn_complete',
+       sessionId: this.sessionId ?? '',
+-      stopReason: 'cancel',
++      stopReason: 'cancelled',
+     });
+     this.promptInFlight = false;
+   }
+@@ -369,6 +403,10 @@ export class AcpRuntimeManager extends EventEmitter {
+ 
+     this.sessionId = (sessionResult.sessionId as string) ?? null;
+     this.lastSessionId = this.sessionId;
++    // Persist so an app-level crash/restart (not just a runtime restart) can
++    // resume this session on next launch. When resume just succeeded this is
++    // a no-op (id unchanged); a fresh session/new self-heals the entry.
++    if (this.sessionId) this.persistSessionId(this.sessionId);
+     this.resumedLastStart = resumed;
+     this.initialized = true;
+     this.capabilities = agentCaps;
+@@ -645,7 +683,7 @@ export class AcpRuntimeManager extends EventEmitter {
+     this.emitAcpEvent({
+       sessionUpdate: 'turn_complete',
+       sessionId: sessionId ?? '',
+-      stopReason: 'cancel',
++      stopReason: 'cancelled',
+     });
+   }
+ 
+@@ -802,6 +840,15 @@ export class AcpRuntimeManager extends EventEmitter {
+         this.emitAcpEvent({ sessionUpdate: 'turn_complete', sessionId, stopReason });
+         break;
+       }
++      case 'wait_state': {
++        // Wait-state frames (kimi-code ≥0.27.0) report what the runtime is
++        // waiting on — provider first-token latency or retry backoff with
++        // advancing attempt counters. They count as meaningful activity (see
++        // MEANINGFUL_SESSION_UPDATES) and are forwarded for the UI.
++        const waitState = parseWaitState(update);
++        if (waitState) this.emitAcpEvent({ sessionUpdate: 'wait_state', sessionId, waitState });
++        break;
++      }
+       default:
+         // Ignore unknown update types safely.
+         break;
+@@ -894,6 +941,13 @@ const NOISY_SESSION_UPDATES = new Set([
+  * Only these reset the inactivity watchdog (see handleNotification). Kimi's
+  * ACP adapter sends no keepalive frames, so anything outside this set is
+  * lifecycle chatter, not progress.
++ *
++ * `wait_state` is meaningful by construction: it is emitted only by a live
++ * event loop (provider first-token waits and retry backoffs), it carries
++ * advancing attempt/delay data rather than repeating noise, and the retry
++ * loop is bounded (maxAttempts) — exhaustion surfaces an error that settles
++ * the prompt. A wedged runtime cannot emit it, so accepting it does not
++ * reintroduce the chatty-but-dead hole.
+  */
+ const MEANINGFUL_SESSION_UPDATES = new Set([
+   'agent_message_chunk',
+@@ -902,6 +956,7 @@ const MEANINGFUL_SESSION_UPDATES = new Set([
+   'tool_call_update',
+   'plan',
+   'turn_complete',
++  'wait_state',
+ ]);
+ 
+ function extractContent(content: unknown): AcpContentBlock | null {
+@@ -963,3 +1018,27 @@ function parseToolCall(update: Record<string, unknown>): AcpToolCall | null {
+   if (!toolCallId) return null;
+   return { toolCallId, title, status, content };
+ }
++
++/**
++ * Coerce a raw `wait_state` update payload into an {@link AcpWaitState}.
++ * `kind` is required (open string — newer runtimes may add kinds); the
++ * retry counters are carried only when they are finite numbers so a
++ * malformed frame degrades to a plain "waiting" indicator instead of
++ * poisoning the UI with NaN.
++ */
++function parseWaitState(update: Record<string, unknown>): AcpWaitState | null {
++  if (typeof update.kind !== 'string' || update.kind.length === 0) return null;
++  const numeric = (key: string): number | undefined => {
++    const value = update[key];
++    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
++  };
++  return {
++    kind: update.kind,
++    failedAttempt: numeric('failedAttempt'),
++    nextAttempt: numeric('nextAttempt'),
++    maxAttempts: numeric('maxAttempts'),
++    delayMs: numeric('delayMs'),
++    errorName: typeof update.errorName === 'string' ? update.errorName : undefined,
++    statusCode: numeric('statusCode'),
++  };
++}
+diff --git a/src/main/store.ts b/src/main/store.ts
+index 79ad5b5..b27d612 100644
+--- a/src/main/store.ts
++++ b/src/main/store.ts
+@@ -173,6 +173,11 @@ export function getSettings(): AppSettings {
+       ?? DEFAULT_SETTINGS.enableTerminalImagePaste,
+     instantSendPastedImages: (store.get('instantSendPastedImages' as keyof AppSettings) as boolean | undefined)
+       ?? DEFAULT_SETTINGS.instantSendPastedImages,
++    // ACP session ids for crash-safe resume (WO runtime wait-state visibility).
++    // Must be whitelisted here like every other key — setSettings persists it,
++    // but a missing getSettings line would silently drop it on read-back
++    // (same bug class as installerWorkspaceRoot/hasSeenWelcome above).
++    acpSessionIds: store.get('acpSessionIds' as keyof AppSettings) as Record<string, string> | undefined,
+   };
+ }
+ 
+diff --git a/src/renderer/components/AcpTranscript/AcpTranscript.test.tsx b/src/renderer/components/AcpTranscript/AcpTranscript.test.tsx
+index 782f746..c8de34b 100644
+--- a/src/renderer/components/AcpTranscript/AcpTranscript.test.tsx
++++ b/src/renderer/components/AcpTranscript/AcpTranscript.test.tsx
+@@ -90,6 +90,42 @@ describe('AcpTranscript', () => {
+     cleanup(root, container);
+   });
+ 
++  it('shows the provider-retry wait-state in place of the generic status label', () => {
++    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
++    const { container, root } = render(
++      <AcpTranscript
++        turns={turns}
++        activeTurnId="a1"
++        waitState={{
++          kind: 'provider_retry',
++          failedAttempt: 2,
++          nextAttempt: 3,
++          maxAttempts: 10,
++          delayMs: 12_000,
++        }}
++      />,
++    );
++    const indicator = container.querySelector('[data-testid="activity-indicator"]');
++    expect(indicator?.textContent).toContain('Retrying provider (attempt 3/10)');
++    expect(indicator?.textContent).toContain('12s');
++    cleanup(root, container);
++  });
++
++  it('shows the first-token wait-state label', () => {
++    const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
++    const { container, root } = render(
++      <AcpTranscript
++        turns={turns}
++        activeTurnId="a1"
++        waitState={{ kind: 'awaiting_first_token' }}
++      />,
++    );
++    expect(container.querySelector('[data-testid="activity-indicator"]')?.textContent).toContain(
++      'Waiting on provider',
++    );
++    cleanup(root, container);
++  });
++
+   it('shows a stopping indicator when cancel is requested', () => {
+     const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
+     const { container, root } = render(
+diff --git a/src/renderer/components/AcpTranscript/AcpTranscript.tsx b/src/renderer/components/AcpTranscript/AcpTranscript.tsx
+index 46c2e9a..47f5688 100644
+--- a/src/renderer/components/AcpTranscript/AcpTranscript.tsx
++++ b/src/renderer/components/AcpTranscript/AcpTranscript.tsx
+@@ -1,5 +1,5 @@
+ import { useRef, useEffect } from 'react';
+-import type { AcpTurn, AcpSessionState } from '@shared/acpTypes';
++import type { AcpTurn, AcpSessionState, AcpWaitState } from '@shared/acpTypes';
+ import { useAcpSessionStore } from '../../stores/acpSessionStore';
+ import { AssistantTurn } from './AssistantTurn';
+ import { UserTurn } from './UserTurn';
+@@ -12,6 +12,7 @@ interface AcpTranscriptProps {
+   agent?: string;
+   sessionId?: string;
+   pendingPermission?: AcpSessionState['pendingPermission'];
++  waitState?: AcpWaitState;
+   cancelRequested?: boolean;
+ }
+ 
+@@ -21,6 +22,7 @@ export function AcpTranscript({
+   agent,
+   sessionId,
+   pendingPermission: pendingPermissionProp,
++  waitState: waitStateProp,
+   cancelRequested,
+ }: AcpTranscriptProps) {
+   const bottomRef = useRef<HTMLDivElement>(null);
+@@ -37,6 +39,10 @@ export function AcpTranscript({
+     derivedAgent ? s.sessions.get(derivedAgent)?.pendingPermission : undefined,
+   );
+   const pendingPermission = pendingPermissionProp ?? storePermission;
++  const storeWaitState = useAcpSessionStore((s) =>
++    derivedAgent ? s.sessions.get(derivedAgent)?.waitState : undefined,
++  );
++  const waitState = waitStateProp ?? storeWaitState;
+ 
+   const handlePermissionResponse = (optionId: string) => {
+     if (!derivedAgent || !derivedSessionId || !pendingPermission) return;
+@@ -77,7 +83,7 @@ export function AcpTranscript({
+       )}
+ 
+       {activeTurn && activeTurn.status !== 'done' && activeTurn.status !== 'error' && (
+-        <ActivityIndicator status={activeTurn.status} />
++        <ActivityIndicator status={activeTurn.status} waitState={waitState} />
+       )}
+ 
+       {cancelRequested && (
+diff --git a/src/renderer/components/AcpTranscript/ActivityIndicator.tsx b/src/renderer/components/AcpTranscript/ActivityIndicator.tsx
+index 752e362..0c228cd 100644
+--- a/src/renderer/components/AcpTranscript/ActivityIndicator.tsx
++++ b/src/renderer/components/AcpTranscript/ActivityIndicator.tsx
+@@ -1,11 +1,36 @@
+ import { Loader2 } from 'lucide-react';
++import type { AcpWaitState } from '@shared/acpTypes';
+ 
+ interface ActivityIndicatorProps {
+   status: 'thinking' | 'tool' | 'answering' | string;
++  waitState?: AcpWaitState;
+ }
+ 
+-export function ActivityIndicator({ status }: ActivityIndicatorProps) {
++/**
++ * Human label for a runtime wait-state frame. Keep it compact — it renders
++ * inline next to the spinner in place of the generic status label, so the
++ * user sees what the runtime is actually waiting on instead of a timer
++ * guessing hang-vs-slow.
++ */
++function waitStateLabel(waitState: AcpWaitState): string {
++  if (waitState.kind === 'provider_retry') {
++    const attempt = waitState.nextAttempt ?? waitState.failedAttempt;
++    const base =
++      attempt !== undefined && waitState.maxAttempts !== undefined
++        ? `Retrying provider (attempt ${attempt}/${waitState.maxAttempts})`
++        : 'Retrying provider';
++    return waitState.delayMs !== undefined
++      ? `${base} — next attempt in ${Math.max(1, Math.ceil(waitState.delayMs / 1000))}s`
++      : base;
++  }
++  if (waitState.kind === 'awaiting_first_token') return 'Waiting on provider';
++  // Unknown/new kinds from newer runtimes degrade to a plain wait label.
++  return 'Waiting';
++}
++
++export function ActivityIndicator({ status, waitState }: ActivityIndicatorProps) {
+   const label =
++    waitState ? waitStateLabel(waitState) :
+     status === 'thinking' ? 'Thinking' :
+     status === 'tool' ? 'Using tool' :
+     status === 'answering' ? 'Answering' :
+diff --git a/src/renderer/stores/acpSessionStore.test.ts b/src/renderer/stores/acpSessionStore.test.ts
+index cfe6d61..f8f4847 100644
+--- a/src/renderer/stores/acpSessionStore.test.ts
++++ b/src/renderer/stores/acpSessionStore.test.ts
+@@ -160,6 +160,80 @@ describe('acpSessionStore', () => {
+     expect(session?.activeTurnId).toBeNull();
+   });
+ 
++  it('records wait_state and clears it when content arrives', () => {
++    const store = useAcpSessionStore.getState();
++    store.startAssistantTurn('NextPert', 's1');
++    store.applyEvent(
++      makeUpdate('NextPert', {
++        sessionUpdate: 'wait_state',
++        sessionId: 's1',
++        waitState: {
++          kind: 'provider_retry',
++          failedAttempt: 2,
++          nextAttempt: 3,
++          maxAttempts: 10,
++          delayMs: 12_000,
++          errorName: 'APITimeoutError',
++          statusCode: 408,
++        },
++      }),
++    );
++
++    let session = store.getSession('NextPert');
++    expect(session?.waitState).toMatchObject({
++      kind: 'provider_retry',
++      nextAttempt: 3,
++      maxAttempts: 10,
++      delayMs: 12_000,
++    });
++
++    // The retry succeeded and content is streaming again — the wait is over.
++    store.applyEvent(
++      makeUpdate('NextPert', {
++        sessionUpdate: 'agent_message_chunk',
++        sessionId: 's1',
++        content: { type: 'content', content: { type: 'text', text: 'Recovered.' } },
++      }),
++    );
++    session = store.getSession('NextPert');
++    expect(session?.waitState).toBeUndefined();
++  });
++
++  it('clears wait_state on turn_complete', () => {
++    const store = useAcpSessionStore.getState();
++    store.startAssistantTurn('NextPert', 's1');
++    store.applyEvent(
++      makeUpdate('NextPert', {
++        sessionUpdate: 'wait_state',
++        sessionId: 's1',
++        waitState: { kind: 'awaiting_first_token' },
++      }),
++    );
++    store.applyEvent(
++      makeUpdate('NextPert', {
++        sessionUpdate: 'turn_complete',
++        sessionId: 's1',
++        stopReason: 'end_turn',
++      }),
++    );
++
++    expect(store.getSession('NextPert')?.waitState).toBeUndefined();
++  });
++
++  it('ignores a wait_state update with a missing kind', () => {
++    const store = useAcpSessionStore.getState();
++    store.startAssistantTurn('NextPert', 's1');
++    store.applyEvent(
++      makeUpdate('NextPert', {
++        sessionUpdate: 'wait_state',
++        sessionId: 's1',
++        waitState: { kind: '' },
++      }),
++    );
++
++    expect(store.getSession('NextPert')?.waitState).toBeUndefined();
++  });
++
+   it('marks in-progress tools as completed on turn_complete', () => {
+     const store = useAcpSessionStore.getState();
+     store.startAssistantTurn('NextPert', 's1');
+diff --git a/src/renderer/stores/acpSessionStore.ts b/src/renderer/stores/acpSessionStore.ts
+index 625f8bd..b0fe6ab 100644
+--- a/src/renderer/stores/acpSessionStore.ts
++++ b/src/renderer/stores/acpSessionStore.ts
+@@ -223,11 +223,33 @@ function ensureAssistantTurn(session: AcpSessionState, agent: string, sessionId:
+   return { ...session, turns: [...session.turns, turn], activeTurnId: turn.id };
+ }
+ 
++/**
++ * Updates that prove the runtime is producing output again (or is now
++ * blocked on the user), ending any recorded provider wait-state. Mirrors
++ * the meaningful-activity set in AcpRuntimeManager, minus `plan` (not
++ * handled by this store) and `wait_state` itself.
++ */
++const WAIT_STATE_CLEARING_UPDATES = new Set([
++  'agent_thought_chunk',
++  'agent_message_chunk',
++  'tool_call',
++  'tool_call_update',
++  'permission_request',
++  'turn_complete',
++  'error',
++]);
++
+ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | null | undefined, agent: string): AcpSessionState {
+   if (!update || typeof update !== 'object') {
+     console.warn(`[acpSessionStore] Ignoring malformed update for ${agent}: update is null or not an object`);
+     return session;
+   }
++  // Any content-bearing or terminal update means the runtime is producing
++  // again (or now waiting on the user): the recorded wait-state — provider
++  // first-token latency or retry backoff — is over.
++  if (WAIT_STATE_CLEARING_UPDATES.has(update.sessionUpdate)) {
++    session = { ...session, waitState: undefined };
++  }
+   switch (update.sessionUpdate) {
+     case 'initialized': {
+       return {
+@@ -351,6 +373,14 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
+       };
+     }
+ 
++    case 'wait_state': {
++      if (!update.waitState || typeof update.waitState.kind !== 'string' || update.waitState.kind === '') {
++        console.warn(`[acpSessionStore] Ignoring wait_state for ${agent}: missing or invalid kind`);
++        return session;
++      }
++      return { ...session, waitState: update.waitState };
++    }
++
+     case 'turn_complete': {
+       if (!session.activeTurnId) return session;
+       const turns = session.turns.map((turn) =>
+diff --git a/src/shared/acpTypes.ts b/src/shared/acpTypes.ts
+index 6b7eeac..89b9ee0 100644
+--- a/src/shared/acpTypes.ts
++++ b/src/shared/acpTypes.ts
+@@ -74,6 +74,28 @@ export interface AcpAvailableCommand {
+   description: string;
+ }
+ 
++/**
++ * What the runtime is currently waiting on, forwarded from the adapter's
++ * custom `wait_state` session update (kimi-code acp-adapter). `kind` is a
++ * plain string so newer runtimes can add kinds without breaking older
++ * clients; known values today:
++ *
++ *  - `'awaiting_first_token'`: a step's LLM request is in flight but no
++ *    assistant output has streamed yet (provider latency).
++ *  - `'provider_retry'`: a provider request failed retryably and the
++ *    runtime is backing off before the next attempt; the attempt/delay
++ *    fields are only present for this kind.
++ */
++export interface AcpWaitState {
++  kind: string;
++  failedAttempt?: number;
++  nextAttempt?: number;
++  maxAttempts?: number;
++  delayMs?: number;
++  errorName?: string;
++  statusCode?: number;
++}
++
+ export type AcpSessionUpdate =
+   | { sessionUpdate: 'initialized'; sessionId: string; capabilities: AcpAgentCapabilities; agentInfo: AcpAgentInfo }
+   | { sessionUpdate: 'available_commands_update'; sessionId: string; availableCommands?: AcpAvailableCommand[] }
+@@ -82,6 +104,7 @@ export type AcpSessionUpdate =
+   | { sessionUpdate: 'tool_call'; sessionId: string; toolCall: AcpToolCall }
+   | { sessionUpdate: 'tool_call_update'; sessionId: string; toolCall: AcpToolCall }
+   | { sessionUpdate: 'permission_request'; sessionId: string; requestId: number | string; options: AcpPermissionOption[]; toolCall: AcpToolCall }
++  | { sessionUpdate: 'wait_state'; sessionId: string; waitState: AcpWaitState }
+   | { sessionUpdate: 'turn_complete'; sessionId: string; stopReason: string }
+   | { sessionUpdate: 'error'; sessionId?: string; error: string }
+   | { sessionUpdate: 'stderr'; sessionId?: string; text: string };
+@@ -166,6 +189,12 @@ export interface AcpSessionState {
+   availableCommands?: AcpAvailableCommand[];
+   turns: AcpTurn[];
+   activeTurnId: string | null;
++  /**
++   * Current runtime wait-state (provider latency / retry backoff), set by
++   * `wait_state` updates and cleared by the next content-bearing update or
++   * turn end. Absent on older runtimes that never emit wait-state frames.
++   */
++  waitState?: AcpWaitState;
+   pendingPermission?: {
+     requestId: number | string;
+     options: AcpPermissionOption[];
+diff --git a/src/shared/types.ts b/src/shared/types.ts
+index f896b0d..5187c7c 100644
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
+@@ -326,6 +326,12 @@ export interface AppSettings {
+   instantSendPastedImages: boolean;
+   // Feature flag to enable image paste in terminal composer (default ON)
+   enableTerminalImagePaste: boolean;
++  // Last live ACP session id per agent+workDir (`"AgentName::/work/dir"`),
++  // persisted so an app crash/restart can resume the prior runtime session
++  // via session/resume instead of wiping the agent's working context with a
++  // fresh session/new. Unknown/expired ids fall back to session/new at
++  // resume time and the entry self-heals with the new id.
++  acpSessionIds?: Record<string, string>;
+ }
+ 
+ // IPC channel names

@@ -194,6 +194,23 @@ export function UnifiedTerminal({
     () => allLines.filter((l) => l.agent === agentName),
     [allLines, agentName],
   );
+  // Live screen rows from the main-process screen model (frame-backed PTY
+  // terminals only). Rendered after the normalized history; repaints replace
+  // rows in place instead of appending, which is what makes resize redraws
+  // and spinner ticks render correctly.
+  const frameScreen = useAgentOutputStore((s) => (terminalId ? s.frames[terminalId] : undefined));
+  const displayLines = useMemo<AgentOutputLine[]>(() => {
+    if (!frameScreen || frameScreen.length === 0) return filteredLines;
+    const screenLines: AgentOutputLine[] = frameScreen.map((line, i) => ({
+      id: `frame-${terminalId}-${i}`,
+      agent: agentName,
+      terminal_id: terminalId ?? '',
+      line,
+      ts: '',
+      source: 'agent' as const,
+    }));
+    return [...filteredLines, ...screenLines];
+  }, [filteredLines, frameScreen, agentName, terminalId]);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -412,12 +429,12 @@ export function UnifiedTerminal({
 
   // Virtualize the line list. Dynamic row heights handle wrapped lines.
   const virtualizer = useVirtualizer({
-    count: filteredLines.length,
+    count: displayLines.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 24,
     measureElement: (el) => el.getBoundingClientRect().height,
     overscan: 5,
-    getItemKey: (index) => filteredLines[index]?.id ?? `fallback-${index}`,
+    getItemKey: (index) => displayLines[index]?.id ?? `fallback-${index}`,
   });
 
   const totalSize = virtualizer.getTotalSize();
@@ -443,7 +460,7 @@ export function UnifiedTerminal({
       if (!el) return;
       const nearBottom = userScrolledRef.current ? isNearBottom() : true;
       if (nearBottom) {
-        virtualizer.scrollToIndex(filteredLines.length - 1, { align: 'end', behavior: 'auto' });
+        virtualizer.scrollToIndex(displayLines.length - 1, { align: 'end', behavior: 'auto' });
         setShowNewOutput(false);
         userScrolledRef.current = false;
       } else {
@@ -456,7 +473,7 @@ export function UnifiedTerminal({
         rafScrollRef.current = null;
       }
     };
-  }, [filteredLines.length, paused, virtualizer, isNearBottom]);
+  }, [displayLines.length, paused, virtualizer, isNearBottom]);
 
   // Track scroll position to pause/resume automatically.
   const handleScroll = useCallback(() => {
@@ -760,6 +777,22 @@ export function UnifiedTerminal({
     [getSelectionText, handleCopy, isAcpMode],
   );
 
+  // Human interrupt (WO 11635, Claude-Code-parity): HALT FAST — cancel the
+  // in-flight turn immediately. The queue is PRESERVED, never purged: the
+  // agent reads everything the human typed (in order), attends to it, then
+  // resumes the prior work in order. Purge does not exist on the human path.
+  // Idle guard (QAPert 11611): with no turn in flight there is nothing to
+  // cancel. Returns whether an interrupt actually fired.
+  const interruptActiveTurn = useCallback((): boolean => {
+    const activeTurnId = useAcpSessionStore.getState().getSession(agentName)?.activeTurnId;
+    if (!activeTurnId) return false;
+    const sessionId = acpSession?.sessionId ?? '';
+    setCancelRequested(true);
+    window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
+    setInterruptFlash('Interrupted — stopping current turn…');
+    return true;
+  }, [acpSession?.sessionId, agentName]);
+
   const sendInputLine = useCallback(async () => {
     const tid = terminalIdRef.current;
     const input = inputRef.current;
@@ -790,6 +823,16 @@ export function UnifiedTerminal({
     }
 
     if (isAcpMode) {
+      // A bare interrupt typed mid-turn interrupts (WO 11635): the turn
+      // cancels immediately; the queue is PRESERVED and read afterward.
+      // Nothing queues silently.
+      if (acpActiveTurn && isInterruptText(value)) {
+        interruptActiveTurn();
+        input.value = '';
+        pastedBlockRef.current = null;
+        return;
+      }
+
       // A paste may still be encoding (FileReader + canvas are async). Wait for
       // in-flight staging so a quick Enter can't silently send text-only
       // without the image (WO 11438).
@@ -820,17 +863,15 @@ export function UnifiedTerminal({
       }
 
       setCancelRequested(false);
-      // If a previous assistant turn is still active, stop it before the user
-      // starts a new turn. Otherwise the old turn's spinner stays live forever
-      // when the new assistant turn takes over activeTurnId. We intentionally
-      // do NOT mark this as a send error; the user interrupted an in-progress
-      // response by sending a follow-up message.
-      if (useAcpSessionStore.getState().getSession(agentName)?.activeTurnId) {
-        useAcpSessionStore.getState().stopActiveTurn(agentName, 'interrupted');
-      }
 
       const sessionId = acpSession?.sessionId ?? '';
       if (!value && staged.length === 0) return;
+
+      // Slice B (WO 11585): a message sent while a turn is in flight is
+      // STEERED into the running turn by the adapter — it must NOT stop the
+      // active assistant turn (the old 'interrupted' kill) nor open a second
+      // one. Only open a new assistant turn when idle.
+      const hasActiveTurn = !!useAcpSessionStore.getState().getSession(agentName)?.activeTurnId;
 
       const storeImages: StagedImageInput[] = staged.map((img) => ({
         id: img.id,
@@ -839,7 +880,9 @@ export function UnifiedTerminal({
         data: base64ToArrayBuffer(stripDataUrlPrefix(img.dataUrl)),
       }));
       useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value, storeImages);
-      useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
+      if (!hasActiveTurn) {
+        useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
+      }
 
       // Wire payload carries base64 without the data-URL prefix, matching the
       // adapter's { type: 'image', data, mimeType } content-block contract.
@@ -876,7 +919,7 @@ export function UnifiedTerminal({
     window.electronAPI.writeTerminal(tid, value + '\r');
     inputHistory.commit(value);
     input.value = '';
-  }, [isAcpMode, acpSession, agentName, inputHistory, findBlockRange, setCancelRequested, clearStagedImages]);
+  }, [isAcpMode, acpSession, agentName, inputHistory, findBlockRange, setCancelRequested, clearStagedImages, interruptActiveTurn]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -886,6 +929,19 @@ export function UnifiedTerminal({
       if (e.key === 'Enter') {
         e.preventDefault();
         sendInputLine();
+        return;
+      }
+
+      // Ctrl+S (native kimi-code parity, WO 11647): flush the current input
+      // into the running turn as steer — the "listen to me NOW" key, mashable.
+      // Guarded like native: no-op when no turn is streaming; steer-flushed
+      // input is cleared from the composer. Esc stays the halt; Ctrl+S is the
+      // distinct attend key.
+      if (e.key.toLowerCase() === 's' && e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (isAcpMode && acpActiveTurn) {
+          e.preventDefault();
+          sendInputLine();
+        }
         return;
       }
 
@@ -958,12 +1014,12 @@ export function UnifiedTerminal({
         if (pastedBlockRef.current) {
           removeBlock(input);
         } else if (isAcpMode) {
-          const sessionId = acpSession?.sessionId ?? '';
-          setCancelRequested(true);
-          window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
+          // Escape interrupts (WO 11635): cancel immediately, queue
+          // preserved. The flash lives inside interruptActiveTurn and only
+          // fires when a turn actually died (idle Escape just clears input).
+          interruptActiveTurn();
           input.value = '';
           pastedBlockRef.current = null;
-          setInterruptFlash('Interrupted — stopping current turn…');
         } else if (tid) {
           if (effectiveProvider === 'kimi') {
             window.electronAPI.writeTerminal(tid, '\u0003');
@@ -988,9 +1044,8 @@ export function UnifiedTerminal({
         if (input.selectionStart === input.selectionEnd) {
           e.preventDefault();
           if (isAcpMode) {
-            const sessionId = acpSession?.sessionId ?? '';
-            setCancelRequested(true);
-            window.electronAPI.sendAcpCancel({ agent: agentName, sessionId });
+            // Ctrl+C interrupts (WO 11635): cancel immediately, queue preserved.
+            interruptActiveTurn();
           } else if (tid) {
             window.electronAPI.writeTerminal(tid, '\u0003');
           }
@@ -1017,7 +1072,7 @@ export function UnifiedTerminal({
         }
       }
     },
-    [sendInputLine, findBlockRange, removeBlock, isAcpMode, acpSession, agentName, inputHistory, effectiveProvider],
+    [sendInputLine, findBlockRange, removeBlock, isAcpMode, acpSession, agentName, inputHistory, effectiveProvider, interruptActiveTurn],
   );
 
   const handleInputPaste = useCallback(
@@ -1164,10 +1219,10 @@ export function UnifiedTerminal({
                 </div>
               )}
 
-              {filteredLines.length > 0 && (
+              {displayLines.length > 0 && (
                 <div style={{ height: totalSize, width: '100%', position: 'relative' }}>
                   {virtualItems.map((virtualItem) => {
-                    const line = filteredLines[virtualItem.index];
+                    const line = displayLines[virtualItem.index];
                     return (
                       <div
                         key={virtualItem.key}
@@ -1316,6 +1371,17 @@ interface TerminalLineProps {
 }
 
 const LIST_MARKER = /^(\s*)(?:[•\-*]|\d{1,2}\.)\s/;
+
+/** Bare interrupt words a human types to halt an in-flight turn (WO 11569). */
+const INTERRUPT_WORDS = new Set(['stop', 'wait', 'cancel', 'hold on']);
+
+/**
+ * True when the text is exactly an interrupt word (case/punctuation-insensitive)
+ * — the human's "stop" must trigger the cancel path, never queue silently.
+ */
+export function isInterruptText(value: string): boolean {
+  return INTERRUPT_WORDS.has(value.trim().toLowerCase().replace(/[.!\s]+$/, ''));
+}
 
 function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
   // Live thinking placeholders are updated in-place by the store and

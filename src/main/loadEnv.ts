@@ -10,7 +10,7 @@
  * the natural place a user or installer would drop configuration.
  *
  * Import this module FIRST in main/index.ts, before any module that reads
- * process.env at top level (e.g. ./vsql-cache-client).
+ * process.env at top level (e.g. ./env).
  */
 import { app } from 'electron';
 import path from 'path';

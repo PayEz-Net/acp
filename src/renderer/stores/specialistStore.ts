@@ -64,8 +64,6 @@ interface SpecialistStore {
   reorderRoster: (oldIndex: number, newIndex: number) => void;
 
   saveRosterOrder: (projectId: number) => Promise<boolean>;
-  addToProjectTeam: (projectId: number, agentId: number) => Promise<boolean>;
-  removeFromProjectTeam: (projectId: number, agentId: number) => Promise<boolean>;
 }
 
 export function isCanonical(agent: Pick<SpecialistAgent, 'isCanonical'>): boolean {
@@ -186,33 +184,6 @@ export const useSpecialistStore = create<SpecialistStore>((set, get) => ({
       return res.ok;
     } catch (err) {
       console.error('[Specialists] Failed to save roster order:', err);
-      return false;
-    }
-  },
-
-  addToProjectTeam: async (projectId, agentId) => {
-    if (!useAppStore.getState().backendAvailable) return false;
-    try {
-      const res = await acpRequest(`/v1/projects/${projectId}/team/${agentId}`, {
-        method: 'PUT',
-        body: { agent_id: agentId },
-      });
-      return res.ok;
-    } catch (err) {
-      console.error('[Specialists] Failed to add agent to project:', err);
-      return false;
-    }
-  },
-
-  removeFromProjectTeam: async (projectId, agentId) => {
-    if (!useAppStore.getState().backendAvailable) return false;
-    try {
-      const res = await acpRequest(`/v1/projects/${projectId}/team/${agentId}`, {
-        method: 'DELETE',
-      });
-      return res.ok;
-    } catch (err) {
-      console.error('[Specialists] Failed to remove agent from project:', err);
       return false;
     }
   },

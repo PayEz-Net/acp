@@ -1,0 +1,641 @@
+diff --git a/.changeset/acp-provider-wait-state.md b/.changeset/acp-provider-wait-state.md
+new file mode 100644
+index 000000000..f7abc12b0
+--- /dev/null
++++ b/.changeset/acp-provider-wait-state.md
+@@ -0,0 +1,5 @@
++---
++"@moonshot-ai/kimi-code": patch
++---
++
++Report provider wait states over ACP session updates (awaiting first token; retry attempt N/M with the backoff delay), and give provider requests an explicit 120s pre-headers timeout with SDK-internal retries disabled so a hung attempt fails fast into the visible retry loop instead of sitting against the 10-minute SDK default.
+diff --git a/packages/acp-adapter/src/events-map.ts b/packages/acp-adapter/src/events-map.ts
+index 0448f2eb9..7fa81a0c8 100644
+--- a/packages/acp-adapter/src/events-map.ts
++++ b/packages/acp-adapter/src/events-map.ts
+@@ -16,6 +16,7 @@ import type {
+   ToolProgressEvent,
+   ToolResultEvent,
+   TurnEndReason,
++  TurnStepRetryingEvent,
+ } from '@moonshot-ai/kimi-code-sdk';
+ 
+ import { displayBlockToAcpContent, toolResultToAcpContent } from './convert';
+@@ -81,6 +82,96 @@ export function turnEndReasonToStopReason(
+   }
+ }
+ 
++/**
++ * What the runtime is currently waiting on. Surfaced to clients so a
++ * silent-but-healthy turn is distinguishable from a wedged one without
++ * resorting to idle timers:
++ *
++ *  - `'awaiting_first_token'`: a step's LLM request is in flight but no
++ *    assistant output has streamed yet (provider latency). Emitted once
++ *    per `turn.step.started`; implicitly cleared by the first content
++ *    notification of the step.
++ *  - `'provider_retry'`: a provider request failed with a retryable
++ *    error and `chatWithRetry` is backing off before the next attempt.
++ *    Carries the attempt counters and the chosen delay so the client
++ *    can render "attempt 3/10, next retry in 12s".
++ */
++export type WaitStateKind = 'awaiting_first_token' | 'provider_retry';
++
++/**
++ * Flat payload carried by the `wait_state` session update. Retry fields
++ * are only present for {@link WaitStateKind} `'provider_retry'`.
++ */
++export interface WaitStatePayload {
++  readonly kind: WaitStateKind;
++  readonly failedAttempt?: number;
++  readonly nextAttempt?: number;
++  readonly maxAttempts?: number;
++  readonly delayMs?: number;
++  readonly errorName?: string;
++  readonly errorMessage?: string;
++  readonly statusCode?: number;
++}
++
++/**
++ * Build a `wait_state` `session/update` notification.
++ *
++ * `'wait_state'` is NOT one of the thirteen variants in the ACP
++ * `SessionUpdate` union — the union is closed and has no wait/report
++ * variant. `_meta` was considered and rejected: `SessionNotification`
++ * still requires a valid `update` variant, so a meta-only design would
++ * have to piggyback a fake chunk that conforming clients would render.
++ * A custom variant is honest on the wire (`sessionUpdate` is a plain
++ * string in JSON), clients that do not recognize it ignore it (their
++ * behaviour is unchanged from today), and the acp-desktop client
++ * consumes it explicitly. The `as unknown as` cast is the price of the
++ * closed union — the runtime JSON is exactly the flat shape declared in
++ * {@link WaitStatePayload} plus the discriminator.
++ */
++export function waitStateToSessionUpdate(
++  sessionId: string,
++  payload: WaitStatePayload,
++): SessionNotification {
++  return {
++    sessionId,
++    update: {
++      sessionUpdate: 'wait_state',
++      ...payload,
++    } as unknown as SessionNotification['update'],
++  };
++}
++
++/**
++ * One-shot wait-state frame emitted when a step begins: the runtime is
++ * waiting on the provider's first token. Cleared implicitly on the
++ * client when the first content notification of the step arrives.
++ */
++export function awaitingFirstTokenToSessionUpdate(sessionId: string): SessionNotification {
++  return waitStateToSessionUpdate(sessionId, { kind: 'awaiting_first_token' });
++}
++
++/**
++ * Map an SDK `turn.step.retrying` event to a `wait_state` session
++ * update. The retry loop (`chatWithRetry`) dispatches this after a
++ * failed attempt, before sleeping `delayMs` — exactly the window that
++ * used to look like a hang to clients.
++ */
++export function stepRetryingToSessionUpdate(
++  sessionId: string,
++  event: TurnStepRetryingEvent,
++): SessionNotification {
++  return waitStateToSessionUpdate(sessionId, {
++    kind: 'provider_retry',
++    failedAttempt: event.failedAttempt,
++    nextAttempt: event.nextAttempt,
++    maxAttempts: event.maxAttempts,
++    delayMs: event.delayMs,
++    errorName: event.errorName,
++    errorMessage: event.errorMessage,
++    statusCode: event.statusCode,
++  });
++}
++
+ /**
+  * Build the ACP `toolCallId` for a wire-level tool call.
+  *
+diff --git a/packages/acp-adapter/src/session.ts b/packages/acp-adapter/src/session.ts
+index 0121bde4e..19f5338d2 100644
+--- a/packages/acp-adapter/src/session.ts
++++ b/packages/acp-adapter/src/session.ts
+@@ -43,8 +43,10 @@ import { acpBlocksToPromptParts, compressPromptImageParts } from './convert';
+ import {
+   acpToolCallId,
+   assistantDeltaToSessionUpdate,
++  awaitingFirstTokenToSessionUpdate,
+   configOptionUpdateNotification,
+   planFromDisplayBlock,
++  stepRetryingToSessionUpdate,
+   stringifyArgs,
+   thinkingDeltaToSessionUpdate,
+   toolCallDeltaToSessionUpdate,
+@@ -1030,6 +1032,40 @@ export class AcpSession {
+             });
+           return;
+         }
++        if (event.type === 'turn.step.started') {
++          if (!isFromMainAgent(event)) return;
++          // Pre-first-token wait-state: the step's LLM request is in
++          // flight but nothing has streamed yet. One frame per step;
++          // the client clears it when the first content notification
++          // of the step arrives. Fire-and-forget under the same
++          // idle-stream discipline as the assistant deltas.
++          conn
++            .sessionUpdate(awaitingFirstTokenToSessionUpdate(sessionId))
++            .catch((err) => {
++              log.warn('acp: failed to push wait_state (first token)', {
++                sessionId,
++                error: err instanceof Error ? err.message : String(err),
++              });
++            });
++          return;
++        }
++        if (event.type === 'turn.step.retrying') {
++          if (!isFromMainAgent(event)) return;
++          // A provider attempt failed retryably and chatWithRetry is
++          // backing off before the next one — the exact window that
++          // used to look like a hang. Forward the attempt counters and
++          // delay so clients can show "waiting on provider — attempt
++          // 3/10, next retry in 12s" instead of guessing.
++          conn
++            .sessionUpdate(stepRetryingToSessionUpdate(sessionId, event))
++            .catch((err) => {
++              log.warn('acp: failed to push wait_state (retry)', {
++                sessionId,
++                error: err instanceof Error ? err.message : String(err),
++              });
++            });
++          return;
++        }
+         if (event.type === 'tool.call.started') {
+           if (!isFromMainAgent(event)) return;
+           // Seed the accumulator with the **stringified initial args**.
+diff --git a/packages/acp-adapter/test/session-prompt.test.ts b/packages/acp-adapter/test/session-prompt.test.ts
+index 048fd57f0..24d8f78ca 100644
+--- a/packages/acp-adapter/test/session-prompt.test.ts
++++ b/packages/acp-adapter/test/session-prompt.test.ts
+@@ -61,6 +61,58 @@ function makeInMemoryStreamPair(): {
+   return { agentStream, clientStream };
+ }
+ 
++/**
++ * Stream pair with a byte-level tap on the agent→client direction.
++ *
++ * The typed `ClientSideConnection` validates every incoming
++ * `session/update` against the closed `zSessionUpdate` union and drops
++ * unknown variants — including our custom `wait_state` frames — before
++ * the `Client` implementation ever sees them. That IS the intended
++ * degradation for third-party clients, but it makes the typed client
++ * useless for asserting on `wait_state`. The tap records the raw ndjson
++ * so tests can verify exactly what the adapter put on the wire.
++ */
++function makeTappedStreamPair(): {
++  agentStream: ReturnType<typeof ndJsonStream>;
++  clientStream: ReturnType<typeof ndJsonStream>;
++  wireNotifications: () => Array<{ sessionId: string; update: Record<string, unknown> }>;
++} {
++  const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
++  const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
++  const chunks: Uint8Array[] = [];
++  const tap = new TransformStream<Uint8Array, Uint8Array>({
++    transform(chunk, controller) {
++      chunks.push(chunk);
++      controller.enqueue(chunk);
++    },
++  });
++  const agentStream = ndJsonStream(agentToClient.writable, clientToAgent.readable);
++  const clientStream = ndJsonStream(
++    clientToAgent.writable,
++    agentToClient.readable.pipeThrough(tap),
++  );
++  const wireNotifications = () => {
++    const total = chunks.reduce((n, c) => n + c.length, 0);
++    const merged = new Uint8Array(total);
++    let offset = 0;
++    for (const chunk of chunks) {
++      merged.set(chunk, offset);
++      offset += chunk.length;
++    }
++    return new TextDecoder()
++      .decode(merged)
++      .split('\n')
++      .filter((line) => line.trim().length > 0)
++      .map((line) => JSON.parse(line) as { method?: string; params?: unknown })
++      .filter((msg) => msg.method === 'session/update')
++      .map(
++        (msg) =>
++          msg.params as { sessionId: string; update: Record<string, unknown> },
++      );
++  };
++  return { agentStream, clientStream, wireNotifications };
++}
++
+ /**
+  * Construct a fake Session whose `prompt()` synchronously emits a
+  * pre-recorded sequence of `Event`s through any subscribed listener.
+@@ -403,4 +455,130 @@ describe('AcpServer session/prompt', () => {
+     expect(collecting.promptUpdates).toHaveLength(2);
+     expect(unsubscribeCount()).toBe(1);
+   });
++
++  it('emits wait_state for step start and provider retries, then clears into content', async () => {
++    const sessionId = 'sess-wait';
++    const { session, unsubscribeCount } = makeScriptedSession(sessionId, [
++      { type: 'turn.step.started', sessionId, agentId: 'main', turnId: 1, step: 1 } as Event,
++      {
++        type: 'turn.step.retrying',
++        sessionId,
++        agentId: 'main',
++        turnId: 1,
++        step: 1,
++        failedAttempt: 2,
++        nextAttempt: 3,
++        maxAttempts: 10,
++        delayMs: 12_000,
++        errorName: 'APITimeoutError',
++        errorMessage: 'Request timed out.',
++        statusCode: 408,
++      } as Event,
++      { type: 'assistant.delta', sessionId, agentId: 'main', turnId: 1, delta: 'ok' } as Event,
++      { type: 'turn.ended', sessionId, agentId: 'main', turnId: 1, reason: 'completed' } as Event,
++    ]);
++    const harness = {
++      auth: { status: async () => AUTHED_STATUS },
++      createSession: async () => session,
++    } as unknown as KimiHarness;
++
++    // Assert on the raw wire: the typed ClientSideConnection drops
++    // unknown sessionUpdate variants (zod union) before the Client sees
++    // them — see makeTappedStreamPair.
++    const { agentStream, clientStream, wireNotifications } = makeTappedStreamPair();
++    new AgentSideConnection((c) => new AcpServer(harness, c), agentStream);
++    const collecting = new CollectingClient();
++    const client = new ClientSideConnection(() => collecting, clientStream);
++
++    await client.newSession({ cwd: '/tmp/x', mcpServers: [] });
++
++    const response = await client.prompt({
++      sessionId,
++      prompt: [textBlock('hi')],
++    });
++
++    expect(response.stopReason).toBe('end_turn');
++    await new Promise((resolve) => setTimeout(resolve, 20));
++
++    const wire = wireNotifications().filter(
++      (n) => n.update.sessionUpdate !== 'available_commands_update',
++    );
++    expect(wire).toHaveLength(3);
++    for (const note of wire) {
++      expect(note.sessionId).toBe(sessionId);
++    }
++    expect(wire[0]?.update).toMatchObject({
++      sessionUpdate: 'wait_state',
++      kind: 'awaiting_first_token',
++    });
++    expect(wire[1]?.update).toMatchObject({
++      sessionUpdate: 'wait_state',
++      kind: 'provider_retry',
++      failedAttempt: 2,
++      nextAttempt: 3,
++      maxAttempts: 10,
++      delayMs: 12_000,
++      errorName: 'APITimeoutError',
++      errorMessage: 'Request timed out.',
++      statusCode: 408,
++    });
++    expect(wire[2]?.update).toMatchObject({
++      sessionUpdate: 'agent_message_chunk',
++      content: { type: 'text', text: 'ok' },
++    });
++    expect(unsubscribeCount()).toBe(1);
++  });
++
++  it('ignores wait-state events from subagents', async () => {
++    const sessionId = 'sess-wait-sub';
++    const { session, unsubscribeCount } = makeScriptedSession(sessionId, [
++      { type: 'turn.step.started', sessionId, agentId: 'sub-1', turnId: 99, step: 1 } as Event,
++      {
++        type: 'turn.step.retrying',
++        sessionId,
++        agentId: 'sub-1',
++        turnId: 99,
++        step: 1,
++        failedAttempt: 1,
++        nextAttempt: 2,
++        maxAttempts: 10,
++        delayMs: 500,
++        errorName: 'APITimeoutError',
++        errorMessage: 'Request timed out.',
++      } as Event,
++      { type: 'assistant.delta', sessionId, agentId: 'main', turnId: 1, delta: 'ok' } as Event,
++      { type: 'turn.ended', sessionId, agentId: 'main', turnId: 1, reason: 'completed' } as Event,
++    ]);
++    const harness = {
++      auth: { status: async () => AUTHED_STATUS },
++      createSession: async () => session,
++    } as unknown as KimiHarness;
++
++    const { agentStream, clientStream, wireNotifications } = makeTappedStreamPair();
++    new AgentSideConnection((c) => new AcpServer(harness, c), agentStream);
++    const collecting = new CollectingClient();
++    const client = new ClientSideConnection(() => collecting, clientStream);
++
++    await client.newSession({ cwd: '/tmp/x', mcpServers: [] });
++
++    const response = await client.prompt({
++      sessionId,
++      prompt: [textBlock('hi')],
++    });
++
++    expect(response.stopReason).toBe('end_turn');
++    await new Promise((resolve) => setTimeout(resolve, 20));
++
++    // Only the main-agent assistant chunk reaches the wire — the
++    // subagent's step/retry frames must not surface as wait_state.
++    const wire = wireNotifications().filter(
++      (n) => n.update.sessionUpdate !== 'available_commands_update',
++    );
++    expect(wire).toHaveLength(1);
++    expect(wire[0]?.update).toMatchObject({
++      sessionUpdate: 'agent_message_chunk',
++      content: { type: 'text', text: 'ok' },
++    });
++    expect(unsubscribeCount()).toBe(1);
++  });
+ });
+diff --git a/packages/kosong/src/providers/anthropic.ts b/packages/kosong/src/providers/anthropic.ts
+index 43e4d7ca8..92b452623 100644
+--- a/packages/kosong/src/providers/anthropic.ts
++++ b/packages/kosong/src/providers/anthropic.ts
+@@ -51,6 +51,10 @@ import {
+ } from './anthropic-profile';
+ import { mergeConsecutiveUserMessages } from './merge-user-messages';
+ import { mergeRequestHeaders, resolveAuthBackedClient } from './request-auth';
++import {
++  PROVIDER_REQUEST_MAX_RETRIES,
++  PROVIDER_REQUEST_TIMEOUT_MS,
++} from './client-policy';
+ import {
+   normalizeToolCallIdsForProvider,
+   sanitizeToolCallId,
+@@ -1179,6 +1183,8 @@ export class AnthropicChatProvider implements ChatProvider {
+       authToken: null,
+       baseURL: this._baseUrl ?? null,
+       defaultHeaders: this._buildDefaultHeaders(apiKey),
++      timeout: PROVIDER_REQUEST_TIMEOUT_MS,
++      maxRetries: PROVIDER_REQUEST_MAX_RETRIES,
+     });
+   }
+ 
+diff --git a/packages/kosong/src/providers/client-policy.ts b/packages/kosong/src/providers/client-policy.ts
+new file mode 100644
+index 000000000..8372d84bd
+--- /dev/null
++++ b/packages/kosong/src/providers/client-policy.ts
+@@ -0,0 +1,25 @@
++/**
++ * Per-request HTTP policy applied to every provider SDK client.
++ *
++ * `PROVIDER_REQUEST_TIMEOUT_MS` — both SDKs default to a 10-minute
++ * per-request timeout, and their timers only cover the phase up to
++ * response headers: `fetchWithTimeout` clears its timer in `finally`
++ * when the fetch promise settles (verified in openai@6.34 `client.js`
++ * and @anthropic-ai/sdk@0.95.2 `client.js:562`), so streaming bodies
++ * are never subject to the client timeout. A hung pre-headers attempt
++ * therefore used to sit for up to 10 minutes before `chatWithRetry`
++ * even saw the failure — long enough to look dead to any client-side
++ * watchdog. 120s is comfortably above p99 time-to-first-byte for the
++ * supported providers and far below typical client idle budgets
++ * (acp-desktop's is 300s), so a wedged attempt fails fast into the
++ * observable retry loop instead of sitting silently.
++ *
++ * `PROVIDER_REQUEST_MAX_RETRIES` — both SDKs retry internally (default
++ * 2 extra attempts) without emitting anything, stacking invisible waits
++ * on top of kosong's own `chatWithRetry` backoff. Zeroing SDK-level
++ * retries makes every retry flow through `chatWithRetry`, where it
++ * surfaces as a `step.retrying` event (and, over ACP, a `wait_state`
++ * frame) instead of silent delay.
++ */
++export const PROVIDER_REQUEST_TIMEOUT_MS = 120_000;
++export const PROVIDER_REQUEST_MAX_RETRIES = 0;
+diff --git a/packages/kosong/src/providers/kimi.ts b/packages/kosong/src/providers/kimi.ts
+index 0bd6a14eb..23435702c 100644
+--- a/packages/kosong/src/providers/kimi.ts
++++ b/packages/kosong/src/providers/kimi.ts
+@@ -36,6 +36,10 @@ import {
+   requireProviderApiKey,
+   resolveAuthBackedClient,
+ } from './request-auth';
++import {
++  PROVIDER_REQUEST_MAX_RETRIES,
++  PROVIDER_REQUEST_TIMEOUT_MS,
++} from './client-policy';
+ import {
+   normalizeToolCallIdsForProvider,
+   sanitizeToolCallId,
+@@ -429,6 +433,8 @@ export class KimiChatProvider implements ChatProvider {
+             apiKey: this._apiKey,
+             baseURL: this._baseUrl,
+             defaultHeaders: this._defaultHeaders,
++            timeout: PROVIDER_REQUEST_TIMEOUT_MS,
++            maxRetries: PROVIDER_REQUEST_MAX_RETRIES,
+           });
+   }
+ 
+@@ -626,6 +632,8 @@ export class KimiChatProvider implements ChatProvider {
+           apiKey: requireProviderApiKey('KimiChatProvider', a, this._apiKey),
+           baseURL: this._baseUrl,
+           defaultHeaders,
++          timeout: PROVIDER_REQUEST_TIMEOUT_MS,
++          maxRetries: PROVIDER_REQUEST_MAX_RETRIES,
+         });
+       },
+     );
+diff --git a/packages/kosong/src/providers/openai-legacy.ts b/packages/kosong/src/providers/openai-legacy.ts
+index 02c5e5f1a..330da7635 100644
+--- a/packages/kosong/src/providers/openai-legacy.ts
++++ b/packages/kosong/src/providers/openai-legacy.ts
+@@ -31,6 +31,10 @@ import {
+   convertChatCompletionStreamToolCall,
+   type BufferedChatCompletionToolCall,
+ } from './chat-completions-stream';
++import {
++  PROVIDER_REQUEST_MAX_RETRIES,
++  PROVIDER_REQUEST_TIMEOUT_MS,
++} from './client-policy';
+ import {
+   mergeRequestHeaders,
+   requireProviderApiKey,
+@@ -680,6 +684,8 @@ export class OpenAILegacyChatProvider implements ChatProvider {
+     const clientOpts: Record<string, unknown> = {
+       apiKey,
+       baseURL: this._baseUrl,
++      timeout: PROVIDER_REQUEST_TIMEOUT_MS,
++      maxRetries: PROVIDER_REQUEST_MAX_RETRIES,
+     };
+     const defaultHeaders = mergeRequestHeaders(this._defaultHeaders, auth?.headers);
+     if (defaultHeaders !== undefined) {
+diff --git a/packages/kosong/src/providers/openai-responses.ts b/packages/kosong/src/providers/openai-responses.ts
+index baf8666ab..be2a813ba 100644
+--- a/packages/kosong/src/providers/openai-responses.ts
++++ b/packages/kosong/src/providers/openai-responses.ts
+@@ -32,6 +32,10 @@ import {
+   requireProviderApiKey,
+   resolveAuthBackedClient,
+ } from './request-auth';
++import {
++  PROVIDER_REQUEST_MAX_RETRIES,
++  PROVIDER_REQUEST_TIMEOUT_MS,
++} from './client-policy';
+ import {
+   normalizeToolCallIdsForProvider,
+   sanitizeOpenAIResponsesCallId,
+@@ -1186,6 +1190,8 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
+     const clientOpts: Record<string, unknown> = {
+       apiKey,
+       baseURL: this._baseUrl,
++      timeout: PROVIDER_REQUEST_TIMEOUT_MS,
++      maxRetries: PROVIDER_REQUEST_MAX_RETRIES,
+     };
+     const defaultHeaders = mergeRequestHeaders(this._defaultHeaders, auth?.headers);
+     if (defaultHeaders !== undefined) {
+diff --git a/packages/kosong/test/anthropic.test.ts b/packages/kosong/test/anthropic.test.ts
+index 012aa701d..b924c0681 100644
+--- a/packages/kosong/test/anthropic.test.ts
++++ b/packages/kosong/test/anthropic.test.ts
+@@ -734,6 +734,21 @@ describe('withThinkingKeep (context_management)', () => {
+   );
+ });
+ 
++describe('AnthropicChatProvider SDK client policy', () => {
++  it('builds the SDK client with an explicit timeout and no SDK-level retries', () => {
++    const provider = createProvider();
++    const client = Reflect.get(provider, '_client') as {
++      timeout?: number;
++      maxRetries?: number;
++    };
++    // Pinned by providers/client-policy.ts: the timeout only bounds the
++    // pre-headers phase (streaming bodies are unaffected), and SDK-level
++    // retries stay off so every retry flows through chatWithRetry.
++    expect(client.timeout).toBe(120_000);
++    expect(client.maxRetries).toBe(0);
++  });
++});
++
+ describe('AnthropicChatProvider', () => {
+   it('does not read ANTHROPIC_API_KEY from process.env inside the adapter', () => {
+     const previousApiKey = process.env['ANTHROPIC_API_KEY'];
+diff --git a/packages/kosong/test/kimi.test.ts b/packages/kosong/test/kimi.test.ts
+index 12d898396..c513ebbfd 100644
+--- a/packages/kosong/test/kimi.test.ts
++++ b/packages/kosong/test/kimi.test.ts
+@@ -182,6 +182,21 @@ const REF_ENUM_ONLY_TOOL: Tool = {
+   },
+ };
+ 
++describe('KimiChatProvider SDK client policy', () => {
++  it('builds the SDK client with an explicit timeout and no SDK-level retries', () => {
++    const provider = createProvider();
++    const client = Reflect.get(provider, '_client') as {
++      timeout?: number;
++      maxRetries?: number;
++    };
++    // Pinned by providers/client-policy.ts: the timeout only bounds the
++    // pre-headers phase (streaming bodies are unaffected), and SDK-level
++    // retries stay off so every retry flows through chatWithRetry.
++    expect(client.timeout).toBe(120_000);
++    expect(client.maxRetries).toBe(0);
++  });
++});
++
+ describe('KimiChatProvider', () => {
+   describe('message conversion', () => {
+     it('simple user message with system prompt', async () => {
+diff --git a/packages/kosong/test/openai-common-errors.test.ts b/packages/kosong/test/openai-common-errors.test.ts
+index d2b1bf388..950da13cc 100644
+--- a/packages/kosong/test/openai-common-errors.test.ts
++++ b/packages/kosong/test/openai-common-errors.test.ts
+@@ -22,9 +22,13 @@ import {
+ } from 'openai';
+ import { describe, it, expect } from 'vitest';
+ describe('OpenAI client creation', () => {
+-  it('does not inject max_retries into OpenAI client', () => {
+-    // The OpenAI constructor is called with apiKey and baseURL only —
+-    // we verify that the provider does not set max_retries.
++  it('injects the shared request policy into the OpenAI client', () => {
++    // providers/client-policy.ts: an explicit pre-headers timeout (120s)
++    // fails hung attempts fast into the observable chatWithRetry loop,
++    // and SDK-level retries are disabled so every retry flows through
++    // chatWithRetry where it is observable. This test previously pinned
++    // the opposite policy ("does not inject max_retries"); the
++    // wait-state visibility work reversed it deliberately.
+     const provider = new OpenAILegacyChatProvider({
+       model: 'gpt-4.1',
+       apiKey: 'test-key',
+@@ -32,7 +36,8 @@ describe('OpenAI client creation', () => {
+     });
+ 
+     const client = (provider as any)._client as Record<string, unknown>;
+-    expect((client as unknown as Record<string, unknown>)['maxRetries']).not.toBe(0);
++    expect((client as Record<string, unknown>)['timeout']).toBe(120_000);
++    expect((client as Record<string, unknown>)['maxRetries']).toBe(0);
+   });
+ });
+ describe('convertOpenAIError: base APIError mapping', () => {
+diff --git a/packages/kosong/test/openai-legacy.test.ts b/packages/kosong/test/openai-legacy.test.ts
+index 915580eab..dd4e8950f 100644
+--- a/packages/kosong/test/openai-legacy.test.ts
++++ b/packages/kosong/test/openai-legacy.test.ts
+@@ -91,6 +91,21 @@ const MUL_TOOL: Tool = {
+   },
+ };
+ 
++describe('OpenAILegacyChatProvider SDK client policy', () => {
++  it('builds the SDK client with an explicit timeout and no SDK-level retries', () => {
++    const provider = createProvider();
++    const client = Reflect.get(provider, '_client') as {
++      timeout?: number;
++      maxRetries?: number;
++    };
++    // Pinned by providers/client-policy.ts: the timeout only bounds the
++    // pre-headers phase (streaming bodies are unaffected), and SDK-level
++    // retries stay off so every retry flows through chatWithRetry.
++    expect(client.timeout).toBe(120_000);
++    expect(client.maxRetries).toBe(0);
++  });
++});
++
+ describe('OpenAILegacyChatProvider', () => {
+   describe('message conversion (COMMON_CASES)', () => {
+     it('simple user message with system prompt', async () => {
+diff --git a/packages/kosong/test/openai-responses.test.ts b/packages/kosong/test/openai-responses.test.ts
+index 1a8d4c752..764bd1d30 100644
+--- a/packages/kosong/test/openai-responses.test.ts
++++ b/packages/kosong/test/openai-responses.test.ts
+@@ -96,6 +96,21 @@ const MUL_TOOL: Tool = {
+   },
+ };
+ 
++describe('OpenAIResponsesChatProvider SDK client policy', () => {
++  it('builds the SDK client with an explicit timeout and no SDK-level retries', () => {
++    const provider = createProvider();
++    const client = Reflect.get(provider, '_client') as {
++      timeout?: number;
++      maxRetries?: number;
++    };
++    // Pinned by providers/client-policy.ts: the timeout only bounds the
++    // pre-headers phase (streaming bodies are unaffected), and SDK-level
++    // retries stay off so every retry flows through chatWithRetry.
++    expect(client.timeout).toBe(120_000);
++    expect(client.maxRetries).toBe(0);
++  });
++});
++
+ describe('OpenAIResponsesChatProvider', () => {
+   describe('message conversion', () => {
+     it('sends system prompt as top-level instructions', async () => {

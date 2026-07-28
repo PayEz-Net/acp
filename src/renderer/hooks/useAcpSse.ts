@@ -62,6 +62,27 @@ function renderMailSurfaceLine(agentName: string, text: string): boolean {
 const markMailEventSeen = createMailEventDeduper(200, 'acp.mail.seen');
 
 /**
+ * Fetch a mail message's body so the notice can carry the CONTENT, not just a
+ * "go read it" pointer (Jon: agents see alerts but don't go read them — bring
+ * the mail to the agent). Returns null on any failure; the caller falls back
+ * to the pointer-only notice.
+ */
+async function fetchMailBody(agentName: string, id: string | number): Promise<string | null> {
+  try {
+    const headers: Record<string, string> = { 'X-ACP-Agent': agentName };
+    const secret = await getSecret();
+    if (secret) headers['Authorization'] = `Bearer ${secret}`;
+    const res = await fetch(`http://127.0.0.1:3001/v1/mail/messages/${id}`, { headers });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: { body?: unknown } };
+    const body = json?.data?.body;
+    return typeof body === 'string' && body.trim().length > 0 ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Deliver a mail notice to an agent, routed off the LIVE surface first
  * (WO 11472): a claude-registered agent sitting in a kimi ACP pane must get
  * the ACP inject — team-sync can flip the registered provider mid-session,
@@ -70,8 +91,9 @@ const markMailEventSeen = createMailEventDeduper(200, 'acp.mail.seen');
  *
  * Exported for the wiring tests (WO 11517) — not part of the hook's API.
  */
-export function routeMailNotice(agentName: string, from: string, subject: string, id: string | number): void {
-  const noticeText = buildMailNoticeText(agentName, from, subject, id);
+export async function routeMailNotice(agentName: string, from: string, subject: string, id: string | number): Promise<void> {
+  const body = typeof id === 'number' ? await fetchMailBody(agentName, id) : null;
+  const noticeText = buildMailNoticeText(agentName, from, subject, id, body ?? undefined);
   const agentState = useAppStore.getState().agents.find((a) => a.name === agentName);
   const acpSession = useAcpSessionStore.getState().sessions.get(agentName);
 
@@ -101,6 +123,12 @@ export function routeMailNotice(agentName: string, from: string, subject: string
       onDelivered: () => renderMailSurfaceLine(agentName, noticeText),
       onFailed: () => {
         console.warn(`[AcpSse] Mail notice delivery failed for ${agentName} after all retries`);
+        // WO 11629: unsee the id so the catch-up synthesis RE-FIRES this
+        // notice at the next reconnect — a deferred mail (old runtime,
+        // busy-reject) must not be lost between 'already seen' and the next
+        // natural delivery window. Both key forms, mirroring synthesis.
+        markMailEventSeen.unsee(agentName, mailDedupeKey(id, from, subject));
+        markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
         // The pane may still be repopulating post-restart — retry briefly so
         // the failure is visible there, not just in the console (WO 11462 #3).
         const failureText = buildMailDeliveryFailedText(agentName);
@@ -146,7 +174,7 @@ function synthesizeNoticesForUnreads(): void {
     const noidSeen = !markMailEventSeen(unread.agentName, mailDedupeKey(null, unread.from, unread.subject));
     if (idSeen || noidSeen) continue;
     console.log(`[AcpSse] Catch-up notice for ${unread.agentName}: unread id=${unread.id}`);
-    routeMailNotice(unread.agentName, unread.from, unread.subject, unread.id);
+    void routeMailNotice(unread.agentName, unread.from, unread.subject, unread.id);
   }
 }
 
@@ -402,7 +430,7 @@ export function useAcpSse() {
                 }
 
                 console.log(`[AcpSse] Mail for ${agentName}: ${from} — ${subject} (id=${id})`);
-                routeMailNotice(agentName, from, subject, id);
+                void routeMailNotice(agentName, from, subject, id);
 
                 const projectId = useProjectStore.getState().activeProject?.id;
                 // Gate on confirmation (WO 1560 R3 / AC5): no inbox GETs before

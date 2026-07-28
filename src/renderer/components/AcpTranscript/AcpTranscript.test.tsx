@@ -148,19 +148,12 @@ describe('AcpTranscript', () => {
     cleanup(root, container);
   });
 
-  it('shows the queued indicator with depth and hides it at zero', () => {
+  it('renders no queue banner or indicator at any depth — the machinery is cut (WO 11645)', () => {
     const turns: AcpTurn[] = [makeTurn({ id: 'a1', role: 'assistant', status: 'thinking' })];
-    const { container, root } = render(
-      <AcpTranscript turns={turns} activeTurnId="a1" queuedCount={2} />,
-    );
-    expect(container.querySelector('[data-testid="queued-indicator"]')?.textContent).toContain(
-      'Queued behind current turn (2)',
-    );
+    const { container, root } = render(<AcpTranscript turns={turns} activeTurnId="a1" />);
+    expect(container.querySelector('[data-testid="queued-indicator"]')).toBeNull();
+    expect(container.querySelector('[data-testid="queue-backlog-banner"]')).toBeNull();
     cleanup(root, container);
-
-    const empty = render(<AcpTranscript turns={turns} activeTurnId="a1" queuedCount={0} />);
-    expect(empty.container.querySelector('[data-testid="queued-indicator"]')).toBeNull();
-    cleanup(empty.root, empty.container);
   });
 
   it('shows a stopping indicator when cancel is requested', () => {

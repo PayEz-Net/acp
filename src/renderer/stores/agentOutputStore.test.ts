@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useAgentOutputStore } from './agentOutputStore';
+import { useAgentOutputStore, isFrameBackedTerminal, markFrameBackedTerminal, unmarkFrameBackedTerminal } from './agentOutputStore';
 
 function makeLine(agent: string, line: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -13,7 +13,7 @@ function makeLine(agent: string, line: string, overrides: Record<string, unknown
 
 describe('agentOutputStore', () => {
   beforeEach(() => {
-    useAgentOutputStore.setState({ lines: [], paused: false, selectedAgent: null });
+    useAgentOutputStore.setState({ lines: [], frames: {}, paused: false, selectedAgent: null });
   });
 
   it('assigns stable ids to lines added via addLine', () => {
@@ -103,5 +103,32 @@ describe('agentOutputStore', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0].line).toBe('');
     expect(lines[0].thinking).toBe('some reasoning');
+  });
+
+  it('stores and replaces terminal screen frames', () => {
+    useAgentOutputStore.getState().setTerminalScreen('t1', ['line one', 'line two']);
+    expect(useAgentOutputStore.getState().frames['t1']).toEqual(['line one', 'line two']);
+    useAgentOutputStore.getState().setTerminalScreen('t1', ['repainted']);
+    expect(useAgentOutputStore.getState().frames['t1']).toEqual(['repainted']);
+  });
+
+  it('clearTerminalHistory drops agent lines for the terminal but keeps user/info', () => {
+    const store = useAgentOutputStore.getState();
+    store.addLine(makeLine('NextPert', 'agent output'));
+    store.addLine(makeLine('NextPert', 'you typed this', { source: 'user' }));
+    store.addLine(makeLine('NextPert', 'mail notice', { source: 'info' }));
+    store.addLine(makeLine('BAPert', 'other agent', { terminal_id: 't2' }));
+    useAgentOutputStore.getState().clearTerminalHistory('t1', 'NextPert');
+    const lines = useAgentOutputStore.getState().lines;
+    expect(lines.map((l) => l.line)).toEqual(['you typed this', 'mail notice', 'other agent']);
+  });
+
+  it('tracks frame-backed terminals for the SSE skip path', () => {
+    expect(isFrameBackedTerminal('t1')).toBe(false);
+    markFrameBackedTerminal('t1');
+    expect(isFrameBackedTerminal('t1')).toBe(true);
+    expect(isFrameBackedTerminal(undefined)).toBe(false);
+    unmarkFrameBackedTerminal('t1');
+    expect(isFrameBackedTerminal('t1')).toBe(false);
   });
 });

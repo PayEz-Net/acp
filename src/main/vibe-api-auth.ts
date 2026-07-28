@@ -1,17 +1,7 @@
-/**
- * Agent-output reporting client (PayEzVibe API mediated).
- *
- * Raw PTY output is forwarded to the PayEzVibe API at VIBE_API_URL, which
- * authenticates the user, resolves the active agent session, and forwards
- * normalized output to the internal cache service. The desktop never holds
- * the backend cache container secret.
- */
-
 import { getAccessToken, getCurrentUserId } from './auth';
-import { VIBE_API_URL } from './env';
 
 /**
- * Build the auth/context headers for a PayEzVibe API agent-output request.
+ * Build the auth/context headers for a PayEzVibe API request.
  * Uses the current user's bearer token.
  */
 export async function buildVsqlCacheAuthHeaders(
@@ -97,61 +87,5 @@ export async function hasCapability(capability: string): Promise<boolean> {
     return caps.has(capability);
   } catch {
     return false;
-  }
-}
-
-export interface VsqlCacheOutputPayload {
-  agentName: string;
-  terminalId: string;
-  data: string;
-  provider?: string;
-  projectId?: string;
-  sessionId?: string;
-  sessionToken?: string;
-  userId?: string;
-}
-
-/**
- * POST raw PTY output to the PayEzVibe API.
- *
- * Returns normally on 503 Service Unavailable; the caller is expected to
- * count drops. Any other non-2xx response throws so unexpected failures
- * are still surfaced.
- */
-export async function postAgentOutput(payload: VsqlCacheOutputPayload): Promise<void> {
-  const path = '/v1/agent-output';
-  const headers = await buildVsqlCacheAuthHeaders('POST', path, {
-    userId: payload.userId,
-    projectId: payload.projectId,
-  });
-  const url = `${VIBE_API_URL}${path}`;
-
-  const body = JSON.stringify({
-    agentName: payload.agentName,
-    terminalId: payload.terminalId,
-    data: payload.data,
-    provider: payload.provider,
-    sessionToken: payload.sessionToken,
-  });
-
-  const fetchHeaders: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...headers,
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: fetchHeaders,
-    body,
-  });
-
-  if (res.status === 503) {
-    // Backend cache is overloaded or down. Drop the chunk; ptyOutputReporter logs
-    // the drop count. Do not throw — PTY output must never crash the desktop.
-    return;
-  }
-
-  if (!res.ok) {
-    throw new Error(`vibe-api POST ${path} failed: ${res.status} ${res.statusText}`);
   }
 }

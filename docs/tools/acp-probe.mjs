@@ -1,6 +1,12 @@
 // ACP probe v4: answer session/request_permission exactly like acp-desktop
 // ({outcome:{outcome:'selected', optionId}}) and see whether the turn unparks
-// and completes against the installed 0.24.2 runtime. Logs the RAW request.
+// and completes against the installed runtime (0.24.2 originally; now the
+// locally built 0.27.0+wait-state patch). Logs the RAW request.
+// v5 (NextPert): also asserts wait_state frames — the wait-state visibility
+// patch makes the adapter emit 'awaiting_first_token' at every step start and
+// 'provider_retry' during retry backoff. A patched runtime must emit at least
+// one wait_state frame before the turn completes; older runtimes emit none,
+// so the assertion doubles as the installed-version check.
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 
@@ -17,6 +23,7 @@ let sessionId = null;
 let promptSent = false;
 let promptSentAt = null;
 const rawPermissionRequests = [];
+const waitStateFrames = [];
 
 const send = (id, method, params) => {
   console.log(`[${ts()}] >>> ${method} id=${id}`);
@@ -55,6 +62,13 @@ child.stdout.on('data', (d) => {
         if (msg.id === 3) {
           console.log(`[${ts()}] === TURN COMPLETE stopReason=${msg.result?.stopReason} total=${((Date.now() - promptSentAt) / 1000).toFixed(1)}s`);
           writeFileSync('E:/repos/.tmp/acp-permission-requests.json', JSON.stringify(rawPermissionRequests, null, 2));
+          writeFileSync('E:/repos/.tmp/acp-wait-state-frames.json', JSON.stringify(waitStateFrames, null, 2));
+          if (waitStateFrames.length === 0) {
+            console.log(`[${ts()}] WAIT-STATE ASSERTION FAILED: no wait_state frames arrived — the installed runtime predates the wait-state patch`);
+            child.kill();
+            process.exit(3);
+          }
+          console.log(`[${ts()}] WAIT-STATE OK: ${waitStateFrames.length} frame(s) (${[...new Set(waitStateFrames.map((f) => f.kind))].join(', ')})`);
           child.kill();
           process.exit(0);
         }
@@ -63,6 +77,14 @@ child.stdout.on('data', (d) => {
       if (msg.method === 'session/update') {
         const u = msg.params?.update ?? {};
         const kind = u.sessionUpdate ?? '?';
+        if (kind === 'wait_state') {
+          waitStateFrames.push(u);
+          const retry = u.kind === 'provider_retry'
+            ? ` attempt ${u.nextAttempt ?? '?'}/${u.maxAttempts ?? '?'} in ${Math.round((u.delayMs ?? 0) / 1000)}s (${u.errorName ?? 'error'})`
+            : '';
+          console.log(`[${ts()}] WAIT_STATE ${u.kind ?? '?'}${retry}`.slice(0, 180));
+          continue;
+        }
         let detail = '';
         if (kind === 'tool_call') detail = ` ${u.title ?? ''} [${u.kind ?? ''}]`;
         if (kind === 'tool_call_update') detail = ` status=${u.status ?? '?'}`;
