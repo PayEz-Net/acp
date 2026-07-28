@@ -84,7 +84,15 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       const activeProject = useProjectStore.getState().activeProject;
       const projectRuntime = activeProject?.runtime_choice ?? null;
       const projectRepo = activeProject?.repo_path || '';
-      const teamMember = (useProjectStore.getState().currentProjectTeam ?? []).find(
+      let team = useProjectStore.getState().currentProjectTeam ?? [];
+      if (activeProject && team.length === 0) {
+        // Boot-race backstop: the override-carrying roster (GET
+        // /v1/projects/:id/team) may not have landed yet — fetch it now
+        // rather than spawn plain (no -m / effort would reach the CLI).
+        await useProjectStore.getState().fetchCurrentProjectTeam(activeProject.id);
+        team = useProjectStore.getState().currentProjectTeam ?? [];
+      }
+      const teamMember = team.find(
         (m) => m.agent_name === agent.name,
       );
       const effortOverride = teamMember?.effort_override ?? undefined;

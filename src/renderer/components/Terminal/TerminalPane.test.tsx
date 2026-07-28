@@ -177,6 +177,49 @@ describe('TerminalPane', () => {
     cleanup(root, container);
   });
 
+  it('fetches the override roster on demand when it has not landed yet (boot race)', async () => {
+    const agent = makeAgent();
+    useAppStore.setState({ agents: [agent] });
+    useProjectStore.setState({
+      activeProject: { id: 7, name: 'proj', runtime_choice: 'kimi' } as any,
+      currentProjectTeam: [],
+    });
+    // The roster arrives only when the pane's backstop fetch runs.
+    const fetchSpy = vi
+      .spyOn(useProjectStore.getState(), 'fetchCurrentProjectTeam')
+      .mockImplementation(async () => {
+        useProjectStore.setState({
+          currentProjectTeam: [
+            { agent_name: 'NextPert', effort_override: null, model_override: 'kimi-for-coding-highspeed' } as any,
+          ],
+        });
+      });
+
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { terminal_id: 't-123' } }),
+    } as Response);
+
+    const { container, root } = render(
+      <TerminalPane agent={agent} isFocused={false} onFocus={() => {}} compact />,
+    );
+
+    const playButton = container.querySelector('button[title="Start Agent"]');
+    await act(async () => {
+      playButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(7);
+    const call = vi.mocked(globalThis.fetch).mock.calls.find(([url]) =>
+      String(url).includes('/v1/lifecycle/agents/NextPert/spawn'),
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.model).toBe('kimi-for-coding-highspeed');
+    fetchSpy.mockRestore();
+    cleanup(root, container);
+  });
+
   it('stops the agent and clears stream state when stop is clicked', async () => {
     const agent = makeAgent({ status: 'ready', terminalId: 't-456' });
     useAppStore.setState({ agents: [agent] });

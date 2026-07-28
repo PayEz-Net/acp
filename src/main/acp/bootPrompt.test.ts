@@ -38,3 +38,13 @@ describe('SESSION_INACTIVE antidote', () => {
     expect(nudge).toMatch(/session is live right now/i);
   });
 });
+
+// Human-interrupt rule (NGTMI: "the team lead ignores me"): a busy episode is
+// never a reason to leave the human on read — answer first, text before tools.
+describe('human-interrupt rule', () => {
+  it('boot prompt makes the human outrank mail and any in-flight task', () => {
+    const prompt = buildAgentBootPrompt('NextPert');
+    expect(prompt).toMatch(/human outranks mail and any in-flight work/);
+    expect(prompt).toMatch(/before your next tool call/);
+  });
+});

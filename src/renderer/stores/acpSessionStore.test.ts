@@ -55,6 +55,22 @@ describe('acpSessionStore', () => {
     expect(session?.agentInfo?.name).toBe('Kimi Code CLI');
   });
 
+  it('records the spawn command as a banner, never as a transcript turn', () => {
+    const store = useAcpSessionStore.getState();
+    store.applyEvent(
+      makeUpdate('NextPert', {
+        sessionUpdate: 'spawn_info',
+        command: 'kimi --yolo -m kimi-code/k3 acp  KIMI_MODEL_THINKING_EFFORT=high',
+      }),
+    );
+    const session = store.getSession('NextPert');
+    expect(session?.spawnCommand).toBe(
+      'kimi --yolo -m kimi-code/k3 acp  KIMI_MODEL_THINKING_EFFORT=high',
+    );
+    // QA guard: system lines stay OUT of the transcript.
+    expect(session?.turns).toHaveLength(0);
+  });
+
   it('creates an assistant turn and accumulates thinking chunks', () => {
     const store = useAcpSessionStore.getState();
     store.startAssistantTurn('NextPert', 's1');

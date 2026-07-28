@@ -1203,14 +1203,25 @@ export function UnifiedTerminal({
           tabIndex={0}
         >
           {isAcpMode ? (
-            <AcpTranscript
-              turns={acpSession?.turns ?? []}
-              activeTurnId={acpSession?.activeTurnId ?? null}
-              agent={agentName}
-              sessionId={acpSession?.sessionId}
-              pendingPermission={acpSession?.pendingPermission}
-              cancelRequested={cancelRequested}
-            />
+            <>
+              {acpSession?.spawnCommand && (
+                <div
+                  data-testid="spawn-command"
+                  className="mb-2 select-text whitespace-pre-wrap break-all text-acp-text-muted/60"
+                  title="Exact command this agent runtime was launched with"
+                >
+                  $ {acpSession.spawnCommand}
+                </div>
+              )}
+              <AcpTranscript
+                turns={acpSession?.turns ?? []}
+                activeTurnId={acpSession?.activeTurnId ?? null}
+                agent={agentName}
+                sessionId={acpSession?.sessionId}
+                pendingPermission={acpSession?.pendingPermission}
+                cancelRequested={cancelRequested}
+              />
+            </>
           ) : (
             <>
               {filteredLines.length === 0 && !terminalId && (

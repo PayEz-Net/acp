@@ -433,6 +433,12 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
       return session;
     }
 
+    case 'spawn_info': {
+      // Banner line above the pane, NOT a transcript turn (QA: no system
+      // lines in the transcript).
+      return { ...session, spawnCommand: update.command };
+    }
+
     default: {
       return session;
     }

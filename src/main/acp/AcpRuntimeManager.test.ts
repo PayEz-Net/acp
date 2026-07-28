@@ -498,6 +498,93 @@ describe('AcpRuntimeManager', () => {
     expect((promptRequests[2].params as any).prompt[0].text).toBe('you have mail');
   });
 
+  it('forces a turn boundary when a steered human prompt goes unanswered (human-reply backstop)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-backstop' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      // Perpetually busy turn (mail storm, long tool chain — never settles on its own).
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The human steers in to influence the task — that ability stays. The
+      // backstop only bounds how long the turn may keep them on read.
+      const human = manager.prompt('are you there?');
+      await vi.advanceTimersByTimeAsync(0);
+      const process = getProcess();
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+
+      // A second human message 30s later must NOT extend the deadline set by
+      // the first — a chatty human would otherwise disarm the backstop forever.
+      await vi.advanceTimersByTimeAsync(30_000);
+      const human2 = manager.prompt('hello??');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 60s from the FIRST unanswered steer, with the turn still running →
+      // cancel + reply-turn nudge.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(process.notifications).toContainEqual({
+        method: 'session/cancel',
+        params: { sessionId: 'sess-backstop' },
+      });
+
+      // The cancelled turn settles; the nudge drains as a fresh, dedicated turn.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await human;
+      await human2;
+
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('still waiting for a direct reply'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
+  it('leaves the turn alone when it ends before the human-reply grace expires', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-timely' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('short task');
+      await vi.advanceTimersByTimeAsync(0);
+      const human = manager.prompt('quick question');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Turn ends well inside the grace window — the natural flow owned the reply.
+      await vi.advanceTimersByTimeAsync(10_000);
+      settleTurn({ stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await human;
+
+      // Long past the grace: no cancel, no reply-turn nudge, ever.
+      await vi.advanceTimersByTimeAsync(120_000);
+      const process = getProcess();
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('still waiting for a direct reply'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('falls back to queueing when the runtime busy-rejects a steer (slice B backstop)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-serial' });
@@ -1577,6 +1664,38 @@ describe('AcpRuntimeManager', () => {
 
     expect(getProcess().options.env).not.toHaveProperty('KIMI_MODEL_THINKING_EFFORT');
     expect(getProcess().options.args).toContain('kimi-code/kimi-for-coding');
+  });
+
+  it('emits spawn_info with the exact launch command (pane banner)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-spawninfo' });
+
+    await manager.start();
+
+    const spawnInfo = events.find((e) => e.update.sessionUpdate === 'spawn_info');
+    expect(spawnInfo).toBeDefined();
+    expect((spawnInfo!.update as { command: string }).command).toBe('kimi --yolo acp');
+  });
+
+  it('spawn_info includes the model alias and k3 thinking-effort env', async () => {
+    manager = new AcpRuntimeManager('rt-spawninfo-k3', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      effort: 'high',
+      modelOverride: 'k3',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-spawninfo-k3' });
+
+    await manager.start();
+
+    const spawnInfo = events.find((e) => e.update.sessionUpdate === 'spawn_info');
+    expect(spawnInfo).toBeDefined();
+    const command = (spawnInfo!.update as { command: string }).command;
+    expect(command).toContain('-m kimi-code/k3 acp');
+    expect(command).toContain('KIMI_MODEL_THINKING_EFFORT=high');
   });
 
   it('cancels the active turn and emits turn_complete', async () => {

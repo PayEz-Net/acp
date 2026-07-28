@@ -341,7 +341,16 @@ export default function App() {
     if (!settingsLoaded || !activeProject || !pickerHasStarted) return;
     let cancelled = false;
     (async () => {
-      await useTeamStore.getState().syncTeam(activeProject.id);
+      // Load BOTH team surfaces before the grid mounts. syncTeam feeds the
+      // roster (applyCloudRoster below); fetchCurrentProjectTeam feeds the
+      // override-carrying member rows (/v1/projects/:id/team —
+      // effort_override/model_override) that pane autoStart POSTs at spawn.
+      // Without the second, currentProjectTeam stays [] and every boot spawn
+      // launches plain (no -m / effort reaches the CLI).
+      await Promise.all([
+        useTeamStore.getState().syncTeam(activeProject.id),
+        useProjectStore.getState().fetchCurrentProjectTeam(activeProject.id),
+      ]);
       if (cancelled) return;
       // Spec AC-9: empty cloud roster is authoritative — applyCloudRoster
       // renders the empty grid; it never falls through to DEFAULT_AGENTS.

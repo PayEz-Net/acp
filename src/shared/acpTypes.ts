@@ -110,7 +110,8 @@ export type AcpSessionUpdate =
   | { sessionUpdate: 'queue_cleared'; sessionId: string }
   | { sessionUpdate: 'turn_complete'; sessionId: string; stopReason: string }
   | { sessionUpdate: 'error'; sessionId?: string; error: string }
-  | { sessionUpdate: 'stderr'; sessionId?: string; text: string };
+  | { sessionUpdate: 'stderr'; sessionId?: string; text: string }
+  | { sessionUpdate: 'spawn_info'; sessionId?: string; command: string };
 
 export interface AcpEventPayload {
   agent: string;
@@ -217,6 +218,14 @@ export interface AcpSessionState {
    * refuses locally.
    */
   imageIn?: boolean;
+  /**
+   * Exact command the runtime was launched with (e.g. `kimi --yolo -m
+   * kimi-code/kimi-for-coding-highspeed acp` + any KIMI_MODEL_THINKING_EFFORT
+   * env), emitted by main at every spawn. Rendered as a muted banner line at
+   * the top of the ACP pane — the old PTY shell echo's replacement, kept OUT
+   * of the transcript turns (QA: no system lines in the transcript).
+   */
+  spawnCommand?: string;
   pendingPermission?: {
     requestId: number | string;
     options: AcpPermissionOption[];
