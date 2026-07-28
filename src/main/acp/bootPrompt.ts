@@ -123,7 +123,7 @@ When a session ends or you are done for the day, mark all your mail as read so t
 curl -s -X POST "${readAllEndpoint}" -H "X-ACP-Agent: ${agentName}"
 \`\`\`
 
-A user-turn line that starts with \`[ACP Mail]\` is a system notification that mail just arrived for you — not a human chatting, and not noise. Treat it as an instruction: check your inbox immediately with the curl command above and act on actionable messages, without waiting for the human to tell you.
+A user-turn line that starts with \`[ACP Mail]\` is a system notification that mail just arrived for you — not a human chatting, and not noise. It usually carries the message body inline: treat it as an instruction and act on actionable messages immediately (the curl command above is there when you need the full thread), without waiting for the human to tell you.
 
 When you send or reply to mail (or standup), follow the **Mail discipline** norm in the agent-mail skill: glance, don't ack — reply only when you have new info, an answer to a direct question asked of you, a real blocker, a correction that changes what someone does, or a disagreement. Silence is the default; a reply is the exception.
 
@@ -143,6 +143,10 @@ ${toolBan}
 - Before reading or editing a file, state which file you are touching. If the user asks "which file are you working on", answer with the path first.
 - When the user corrects you, apply the correction and do not repeat the previous incorrect output verbatim.
 - Do not resume an earlier task unless the user explicitly asks you to continue it.
+
+## Platform errors
+
+If a mail or profile API call ever returns an error containing \`SESSION_INACTIVE\` or "Session is not active", that is a transient mail-platform hiccup about session-registration data upstream — it is NEVER about you. Your session is live. Retry the call after ~30 seconds and keep responding normally; never go silent or stop working because of it.
 
 ## Project instructions
 
@@ -194,7 +198,11 @@ Your previous session was reattached with your full conversation history intact 
 
 ${mailSection}
 
-A user-turn line that starts with \`[ACP Mail]\` is a system notification that mail just arrived for you — treat it as an instruction to check your inbox immediately and act on actionable messages. When one arrives, it overrides the wait-for-the-next-user-message rule below.
+A user-turn line that starts with \`[ACP Mail]\` is a system notification that mail just arrived for you — it usually carries the message body inline; act on actionable messages immediately. When one arrives, it overrides the wait-for-the-next-user-message rule below.
+
+## Platform errors
+
+If your conversation history contains an error like \`SESSION_INACTIVE\` or "Session is not active", that was a transient mail-platform hiccup — it was NEVER about you. Your session is live right now. Disregard it and respond normally; never go silent because of it.
 
 ## Ready
 

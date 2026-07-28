@@ -2,9 +2,9 @@
  * PayEzVibe agent session lifecycle unit tests.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { buildVsqlCacheAuthHeaders, hasCapability } from './vsql-cache-client';
+import { buildVsqlCacheAuthHeaders, hasCapability } from './vibe-api-auth';
 
-vi.mock('./vsql-cache-client', () => ({
+vi.mock('./vibe-api-auth', () => ({
   buildVsqlCacheAuthHeaders: vi.fn().mockResolvedValue({
     Authorization: 'Bearer test-token',
   }),
@@ -231,6 +231,52 @@ describe('agentSessionLifecycle', () => {
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-registers a fresh session when a heartbeat 404s (SESSION_INACTIVE)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeStartResponse('sess-old'))
+      .mockResolvedValueOnce({ ok: false, status: 404 } as Response) // heartbeat 404
+      .mockResolvedValueOnce(makeStartResponse('sess-new')) // re-register start
+      .mockResolvedValue(makeOkResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession, getAgentSession } = await loadModule();
+
+    await startAgentSession('term-404', 11);
+    expect(getAgentSession('term-404')?.id).toBe('sess-old');
+
+    // First heartbeat 404s → re-register swaps the tracked session.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(getAgentSession('term-404')?.id).toBe('sess-new');
+
+    // The next heartbeat targets the NEW session id — the agent is reachable
+    // again without waiting for a runtime restart.
+    await vi.advanceTimersByTimeAsync(30_000);
+    const hbCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/heartbeat'));
+    expect(hbCalls).toHaveLength(2);
+    expect(hbCalls[1][0]).toBe('https://api.idealvibe.online/v1/sessions/sess-new/heartbeat');
+  });
+
+  it('keeps the old session and retries next tick when re-register fails', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeStartResponse('sess-kept'))
+      .mockResolvedValueOnce({ ok: false, status: 404 } as Response) // heartbeat 404
+      .mockRejectedValueOnce(new Error('start down')) // re-register fails
+      .mockResolvedValue(makeOkResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession, getAgentSession } = await loadModule();
+
+    await startAgentSession('term-404-fail', 12);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // Swap did not happen; heartbeat keeps running (old id) so a later tick
+    // can retry the re-register.
+    expect(getAgentSession('term-404-fail')?.id).toBe('sess-kept');
+    await vi.advanceTimersByTimeAsync(30_000);
+    const hbCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/heartbeat'));
+    expect(hbCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('ignores duplicate start for the same terminal', async () => {

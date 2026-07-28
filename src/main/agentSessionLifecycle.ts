@@ -12,14 +12,15 @@
  */
 
 import { VIBE_API_URL } from './env';
-import { buildVsqlCacheAuthHeaders, hasCapability } from './vsql-cache-client';
+import { buildVsqlCacheAuthHeaders, hasCapability } from './vibe-api-auth';
 
 export interface AgentSession {
   /** PayEzVibe agent session id. */
   id: string;
   /** Backend-issued opaque session token. */
   sessionToken: string;
-  /** Numeric agent id from `project_team_members.agent_id`. */
+  /** Numeric agent id from `team_agent_instances.agent_id` (the engaged
+   *  standing team's instance — live-team model). */
   agentId: number;
 }
 
@@ -37,6 +38,8 @@ interface SessionState {
   heartbeatTimer: NodeJS.Timeout | null;
   status: 'starting' | 'active' | 'ending' | 'ended';
   pendingEndReason?: AgentSessionEndReason;
+  /** Guards against overlapping re-register attempts after a heartbeat 404. */
+  reregistering: boolean;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -79,6 +82,7 @@ export async function startAgentSession(
     session: null,
     heartbeatTimer: null,
     status: 'starting',
+    reregistering: false,
   };
   sessions.set(terminalId, state);
 
@@ -164,24 +168,6 @@ export function getAgentSession(terminalId: string): AgentSession | null {
   return state?.session ?? null;
 }
 
-/**
- * Return an active PayEzVibe session token for any terminal in the given
- * project. Used by the renderer's unified agent-output SSE stream to
- * authenticate without depending on name/id resolution.
- */
-export function getActiveSessionTokenForProject(projectId: number): string | undefined {
-  for (const state of sessions.values()) {
-    if (
-      state.projectId === projectId &&
-      state.status === 'active' &&
-      state.session?.sessionToken
-    ) {
-      return state.session.sessionToken;
-    }
-  }
-  return undefined;
-}
-
 function startHeartbeat(state: SessionState): void {
   if (state.heartbeatTimer) {
     clearInterval(state.heartbeatTimer);
@@ -215,6 +201,20 @@ async function heartbeat(state: SessionState): Promise<void> {
       return;
     }
 
+    if (res.status === 404) {
+      // The backend no longer holds this session (inactivity expiry or a
+      // transient backend blip — observed 404ing for ~a minute, then
+      // recovering). Every further heartbeat 404s until a runtime restart
+      // happens to re-register, and the agent's own mail calls fail with
+      // SESSION_INACTIVE in the meantime — agents read that as "I am
+      // deactivated" and go silent. Re-register immediately instead.
+      console.warn(
+        `[AgentSession] heartbeat 404 for session=${state.session.id}; re-registering a fresh session`,
+      );
+      await reregisterSession(state);
+      return;
+    }
+
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.warn(
@@ -226,6 +226,38 @@ async function heartbeat(state: SessionState): Promise<void> {
       `[AgentSession] heartbeat exception for session=${state.session.id}:`,
       err,
     );
+  }
+}
+
+/**
+ * Re-register the agent session after a heartbeat 404. Starts a fresh
+ * backend session and swaps it into the tracked state so subsequent
+ * heartbeats (and the backend's reachability view of the agent) recover on
+ * the next tick instead of waiting for a runtime restart.
+ */
+async function reregisterSession(state: SessionState): Promise<void> {
+  if (state.reregistering) return;
+  state.reregistering = true;
+  try {
+    const previousId = state.session?.id;
+    const session = await sendStart(state.agentId, state.projectId);
+    if (state.status !== 'active') {
+      // The session was ended while the start was in flight — don't leak the
+      // fresh record on the backend.
+      await sendEnd(session.id, 'normal').catch(() => {});
+      return;
+    }
+    state.session = session;
+    console.log(
+      `[AgentSession] re-registered session=${session.id} (was ${previousId}) for terminal=${state.terminalId} agent=${state.agentId}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[AgentSession] re-register failed for terminal=${state.terminalId}; retrying on next heartbeat:`,
+      err,
+    );
+  } finally {
+    state.reregistering = false;
   }
 }
 
