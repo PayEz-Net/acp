@@ -38,6 +38,15 @@ export function buildClaudeSpawnCommand(opts: {
   modelOverride?: string | null;
   bootPromptTmpPath?: string | null;
   kickoff?: string;
+  /** Stable per-placement session id. See claudeSession.ts. */
+  sessionId?: string | null;
+  /**
+   * True when a transcript for `sessionId` already exists on disk, so the
+   * conversation should be RESUMED rather than created. The caller decides this
+   * by checking the file — `--session-id` errors on an existing id, so it cannot
+   * be used as resume-or-create.
+   */
+  resume?: boolean;
 }): string {
   const kickoff = opts.kickoff ?? 'Begin.';
   const parts = [
@@ -45,6 +54,13 @@ export function buildClaudeSpawnCommand(opts: {
     '--dangerously-skip-permissions',
     `--effort ${opts.effort}`,
   ];
+  // Session continuity. `--resume` picks up the existing conversation;
+  // `--session-id` creates one under an id we can resume next time. Mutually
+  // exclusive: passing an in-use id to `--session-id` errors out and kills the
+  // spawn ("Session ID <uuid> is already in use").
+  if (opts.sessionId) {
+    parts.push(opts.resume ? `--resume ${opts.sessionId}` : `--session-id ${opts.sessionId}`);
+  }
   // `--model` accepts an alias ('opus', 'sonnet', 'fable') or a full model
   // name, so the value is passed through verbatim rather than mapped through a
   // table that would need editing every time a new alias ships. Validity is

@@ -118,3 +118,52 @@ describe('composed command shape', () => {
     );
   });
 });
+
+describe('session continuity flags', () => {
+  it('omits session flags entirely when no id is given (unchanged legacy spawn)', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high' });
+    expect(cmd).not.toContain('--session-id');
+    expect(cmd).not.toContain('--resume');
+  });
+
+  it('CREATES with --session-id when no transcript exists', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', sessionId: 'u-1', resume: false });
+    expect(cmd).toContain('--session-id u-1');
+    expect(cmd).not.toContain('--resume');
+  });
+
+  it('RESUMES with --resume when a transcript exists', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', sessionId: 'u-1', resume: true });
+    expect(cmd).toContain('--resume u-1');
+    expect(cmd).not.toContain('--session-id');
+  });
+
+  it('never emits both — --session-id on an in-use id errors and kills the spawn', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', sessionId: 'u-1', resume: true });
+    const both = cmd.includes('--session-id') && cmd.includes('--resume');
+    expect(both).toBe(false);
+  });
+
+  it('re-passes --system-prompt-file ON RESUME — without it the agent keeps the conversation but loses its operating rules', () => {
+    const cmd = buildClaudeSpawnCommand({
+      effort: 'high',
+      sessionId: 'u-1',
+      resume: true,
+      bootPromptTmpPath: 'C:\tmp\bp.txt',
+    });
+    expect(cmd).toContain('--resume u-1');
+    expect(cmd).toContain('--system-prompt-file "C:\tmp\bp.txt"');
+  });
+
+  it('composes model + effort + resume together', () => {
+    const cmd = buildClaudeSpawnCommand({
+      effort: 'xhigh',
+      modelOverride: 'haiku',
+      sessionId: 'u-9',
+      resume: true,
+    });
+    expect(cmd).toContain('--effort xhigh');
+    expect(cmd).toContain('--model haiku');
+    expect(cmd).toContain('--resume u-9');
+  });
+});

@@ -28,6 +28,7 @@ import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputRepor
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
 import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnCommand';
+import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 import { TerminalScreen } from './terminalScreen';
@@ -960,13 +961,22 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
       // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
       // module load — so the composition lives in a module with no electron dep.
+      // Session continuity: derive a stable per-placement id, then RESUME if a
+      // transcript already exists on disk and CREATE if not. The existence check
+      // is deliberate rather than a try//catch — handing `--resume` a missing id
+      // kills the pane, and `--session-id` errors on an id already in use, so
+      // neither flag is safe to guess with. See claudeSession.ts.
+      const claudeSessionId = deriveClaudeSessionId(agentName, opts?.projectId);
+      const resumeSession = claudeSessionExists(resolvedWorkDir, claudeSessionId);
       const cmd = buildClaudeSpawnCommand({
         effort,
         modelOverride: opts?.modelOverride,
         bootPromptTmpPath,
+        sessionId: claudeSessionId,
+        resume: resumeSession,
       });
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
