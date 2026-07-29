@@ -159,6 +159,70 @@ describe('ptyOutputReporter', () => {
     expect(attempts).toBe(2);
   });
 
+  // Regression guard. Both of the following are HTTP 400 and they demand opposite
+  // verdicts, so the discriminator has to be the backend error code, not the status.
+  // Measured 2026-07-29: all 24 boot-window drops preceded their terminal's
+  // AgentSession start and none followed it — the session simply did not exist yet.
+  it('retries a 400 AGENT_SESSION_NOT_FOUND — the session is created moments later', async () => {
+    let attempts = 0;
+    fetchSpy.mockImplementation(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response(
+          JSON.stringify({ success: false, error: { code: 'AGENT_SESSION_NOT_FOUND', message: 'No active session for agent BAPert' } }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    const { reportPtyOutput } = await loadReporter();
+    reportPtyOutput('BAPert', 't-session-race', 'boot output', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+    expect(attempts).toBe(1);
+
+    // Recovers on the ladder rather than dropping, which is the whole point.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(attempts).toBe(2);
+  });
+
+  it('does not retry a 400 whose body carries no retryable code', async () => {
+    let attempts = 0;
+    fetchSpy.mockImplementation(async () => {
+      attempts += 1;
+      return new Response(
+        JSON.stringify({ success: false, error: { code: 'INVALID_PROVIDER', message: 'Provider must be one of: claude, kimi, codex' } }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+
+    const { reportPtyOutput } = await loadReporter();
+    reportPtyOutput('DotNetPert', 't-bad-body', 'nope', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+    expect(attempts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(32_000);
+    expect(attempts).toBe(1);
+  });
+
+  it('survives a 4xx whose body is empty or unparseable', async () => {
+    let attempts = 0;
+    fetchSpy.mockImplementation(async () => {
+      attempts += 1;
+      return new Response('<html>502 gateway</html>', { status: 400 });
+    });
+
+    const { reportPtyOutput } = await loadReporter();
+    reportPtyOutput('Aurum', 't-junk-body', 'x', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+
+    // No code parsed -> falls back to status-only handling (permanent), and
+    // critically does not throw while reading the body.
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(32_000);
+    expect(attempts).toBe(1);
+  });
+
   it('does not log per-chunk warnings when cloud post fails', async () => {
     fetchSpy.mockRejectedValue(new Error('backend down'));
     const { reportPtyOutput } = await loadReporter();

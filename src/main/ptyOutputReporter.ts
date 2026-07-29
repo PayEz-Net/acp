@@ -57,7 +57,17 @@ const pending = new Map<string, PendingOutput>();
  * only one of them means "auth was not ready yet". Collapsing them is what made
  * boot-window loss unattributable.
  */
-export type DropCause = 'no-token' | 'network' | 'server-error' | 'rejected' | 'cancelled';
+export type DropCause =
+  | 'no-token'
+  | 'network'
+  | 'server-error'
+  | 'rejected'
+  /** The cloud had no active agent session yet. Transient by construction — the
+   *  session is created moments later — so this is retried, not dropped. It gets
+   *  its own cause so an exhausted chain is distinguishable from a genuinely
+   *  malformed request. */
+  | 'session-pending'
+  | 'cancelled';
 
 interface RetryItem {
   payload: CloudOutputPayload;
@@ -241,15 +251,62 @@ function makeIdempotencyKey(): string {
   return `pty-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Carries the HTTP status so the caller can tell a transient failure from a
- *  request the backend will reject identically every time. */
+/**
+ * Carries the HTTP status AND the backend's error code, because status alone is
+ * not enough to decide retryability.
+ *
+ * Both of these are 400:
+ *   AGENT_SESSION_NOT_FOUND  — transient; the agent session is created seconds
+ *                              later and the identical body then succeeds.
+ *   (model validation)       — permanent; the body is malformed and always will be.
+ *
+ * Treating them alike is what turned recoverable boot-window output into silent
+ * permanent loss. The code is the discriminator.
+ */
 class AgentOutputPostError extends Error {
   readonly status: number;
+  /** Backend `error.code`, when the response carried a parseable one. */
+  readonly code: string | null;
 
-  constructor(status: number, statusText: string) {
-    super(`vibe-api POST /v1/agent-output failed: ${status} ${statusText}`);
+  constructor(status: number, statusText: string, code: string | null, detail?: string) {
+    super(
+      `vibe-api POST /v1/agent-output failed: ${status} ${statusText}` +
+      (code ? ` (${code})` : '') +
+      (detail ? ` — ${detail}` : ''),
+    );
     this.name = 'AgentOutputPostError';
     this.status = status;
+    this.code = code;
+  }
+}
+
+/** Backend codes that are transient despite arriving as a 4xx. */
+const RETRYABLE_ERROR_CODES = new Set(['AGENT_SESSION_NOT_FOUND']);
+
+/**
+ * Pull `error.code` out of a failed response without ever throwing.
+ *
+ * Reading the body is the only way to tell a transient 400 from a permanent one,
+ * and a diagnosis we cannot make is a drop we cannot justify. A body that is
+ * empty, truncated, or not JSON simply yields a null code — the caller then falls
+ * back to status-only handling, which is the pre-existing behavior.
+ */
+async function readErrorCode(res: Response): Promise<{ code: string | null; detail: string | null }> {
+  try {
+    const text = await res.text();
+    if (!text) return { code: null, detail: null };
+    try {
+      const parsed = JSON.parse(text);
+      const code = typeof parsed?.error?.code === 'string' ? parsed.error.code : null;
+      const message = typeof parsed?.error?.message === 'string' ? parsed.error.message : null;
+      return { code, detail: message ?? text.slice(0, 200) };
+    } catch {
+      // Not JSON — ASP.NET model-validation failures come back as ProblemDetails
+      // or plain text. Keep a bounded slice so the drop line still names a cause.
+      return { code: null, detail: text.slice(0, 200) };
+    }
+  } catch {
+    return { code: null, detail: null };
   }
 }
 
@@ -273,23 +330,38 @@ function classifyDrop(err: unknown): DropCause {
   if (err instanceof AgentOutputAuthError) return 'no-token';
   const status = (err as AgentOutputPostError)?.status;
   if (typeof status !== 'number') return 'network';
-  return status >= 500 ? 'server-error' : 'rejected';
+  if (status >= 500) return 'server-error';
+  const code = (err as AgentOutputPostError)?.code;
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return 'session-pending';
+  return 'rejected';
 }
 
 /**
  * Is this failure worth retrying with the same body?
  *
- * A 4xx means the request itself is wrong, so re-posting the identical payload
- * fails identically — that is what turned one rejected chunk into a burst of
- * `Retry failed for <agent>` lines at every boot. 408 and 429 are the two 4xx
- * codes that describe a transient condition, so they stay retryable, as does
- * any failure with no status at all (network error, abort, no token).
+ * Status-less failures (network, abort, no token) retry. 5xx retries. 408 and 429
+ * are the two 4xx *statuses* that describe a transient condition, so they retry.
+ *
+ * Everything else 4xx is permanent — with one measured exception. A 400 carrying
+ * `AGENT_SESSION_NOT_FOUND` is transient: PTY output flushes ~150ms after spawn
+ * while `startAgentSession` takes 10-15s, so the cloud legitimately has no session
+ * yet and the identical body succeeds once it does.
+ *
+ * This was measured, not theorised. On the 2026-07-29 boot, all 24 `rejected`
+ * drops fell strictly before their terminal's `[AgentSession] started` line and
+ * zero fell after. Prior to status-based retry rules these recovered on the
+ * 1/2/4/8/16s ladder; making all non-408/429 4xx permanent converted recoverable
+ * boot-window output into silent loss. Hence the code check rather than a status
+ * check — `AGENT_SESSION_NOT_FOUND` and a malformed-body 400 are the same status
+ * and opposite verdicts.
  */
 function isRetryable(err: unknown): boolean {
   const status = (err as AgentOutputPostError)?.status;
   if (typeof status !== 'number') return true;
   if (status === 408 || status === 429) return true;
-  return status >= 500;
+  if (status >= 500) return true;
+  const code = (err as AgentOutputPostError)?.code;
+  return code != null && RETRYABLE_ERROR_CODES.has(code);
 }
 
 /**
@@ -325,7 +397,8 @@ async function postAgentOutput(payload: CloudOutputPayload, idempotencyKey: stri
   });
 
   if (!res.ok) {
-    throw new AgentOutputPostError(res.status, res.statusText);
+    const { code, detail } = await readErrorCode(res);
+    throw new AgentOutputPostError(res.status, res.statusText, code, detail ?? undefined);
   }
 }
 
