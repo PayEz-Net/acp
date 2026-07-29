@@ -868,10 +868,17 @@ export function UnifiedTerminal({
       if (!value && staged.length === 0) return;
 
       // Slice B (WO 11585): a message sent while a turn is in flight is
-      // STEERED into the running turn by the adapter — it must NOT stop the
-      // active assistant turn (the old 'interrupted' kill) nor open a second
-      // one. Only open a new assistant turn when idle.
+      // STEERED into the running turn by the adapter — model-side continuity
+      // is untouched. But VISUALLY the streaming assistant block must seal
+      // here: chunks that arrive after the human's message belong BELOW it,
+      // otherwise the pane shows the answer above the question (Jon's
+      // report). stopActiveTurn closes the block cleanly (spinners stopped,
+      // stopReason marks the seam); post-question output lands in a fresh
+      // assistant turn under the question.
       const hasActiveTurn = !!useAcpSessionStore.getState().getSession(agentName)?.activeTurnId;
+      if (hasActiveTurn) {
+        useAcpSessionStore.getState().stopActiveTurn(agentName, 'continued below');
+      }
 
       const storeImages: StagedImageInput[] = staged.map((img) => ({
         id: img.id,
@@ -880,9 +887,7 @@ export function UnifiedTerminal({
         data: base64ToArrayBuffer(stripDataUrlPrefix(img.dataUrl)),
       }));
       useAcpSessionStore.getState().startUserTurn(agentName, sessionId, value, storeImages);
-      if (!hasActiveTurn) {
-        useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
-      }
+      useAcpSessionStore.getState().startAssistantTurn(agentName, sessionId);
 
       // Wire payload carries base64 without the data-URL prefix, matching the
       // adapter's { type: 'image', data, mimeType } content-block contract.

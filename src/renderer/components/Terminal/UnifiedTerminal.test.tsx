@@ -1514,7 +1514,7 @@ describe('UnifiedTerminal', () => {
       cleanup(root, container);
     });
 
-    it('keeps the active assistant turn when the user sends mid-turn (slice B steer)', () => {
+    it('seals the streaming block when the user sends mid-turn so the answer lands below the question', () => {
       useProjectStore.setState({
         activeProject: { id: 1, name: 'acp-desktop', runtime_choice: 'kimi' } as any,
       });
@@ -1555,8 +1555,6 @@ describe('UnifiedTerminal', () => {
       const { container, root } = render(<UnifiedTerminal agent={agent} terminalId="t1" />);
       const input = container.querySelector('[data-testid="terminal-input"]') as HTMLInputElement;
 
-      const activeTurnIdBefore = useAcpSessionStore.getState().getSession('NextPert')?.activeTurnId;
-
       act(() => {
         input.focus();
         input.value = 'Second';
@@ -1564,14 +1562,18 @@ describe('UnifiedTerminal', () => {
       });
 
       const session = useAcpSessionStore.getState().getSession('NextPert');
-      // The steered message joins the ACTIVE turn — no 'interrupted' kill, no
-      // second assistant turn. activeTurnId is unchanged.
-      expect(session?.activeTurnId).toBe(activeTurnIdBefore);
-      expect(session?.turns).toHaveLength(3);
+      // The steered message seals the VISUAL block (model-side steer into the
+      // live turn is untouched): the old assistant block is done at the seam,
+      // and a fresh assistant turn opens BELOW the user's message so later
+      // output never renders above the question.
+      expect(session?.turns).toHaveLength(4);
       expect(session?.turns[1].role).toBe('assistant');
-      expect(session?.turns[1].status).not.toBe('done');
+      expect(session?.turns[1].status).toBe('done');
+      expect(session?.turns[1].stopReason).toBe('continued below');
       expect(session?.turns[2].role).toBe('user');
       expect(session?.turns[2].contentText).toBe('Second');
+      expect(session?.turns[3].role).toBe('assistant');
+      expect(session?.activeTurnId).toBe(session?.turns[3].id);
       expect(mockSendAcpPrompt).toHaveBeenCalledWith(
         expect.objectContaining({ agent: 'NextPert', sessionId: 's1', text: 'Second' }),
       );
