@@ -298,12 +298,16 @@ async function readErrorCode(res: Response): Promise<{ code: string | null; deta
     try {
       const parsed = JSON.parse(text);
       const code = typeof parsed?.error?.code === 'string' ? parsed.error.code : null;
-      const message = typeof parsed?.error?.message === 'string' ? parsed.error.message : null;
-      return { code, detail: message ?? text.slice(0, 200) };
+      return { code, detail: null };
     } catch {
-      // Not JSON — ASP.NET model-validation failures come back as ProblemDetails
-      // or plain text. Keep a bounded slice so the drop line still names a cause.
-      return { code: null, detail: text.slice(0, 200) };
+      // Not JSON — ASP.NET model-validation failures arrive as ProblemDetails or
+      // plain text. Report only the SHAPE, never the content: this string is
+      // console-logged from the drop path, which does not pass through the cache
+      // service's secret scrubbing that this module's header advertises. An
+      // arbitrary upstream body is exactly the thing not to echo, and #114841 is
+      // open precisely because that scrubbing is unverified. The code is the only
+      // field any decision here depends on; the body was never load-bearing.
+      return { code: null, detail: `unparseable body, ${Buffer.byteLength(text)} bytes` };
     }
   } catch {
     return { code: null, detail: null };
