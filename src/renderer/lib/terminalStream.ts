@@ -120,7 +120,26 @@ const SPINNER_GLYPHS = /[\s]*(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛|⠶|
 
 // Status/noise glyphs that commonly appear on lines by themselves in provider
 // TUIs: checkmarks, crosses, dots, progress circles, etc.
-const STATUS_GLYPHS = /^(?:[\s]*(?:✓|✔|✗|✘|✕|✖|☐|☑|☒|✅|❌|❎|⚠️|⚠|ℹ️|ℹ|❓|❗|➤|➜|➔|→|⇒|\||\-|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛|⠶|⠮|⠵|◐|◓|◑|◒|◉|🔴|🟠|🟡|🟢|🔵|🟣|⚫|⚪|🟤|🔘|🟥|🟧|🟨|🟩|🟦|🟪|🟫|🌕|🌑|🌒|🌓|🌔|🌖|🌗|🌘|🌙|🔶|🔷|🔸|🔹|•|●|○|◦|▪|▫|◆|◇|⭐|🌟|✨|💫|⚡|🔥|\.)+[\s]*)+$/;
+//
+// ⚠️ SHAPE IS LOAD-BEARING — do not "tidy" this back into nested quantifiers.
+// This was `^(?:[\s]*(?:GLYPH)+[\s]*)+$`: a quantifier inside a quantifier with
+// [\s]* on BOTH sides of the inner group. Whitespace ending one iteration and
+// starting the next is interchangeable, so on a NON-matching line the engine
+// explores exponentially many partitions before it can conclude failure, and
+// the ^...$ anchors force it to exhaust every one. Measured on the old pattern:
+// 20 chars 16.7ms, 24 chars 248ms, 28 chars 4.0s, 30 chars 19.6s (~4x per added
+// character); 40 chars is roughly five hours. Clean matches ran in 0.1ms, which
+// is why it presented as an intermittent hang rather than as slowness.
+// Claude Code's Ink TUI paints bordered boxes continuously, and a border ending
+// in a corner glyph this list does not contain is exactly the failing input.
+// Root cause of the full-UI lockup, cards #114877 / #114859.
+//
+// Now ONE quantifier over a flat alternation: same language, no nesting. The
+// leading (?=\s*\S) preserves the old inner `+`, which required at least one
+// real glyph — without it a whitespace-only line would newly classify as a
+// status glyph. The alternation cannot become a character class because ⚠️ and
+// ℹ️ are multi-codepoint (VS16); longest-first ordering is therefore preserved.
+const STATUS_GLYPHS = /^(?=\s*\S)(?:\s|✓|✔|✗|✘|✕|✖|☐|☑|☒|✅|❌|❎|⚠️|⚠|ℹ️|ℹ|❓|❗|➤|➜|➔|→|⇒|\||\-|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛|⠶|⠮|⠵|◐|◓|◑|◒|◉|🔴|🟠|🟡|🟢|🔵|🟣|⚫|⚪|🟤|🔘|🟥|🟧|🟨|🟩|🟦|🟪|🟫|🌕|🌑|🌒|🌓|🌔|🌖|🌗|🌘|🌙|🔶|🔷|🔸|🔹|•|●|○|◦|▪|▫|◆|◇|⭐|🌟|✨|💫|⚡|🔥|\.)+$/;
 
 // Lines that are purely animated/provider spinner glyphs signal live thinking.
 // Distinct from STATUS_GLYPHS so checkmarks, bullets, and separators don't start
@@ -135,7 +154,28 @@ const THINKING_LABEL = /^(?:[\s│┃┣├]*[›>➤]\s*(?:thinking|analyzing|a
 // Repeated separator characters emitted by provider TUIs (e.g. "--- input ---",
 // "==========", "~~~~~~~~~~", "───", "━━━"). Includes ASCII separators and
 // box-drawing horizontal lines.
-const SEPARATOR_LINE = /^(?:[\s]*[-=~_+*#▁▂▃▄▅▆▇█─━]{3,}[\s]*)+$/;
+//
+// ⚠️ SHAPE IS LOAD-BEARING — see the STATUS_GLYPHS note above. This was
+// `^(?:[\s]*[SEP]{3,}[\s]*)+$`, the same nested-quantifier shape, and it
+// backtracked exponentially on non-matching input: 30 chars 1.4ms, 36 chars
+// 17.2ms, doubling every two characters. An 80-column box border is effectively
+// permanent. Splitting it in two removes the nesting entirely.
+//
+// The `{3,}` minimum cannot live inside the flattened alternation, so it moves
+// to its own unanchored run check. Both halves are linear.
+//
+// SEMANTIC DELTA, deliberate: the old pattern required EVERY whitespace-
+// separated run to be 3+, so it rejected "--- -". The new pair requires the line
+// to be entirely separators/whitespace AND to contain at least one run of 3+, so
+// "--- -" and "- - -" now classify as separators. Both readings call those
+// decorative; the per-run rule was an artifact of the nesting rather than an
+// intent, and no line containing a non-separator character matches either way.
+const SEPARATOR_LINE_BODY = /^(?:\s|[-=~_+*#▁▂▃▄▅▆▇█─━])+$/;
+const SEPARATOR_RUN = /[-=~_+*#▁▂▃▄▅▆▇█─━]{3,}/;
+
+function isSeparatorLine(text: string): boolean {
+  return SEPARATOR_LINE_BODY.test(text) && SEPARATOR_RUN.test(text);
+}
 
 // Provider footer / status metadata that is redrawn on every TUI frame.
 // Catches context-usage lines ("context: 69.4%"), token/cost counters, Kimi
@@ -168,6 +208,24 @@ const THINKING_END_MARKER = /<\/thinking>/i;
 // collapse key because we want to suppress *families* of status lines, not just
 // exact matches.
 type NoiseCategory = 'status-glyph' | 'thinking' | 'separator' | 'footer';
+
+/**
+ * Lines longer than this are never run through the noise classifiers.
+ *
+ * These classifiers all ask "is this ENTIRE line decorative?", and every kind of
+ * line that can answer yes — status bars, separators, spinners, footers — is
+ * bounded by terminal width. 200 comfortably clears a 120-column pane while
+ * keeping any pathological pattern, audited or not, off arbitrarily long input.
+ *
+ * This is a structural guard, not a fix. The two exponential patterns behind
+ * #114877 were repaired at the source; this exists so the next unaudited pattern
+ * cannot wedge the renderer before someone times it.
+ */
+const MAX_CLASSIFY_LINE_LEN = 200;
+
+function tooLongToClassify(text: string): boolean {
+  return text.length > MAX_CLASSIFY_LINE_LEN;
+}
 
 // Code-change detection heuristics for agent-emitted file edits.
 // Trigger lines name the file and operation (e.g. "Now modify TerminalPane.tsx...").
@@ -371,9 +429,24 @@ function collapseKey(text: string): string {
 }
 
 function classifyNoise(text: string): NoiseCategory | null {
+  // Length cap, deliberately at the CALL SITE rather than inside each pattern.
+  //
+  // Every classifier below answers "is this whole line decorative noise?", and
+  // none of them needs to consider a line this long — provider TUI status lines,
+  // separators and footers are all bounded by terminal width. A frame line, by
+  // contrast, can be arbitrarily long. Capping here protects the classifiers
+  // that have been audited AND any added later before anyone times them, which
+  // is the failure mode that produced #114877: the patterns were correct and
+  // nobody had measured them.
+  //
+  // Over the cap the line is treated as ordinary content, which is the safe
+  // direction: worst case a very long decorative line renders instead of being
+  // suppressed. Under it, nothing changes.
+  if (tooLongToClassify(text)) return null;
+
   // Check separator first so that repeated dash/pipe patterns (e.g. '---',
   // '==========') are treated as decorative separators, not status glyphs.
-  if (SEPARATOR_LINE.test(text)) return 'separator';
+  if (isSeparatorLine(text)) return 'separator';
   // Footer/status metadata is redrawn continuously (context %, token counters,
   // cost summaries). Treat as a family so numeric variants collapse.
   if (FOOTER_LINE.test(text)) return 'footer';
@@ -457,13 +530,20 @@ export class TerminalStreamNormalizer {
     let hist = this.history.get(terminalId);
 
     // --- Thinking-block handling -----------------------------------------
-    const isThinkingGlyphLine = THINKING_GLYPHS.test(text);
-    const isThinkingLabel = THINKING_LABEL.test(text);
+    // These three classifiers are applied directly rather than through
+    // classifyNoise, so they need the same length guard — see
+    // MAX_CLASSIFY_LINE_LEN. A thinking label or a pure-spinner frame is always
+    // short; a long line is content and is never either of these.
+    const classifiable = !tooLongToClassify(text);
+    const isThinkingGlyphLine = classifiable && THINKING_GLYPHS.test(text);
+    const isThinkingLabel = classifiable && THINKING_LABEL.test(text);
     // Fallback: any line that is composed solely of spinner/status glyphs and
     // whitespace should become a live thinking placeholder. This catches
     // provider-specific spinners (e.g. Kimi's colored-circle frames) whose exact
     // Unicode characters we may not have enumerated.
-    const isPureSpinnerLine = text.replace(SPINNER_GLYPHS, '').trim().length === 0 && text.trim().length > 0;
+    const isPureSpinnerLine = classifiable
+      && text.replace(SPINNER_GLYPHS, '').trim().length === 0
+      && text.trim().length > 0;
     const startsThinking = isThinkingLabel || isThinkingGlyphLine || isPureSpinnerLine || THINKING_START_MARKER.test(text);
     const endsThinking = THINKING_END_MARKER.test(text);
 

@@ -761,3 +761,104 @@ describe('TerminalStreamNormalizer', () => {
   });
 
 });
+
+/**
+ * Catastrophic-backtracking guards for the noise classifiers (#114877 / #114859).
+ *
+ * These assert TIME, not correctness, and that distinction is the whole point.
+ * The classifiers were correct throughout — a correctness-only suite passed green
+ * against patterns that took hours to reject an ordinary box border, which is
+ * exactly how this reached production. Only a timing assertion can fail on the
+ * defect.
+ *
+ * Input length matters. Each adversarial line here sits just UNDER
+ * MAX_CLASSIFY_LINE_LEN, so the patterns are genuinely exercised. Testing above
+ * the cap would pass even with the exponential patterns restored, because the
+ * cap would short-circuit before reaching them — a false green that would hide a
+ * reintroduced regression.
+ *
+ * Old-pattern cost at these lengths: STATUS_GLYPHS grew ~4x per added character
+ * (24 chars ≈ 249ms, 30 chars ≈ 19.6s), so 160 characters would not complete in
+ * any human timeframe. The threshold is loose to avoid CI flake; observed real
+ * values are single-digit milliseconds.
+ */
+describe('TerminalStreamNormalizer — ReDoS guards', () => {
+  const BUDGET_MS = 250;
+  // Just under MAX_CLASSIFY_LINE_LEN (200) so the classifiers actually run.
+  const LEN = 160;
+
+  function timeProcess(line: string): number {
+    const n = new TerminalStreamNormalizer();
+    const started = performance.now();
+    n.process(makeLine(line, 'claude'));
+    return performance.now() - started;
+  }
+
+  it('rejects a long non-matching dot run without backtracking (STATUS_GLYPHS)', () => {
+    // Trailing 'Z' is in no glyph alternative, forcing total failure — the case
+    // that made the engine exhaust every whitespace partition.
+    expect(timeProcess('.'.repeat(LEN) + 'Z')).toBeLessThan(BUDGET_MS);
+  });
+
+  it('rejects a long non-matching dash run without backtracking (SEPARATOR_LINE)', () => {
+    expect(timeProcess('-'.repeat(LEN) + 'Z')).toBeLessThan(BUDGET_MS);
+  });
+
+  it('rejects an interleaved glyph/whitespace run without backtracking', () => {
+    // Whitespace interleaved with class members is the adversarial shape for
+    // (?:\s*X+\s*)+ — whitespace can end one iteration or start the next.
+    expect(timeProcess('. '.repeat(LEN / 2) + 'Z')).toBeLessThan(BUDGET_MS);
+  });
+
+  it('rejects a box-drawing border ending in an uncovered corner glyph', () => {
+    // The real-world trigger: Ink paints bordered boxes continuously and the
+    // corner glyph is not in the separator class.
+    expect(timeProcess('─'.repeat(LEN) + '╮')).toBeLessThan(BUDGET_MS);
+  });
+
+  it('stays fast on a mixed pipe/dash/dot run', () => {
+    expect(timeProcess('|-. '.repeat(LEN / 4) + 'Z')).toBeLessThan(BUDGET_MS);
+  });
+
+  it('short-circuits classification above the length cap', () => {
+    // Over the cap the line is content, not noise, and must render rather than
+    // be suppressed.
+    const n = new TerminalStreamNormalizer();
+    const long = 'x'.repeat(400);
+    const started = performance.now();
+    const out = n.process(makeLine(long, 'claude'));
+    expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+    expect(out?.line).toBe(long);
+  });
+});
+
+describe('TerminalStreamNormalizer — classifier behaviour preserved', () => {
+  it('still suppresses a repeated status-glyph line', () => {
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('✓ ✓ ✓', 'claude'));
+    // Same line twice collapses — it is classified as noise, not content.
+    expect(n.process(makeLine('✓ ✓ ✓', 'claude'))).toBeNull();
+  });
+
+  it('still classifies a plain separator run', () => {
+    const n = new TerminalStreamNormalizer();
+    n.process(makeLine('----------', 'claude'));
+    expect(n.process(makeLine('----------', 'claude'))).toBeNull();
+  });
+
+  it('does not treat a whitespace-only line as a status glyph', () => {
+    // Regression guard for the rewrite: the old inner `+` required at least one
+    // real glyph. Flattening to (?:\s|GLYPH)+ would have matched pure whitespace
+    // and reclassified blank lines as status noise; the (?=\s*\S) lookahead is
+    // what preserves the original language.
+    const n = new TerminalStreamNormalizer();
+    const out = n.process(makeLine('   ', 'claude'));
+    expect(out?.thinkingLive).toBeFalsy();
+  });
+
+  it('does not classify a line containing real content as noise', () => {
+    const n = new TerminalStreamNormalizer();
+    const out = n.process(makeLine('--- building src/index.ts ---', 'claude'));
+    expect(out?.line).toContain('building');
+  });
+});
