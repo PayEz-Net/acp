@@ -134,7 +134,9 @@ describe('ptyOutputReporter', () => {
     });
 
     const { reportPtyOutput } = await loadReporter();
-    reportPtyOutput('DotNetPert', 't1', '\r\n', 'claude');
+    // Real content, not whitespace: an all-whitespace chunk is now skipped
+    // before any request, so it can no longer exercise the retry path at all.
+    reportPtyOutput('DotNetPert', 't1', 'rejected forever', 'claude');
     await vi.advanceTimersByTimeAsync(150);
     expect(attempts).toBe(1);
 
@@ -221,6 +223,44 @@ describe('ptyOutputReporter', () => {
     expect(attempts).toBe(1);
     await vi.advanceTimersByTimeAsync(32_000);
     expect(attempts).toBe(1);
+  });
+
+  // vsql-cache's OutputNormalizer discards whitespace-only lines, so an
+  // all-whitespace chunk stores zero rows. Posting it is a round trip that
+  // cannot produce a row — skip it. Stored output is unchanged by construction.
+  it('does not post a chunk with no non-whitespace character', async () => {
+    const { reportPtyOutput } = await loadReporter();
+
+    reportPtyOutput('BAPert', 't-ws', '\r\n', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    reportPtyOutput('BAPert', 't-ws2', '   \t  \r\n ', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('still posts a chunk that mixes whitespace with real content', async () => {
+    const { reportPtyOutput } = await loadReporter();
+
+    reportPtyOutput('BAPert', 't-mixed', '\r\n  build ok  \r\n', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1]?.body as string) ?? '{}');
+    // Sent verbatim — trimming is the normalizer's job, not the reporter's.
+    expect(body.data).toBe('\r\n  build ok  \r\n');
+  });
+
+  it('still posts ANSI-only output — escapes are not whitespace', async () => {
+    const { reportPtyOutput } = await loadReporter();
+
+    // A TUI repaint frame. The guard must NOT swallow these: narrowing what the
+    // store keeps of them is the OutputNormalizer's job (#114841).
+    reportPtyOutput('BAPert', 't-ansi', '[?25l[2K', 'claude');
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not log per-chunk warnings when cloud post fails', async () => {
