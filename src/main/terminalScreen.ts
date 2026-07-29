@@ -167,19 +167,32 @@ export class TerminalScreen {
   /** Drain the coalesced frame update, or null when nothing changed. */
   takeUpdate(): TerminalFrameUpdate | null {
     if (!this.dirty && this.appended.length === 0 && !this.cleared) return null;
-    let end = this.lines.length;
-    while (end > 1 && this.lines[end - 1].trim() === '') end--;
-    const screen = this.lines.slice(0, end).map((l) => l.replace(/\s+$/, ''));
     const update: TerminalFrameUpdate = {
       terminalId: this.terminalId,
       agentName: this.agentName,
-      screen,
+      screen: this.visibleRows(),
       historyAppended: this.appended.splice(0),
       historyCleared: this.cleared,
     };
     this.cleared = false;
     this.dirty = false;
     return update;
+  }
+
+  /** Current visible rows, trimmed exactly as `takeUpdate` trims them.
+   *
+   *  Teardown-only, and a pure read: it does NOT drain `dirty`/`appended`.
+   *  Rows reach the stored output record by scrolling into `historyAppended`;
+   *  rows still on screen when the PTY exits never scroll anywhere. Without
+   *  this, every session's final screenful would be missing from the record. */
+  snapshot(): string[] {
+    return this.visibleRows();
+  }
+
+  private visibleRows(): string[] {
+    let end = this.lines.length;
+    while (end > 1 && this.lines[end - 1].trim() === '') end--;
+    return this.lines.slice(0, end).map((l) => l.replace(/\s+$/, ''));
   }
 
   // --- internals -----------------------------------------------------------
@@ -236,7 +249,15 @@ export class TerminalScreen {
       const code = cp.codePointAt(0)!;
       // Drop stray C0/C1 controls and DEL that were not handled upstream.
       if (code < 0x20 || code === 0x7f || (code >= 0x80 && code < 0xa0)) continue;
-      if (this.col >= this.cols) this.linefeed(); // deferred wrap
+      // Deferred wrap: at the right margin the next glyph starts a new row at
+      // column 0 — NEL semantics (CR+LF), not IND. `linefeed()` alone only
+      // advances the row, which left the wrapped glyph at the column it
+      // wrapped FROM; each following glyph then landed one row down and one
+      // column right, producing the staircase that made panes unreadable.
+      if (this.col >= this.cols) {
+        this.linefeed();
+        this.col = 0;
+      }
       this.put(cp);
       this.col++;
     }

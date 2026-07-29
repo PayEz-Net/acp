@@ -46,7 +46,63 @@ function flushTerminalFrame(terminalId: string): void {
   const screen = terminalScreens.get(terminalId);
   if (!screen) return;
   const update = screen.takeUpdate();
-  if (update) safeSend(IPC_CHANNELS.TERMINAL_FRAME, update);
+  if (!update) return;
+  safeSend(IPC_CHANNELS.TERMINAL_FRAME, update);
+  if (update.historyAppended.length > 0) {
+    reportTerminalRows(terminalId, update.historyAppended);
+  }
+}
+
+/** Post finalized rows to the cloud output record.
+ *
+ *  Rows are reported ONLY once they have left the visible screen (or on
+ *  teardown, via disposeTerminalScreen). This is the whole point: the previous
+ *  path posted every raw `onData` chunk, so an in-place repaint — a spinner
+ *  tick, a pi-tui full-frame redraw behind ESC[2J ESC[H — became one POST per
+ *  animation frame. With 8 agents that saturated vibe-api into `no healthy
+ *  upstream` (503), and ptyOutputReporter then discarded each payload after 5
+ *  retries: garbled panes, burned CPU, and silent output loss from one cause.
+ *  TerminalScreen resolves the cursor addressing first; only settled lines are
+ *  sent. */
+function reportTerminalRows(terminalId: string, rows: string[]): void {
+  const managed = terminals.get(terminalId);
+  if (!managed) return;
+
+  // Split on ROW boundaries so one busy frame never becomes an unbounded POST
+  // body. Reporting settled batches instead of raw chunks collapsed POST COUNT
+  // but made POST SIZE unbounded — `MAX_BUFFER_BYTES` in the reporter only
+  // guards its accumulator, and a single call arriving pre-batched bypasses it.
+  // Observed 114KB bodies failing with cause=network before this cap. Never
+  // split mid-row: a partial line is corrupt content, not a smaller payload.
+  const MAX_REPORT_BYTES = 8192;
+  const send = (batch: string[]) => {
+    if (batch.length === 0) return;
+    reportPtyOutput(
+      managed.agentName,
+      terminalId,
+      batch.join('\n') + '\n',
+      managed.provider,
+      managed.projectId ? String(managed.projectId) : undefined,
+      undefined,
+      managed.sessionToken,
+    );
+  };
+
+  let batch: string[] = [];
+  let size = 0;
+  for (const row of rows) {
+    // A single row wider than the cap still goes alone — splitting it would
+    // corrupt the line, and the reporter handles an oversized body better than
+    // the replay handles a severed one.
+    if (batch.length > 0 && size + row.length + 1 > MAX_REPORT_BYTES) {
+      send(batch);
+      batch = [];
+      size = 0;
+    }
+    batch.push(row);
+    size += row.length + 1;
+  }
+  send(batch);
 }
 
 function scheduleTerminalFrameFlush(terminalId: string): void {
@@ -58,7 +114,17 @@ function scheduleTerminalFrameFlush(terminalId: string): void {
 }
 
 function disposeTerminalScreen(terminalId: string): void {
+  // Drains and reports any rows that had already scrolled off.
   flushTerminalFrame(terminalId);
+  // Rows still on the visible screen never scroll into `historyAppended`, so
+  // without this the final screenful of every session is missing from the
+  // stored record. Must run before `terminals.delete(terminalId)` — the
+  // reporter reads agentName/provider/sessionToken from the ManagedPty.
+  const screen = terminalScreens.get(terminalId);
+  if (screen) {
+    const finalRows = screen.snapshot();
+    if (finalRows.length > 0) reportTerminalRows(terminalId, finalRows);
+  }
   terminalScreens.delete(terminalId);
 }
 
@@ -764,15 +830,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data });
     terminalScreens.get(id)?.feed(data);
     scheduleTerminalFrameFlush(id);
-    reportPtyOutput(
-      agentName,
-      id,
-      data,
-      provider,
-      opts?.projectId ? String(opts.projectId) : undefined,
-      undefined,
-      managed.sessionToken,
-    );
+    // NOT reported here. Raw chunks carry cursor addressing, so posting them
+    // turned every in-place repaint into a stored line and a POST. Reporting
+    // happens in flushTerminalFrame once rows settle. See reportTerminalRows.
 
     const buf = Buffer.from(data);
     if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {
@@ -786,13 +846,15 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   ptyProcess.onExit(({ exitCode }) => {
     void endAgentSession(id, 'normal');
     safeSend(IPC_CHANNELS.PTY_EXIT, { terminalId: id, exitCode });
+    // Must precede flushPtyOutput: dispose reports the final screenful into the
+    // reporter's buffer, and flushing first would ship the buffer without it.
+    disposeTerminalScreen(id);
     flushPtyOutput(id);
     if (managed.mailPollTimer) {
       clearInterval(managed.mailPollTimer);
       managed.mailPollTimer = null;
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
-    disposeTerminalScreen(id);
     terminals.delete(id);
     // Report to acp-api via callback
     if (onPtyExit) {

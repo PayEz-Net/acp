@@ -115,4 +115,35 @@ describe('TerminalScreen', () => {
     s.feed('\x1b[1;5HX\r\n');
     expect(s.takeUpdate()!.screen).toEqual(['    X']);
   });
+
+  // --- POST-flood fix: only settled rows reach the stored output record ------
+  // pty.ts reports `historyAppended`, never raw chunks. These pin the property
+  // that makes that safe. Previously every repaint below was one POST.
+
+  it('in-place repaints produce NO history rows', () => {
+    const s = make(40, 10);
+    // 20 spinner frames rewriting the same row, as a TUI repaints one.
+    for (let i = 0; i < 20; i++) s.feed(`\rRuminating… (${i}s)`);
+    const u = s.takeUpdate()!;
+    expect(u.historyAppended).toEqual([]);
+    expect(u.screen.length).toBe(1);
+  });
+
+  it('rows that scroll off ARE reported as history', () => {
+    // Control arm: zero history above means nothing only if scrolling
+    // provably yields history on the same instrument.
+    const s = make(40, 3);
+    s.feed('one\r\ntwo\r\nthree\r\nfour\r\n');
+    expect(s.takeUpdate()!.historyAppended.length).toBeGreaterThan(0);
+  });
+
+  it('snapshot reads visible rows without draining state', () => {
+    const s = make(20, 5);
+    s.feed('hello\r\n');
+    s.takeUpdate();
+    expect(s.snapshot()).toEqual(['hello']);
+    // A pure read: it must not mark the screen dirty, or teardown would
+    // re-report rows that were already sent.
+    expect(s.takeUpdate()).toBeNull();
+  });
 });

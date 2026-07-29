@@ -18,7 +18,10 @@ The Electron desktop app that humans use to orchestrate, observe, and interact w
 - **Electron 28** — Desktop framework
 - **React 18** + **TypeScript** — UI
 - **Vite** — Build tool
-- **xterm.js** + **node-pty** — Terminal emulation (each pane runs a Claude Code session)
+- **node-pty** — PTY spawning (each pane runs a Claude Code session)
+- **`src/main/terminalScreen.ts`** — terminal emulation. A headless screen model in the
+  MAIN process interprets ConPTY cursor addressing and emits frame updates over IPC;
+  the renderer paints those frames. There is NO xterm.js in this app.
 - **zustand** — State management
 - **electron-store** — Settings persistence
 - **Tailwind CSS** — Styling
@@ -41,7 +44,7 @@ acp-desktop/
 │   ├── renderer/          Electron renderer process (React)
 │   │   ├── App.tsx        Root component
 │   │   ├── components/    UI components
-│   │   │   ├── Terminal/  xterm.js terminal grid
+│   │   │   ├── Terminal/  terminal grid (paints frames from terminalScreen.ts)
 │   │   │   └── Layout/    TitleBar, sidebars
 │   │   ├── hooks/         React hooks
 │   │   ├── services/      API clients
@@ -128,7 +131,12 @@ Each pane spawns a Claude Code session via node-pty and auto-injects `"report as
 - **Harness Spec**: `E:\Repos\Agents\BAPert\specs\planned\VIBE_AGENTS_HARNESS_SPEC.md`
 - **Harness Analysis**: `E:\Repos\acp-api\docs\acp_harness_analysis.md`
 
-<!-- gitnexus:start -->
+<!-- gitnexus:start — DISABLED 2026-07-29 (Jon): the GitNexus MCP tools are not
+     connected to this project, so the "MUST run impact analysis before editing any
+     symbol" mandate below directed agents at tools that do not exist. Everything
+     down to the gitnexus:end marker is inert. To re-enable, delete this comment
+     wrapper and the closing marker's comment terminator.
+
 # GitNexus — Code Intelligence
 
 This project is indexed by GitNexus as **acp** (4446 symbols, 9180 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
@@ -171,4 +179,5 @@ This project is indexed by GitNexus as **acp** (4446 symbols, 9180 relationships
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
-<!-- gitnexus:end -->
+gitnexus:end -->
+

@@ -8,6 +8,7 @@ import net from 'net';
 import { execSync } from 'child_process';
 import path from 'path';
 import { setupPtyHandlers, killAllPty } from './pty';
+import { initOutputSpill } from './ptyOutputReporter';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus, acpApiCall, ACP_API_URL } from './acp-api-client';
@@ -439,6 +440,13 @@ app.whenReady().then(async () => {
     showAlreadyRunningAndQuit();
     return;
   }
+
+  // Enable the on-disk output queue before anything can produce output. Started
+  // here (rather than lazily on first failure) so output spilled by a PREVIOUS
+  // run that was killed mid-outage drains on this boot instead of sitting
+  // orphaned on disk. Runs after the single-instance check so two instances
+  // never drain the same directory concurrently.
+  initOutputSpill(app.getPath('userData'));
 
   // Collision check #2 — foreign/zombie the lock misses (different app-id /
   // cross-build, or a zombie that released the lock but still holds the OAuth

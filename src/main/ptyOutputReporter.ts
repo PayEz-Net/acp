@@ -3,9 +3,16 @@
  *
  * Taps raw node-pty output from acp-desktop and forwards it to the PayEzVibe
  * API (VIBE_API_URL), which authenticates the user and forwards to the internal
- * cache service. The cache service normalizes the stream (strip ANSI, scrub
- * secrets) and re-emits it as `agent-output` SSE events that the renderer
- * consumes for the unified agent-overview UI.
+ * cache service, which re-emits it as `agent-output` SSE events that the
+ * renderer consumes for the unified agent-overview UI.
+ *
+ * ⚠️ This header used to state that the cache service "normalizes the stream
+ * (strip ANSI, scrub secrets)". ANSI stripping is DISPROVEN — raw CSI sequences
+ * are at rest in the store, observed via `/v1/terminal/replay` on 2026-07-29.
+ * Secret scrubbing is therefore UNVERIFIED, not disproven: it is the untested
+ * half of a sentence whose other half was false. Do not rely on either. Tracked
+ * as card #114841; treat anything written to this path as stored verbatim until
+ * that canary test says otherwise.
  *
  * Batching: PTY output is high-frequency and byte-granular, so we coalesce
  * per-terminal chunks and flush on a short timer or when the buffer grows.
@@ -17,7 +24,10 @@
  *
  * Drop accounting: output that is never delivered is recorded per terminal and
  * logged at the point of loss, with the cause (`no-token` / `network` /
- * `rejected` / `cancelled`) and the offset from that terminal's first byte.
+ * `server-error` / `rejected` / `session-pending` / `cancelled`) and the offset
+ * from that terminal's first byte. Keep this list in sync with `DropCause` —
+ * an enumeration in prose that drifts from the union below is the same defect
+ * class this module exists to surface.
  * `getDropStats()` exposes the same data for external instrumentation. Loss is
  * expected under a down backend; loss that cannot be attributed to a terminal
  * and a cause is what makes a replay capture unauditable.
@@ -25,6 +35,7 @@
 
 import { getAccessToken } from './auth';
 import { VIBE_API_URL } from './env';
+import { configureSpill, drainSpill, spillOutput, spillStats, isSpillConfigured } from './outputSpill';
 
 interface PendingOutput {
   agentName: string;
@@ -413,13 +424,114 @@ function scheduleRetry(
   lastCause: DropCause,
 ): void {
   if (attempts >= MAX_RETRIES) {
-    recordDrop(payload, lastCause, attempts, true);
+    // Exhausting in-memory retries is NOT the end of the line any more. Hand
+    // the payload to the disk queue; only a queue that refuses it is a real
+    // drop. See outputSpill.ts for why (2.26 MB destroyed by one outage).
+    void spillOrDrop(payload, idempotencyKey, lastCause, attempts);
     return;
   }
   const delay = Math.min(RETRY_BASE_MS * Math.pow(2, attempts), RETRY_MAX_MS);
   const item: RetryItem = { payload, idempotencyKey, attempts, lastCause, timer: null };
   retryQueue.push(item);
   item.timer = setTimeout(() => { void processRetry(item); }, delay);
+}
+
+/**
+ * Last stop before loss: persist the payload, or record a genuine drop.
+ *
+ * A spilled payload is deliberately NOT counted as a drop — it still exists and
+ * will be sent when the backend returns. Counting it would make the drop stats
+ * lie in the safe direction, which is still lying. An EVICTED payload IS a drop:
+ * the queue was full and something older was destroyed to make room.
+ */
+async function spillOrDrop(
+  payload: CloudOutputPayload,
+  idempotencyKey: string,
+  cause: DropCause,
+  attempts: number,
+): Promise<void> {
+  if (!isSpillConfigured()) {
+    recordDrop(payload, cause, attempts, true);
+    return;
+  }
+  const { result, evictedBytes } = await spillOutput(payload, idempotencyKey);
+  if (result === 'unavailable') {
+    console.warn(
+      `[PtyOutput] SPILL UNAVAILABLE for ${payload.agentName} — falling back to drop`,
+    );
+    recordDrop(payload, cause, attempts, true);
+    return;
+  }
+  if (result === 'evicted') {
+    // Loud on purpose: the queue is full, so we are now destroying the oldest
+    // output to keep accepting new. Silence here would read as "all retained".
+    console.warn(
+      `[PtyOutput] SPILL FULL — evicted ${evictedBytes} bytes of older output ` +
+        `to queue ${payload.agentName}. Backend has been unreachable long enough ` +
+        `to overflow the on-disk queue.`,
+    );
+    recordDrop(payload, cause, attempts, true);
+    return;
+  }
+  spilledCount++;
+  spilledBytes += Buffer.byteLength(payload.data);
+}
+
+let spilledCount = 0;
+let spilledBytes = 0;
+let drainTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Enable the on-disk queue and start draining it.
+ *
+ * Call once at main-process startup with `app.getPath('userData')`. Draining
+ * starts immediately so output spilled by a PREVIOUS run — one that was killed
+ * mid-outage — is recovered rather than orphaned on disk.
+ */
+export function initOutputSpill(userDataDir: string, drainIntervalMs = 15_000): void {
+  configureSpill(`${userDataDir}/agent-output-spill`);
+  if (drainTimer) clearInterval(drainTimer);
+  drainTimer = setInterval(() => { void runDrain(); }, drainIntervalMs);
+  if (typeof drainTimer.unref === 'function') drainTimer.unref();
+  void runDrain();
+}
+
+let draining = false;
+
+async function runDrain(): Promise<void> {
+  if (draining) return; // a slow drain must not overlap itself
+  draining = true;
+  try {
+    const res = await drainSpill<CloudOutputPayload>(
+      (payload, key) => postAgentOutput(payload, key),
+    );
+    if (res.sent > 0) {
+      console.log(
+        `[PtyOutput] Recovered ${res.sent} spilled payload(s) from disk; ` +
+          `${res.remaining} still queued`,
+      );
+    }
+  } catch {
+    /* next tick retries */
+  } finally {
+    draining = false;
+  }
+}
+
+/** Spill/queue counters for status reporting. */
+export async function getSpillStats(): Promise<{
+  spilledCount: number;
+  spilledBytes: number;
+  queuedEntries: number;
+  queuedBytes: number;
+}> {
+  const s = await spillStats();
+  return {
+    spilledCount,
+    spilledBytes,
+    queuedEntries: s.entries,
+    queuedBytes: s.bytes,
+  };
 }
 
 async function processRetry(item: RetryItem): Promise<void> {
@@ -451,6 +563,23 @@ async function flushEntry(key: string): Promise<void> {
   }
 
   if (!data) return;
+
+  // A chunk with no non-whitespace character persists NOTHING, so posting it is
+  // a round trip that cannot produce a row. vsql-cache's OutputNormalizer
+  // (Services/OutputNormalizer.cs:27-34) splits into lines, trims each, and
+  // `continue`s on IsNullOrWhiteSpace — an all-whitespace chunk yields an empty
+  // result. Skipping here is therefore EXACTLY equivalent in stored output, and
+  // saves one HTTP request per flush per agent, continuously, across the team.
+  //
+  // This is not a drop and is deliberately not counted as one: nothing is lost
+  // that the backend would otherwise have kept. It is also not the same thing as
+  // the server's `[Required(AllowEmptyStrings = true)]` relaxation — that fixes
+  // the wrong STATUS (whitespace is not a client error); this removes the
+  // pointless CALL. Both are correct, for different reasons.
+  //
+  // NOTE: ANSI escapes are not whitespace, so TUI repaint frames still post.
+  // Narrowing that is the OutputNormalizer work (#114841), not this guard's job.
+  if (!data.trim()) return;
 
   const payload: CloudOutputPayload = {
     agentName: entry.agentName,
