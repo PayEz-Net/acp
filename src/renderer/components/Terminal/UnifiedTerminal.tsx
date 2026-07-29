@@ -131,6 +131,13 @@ const PROVIDER_NOISE =
   /bypass permissions|shift\+tab to cycle|Transcript saving is off|Debug ACP development environment startup/i;
 
 /**
+ * The ACP's own boot kickoff, injected into argv so the agent reads its system
+ * prompt before any user message. It is machinery, not something the human said,
+ * and rendering it as a prompt line implies the user typed it. Hidden.
+ */
+const BOOT_KICKOFF = /^[\s>›❯]*Begin\.\s*$/;
+
+/**
  * Is this screen row the provider echoing back a message WE sent?
  *
  * Matched against text we actually wrote (exact), after stripping the prompt
@@ -315,12 +322,7 @@ export function UnifiedTerminal({
         (line) =>
           !PROVIDER_EMPTY_CHROME.test(line) &&
           !PROVIDER_NOISE.test(line) &&
-          // Drop the provider's ECHO of what we sent. The store already holds
-          // that message as a `source: 'user'` line and renders it as a bubble,
-          // so the TUI's chevron reprint is a duplicate of it — the same text
-          // twice, in two different styles, which is worse than either alone.
-          // Keep the bubble (ours, styled, unambiguous), drop the echo.
-          !isOwnEcho(line, sentText),
+          !BOOT_KICKOFF.test(line),
       )
       .map((line, i) => {
       // Frame rows were unconditionally stamped 'agent', so the user's OWN
@@ -328,21 +330,37 @@ export function UnifiedTerminal({
       // agent's, distinguished only by a leading chevron. A one-character glyph
       // is not an affordance: nobody should have to learn that `›` means "you".
       // Strip the provider's prompt marker and see if we sent this line.
+      // The FRAME copy of a message we sent is the one in the right place —
+      // it sits where you typed it, between the surrounding output. The store's
+      // copy renders before the entire current screen (history precedes frame
+      // rows), so it would appear stranded above unrelated output. So: style the
+      // frame echo as the bubble, and drop the store's duplicate below.
+      const own = isOwnEcho(line, sentText);
       return {
         id: `frame-${terminalId}-${i}`,
         agent: agentName,
         terminal_id: terminalId ?? '',
-        line,
+        // Strip the provider's prompt gutter — inside a bubble it is noise.
+        line: own ? line.replace(/^[\s>›❯$|┃│]+/, '').trim() : line,
         ts: '',
-        source: PROVIDER_CHROME.test(line) ? ('info' as const) : ('agent' as const),
+        source: own
+          ? ('user' as const)
+          : PROVIDER_CHROME.test(line)
+            ? ('info' as const)
+            : ('agent' as const),
       };
     });
     // Drop the store's own copy of anything the screen model is already showing
     // as the user's line, or the message renders twice.
-    // No dedup needed on this side: the provider's echo is filtered out above,
-    // so the store's own `source: 'user'` line is the single copy of a message
-    // we sent, and it renders as the bubble.
-    return [...filteredLines, ...screenLines];
+    // Drop the store's copy of anything the screen is already showing as ours,
+    // or the message renders twice — once stranded in history, once in place.
+    const shownAsOwn = new Set(
+      screenLines.filter((l) => l.source === 'user').map((l) => l.line),
+    );
+    const history = shownAsOwn.size
+      ? filteredLines.filter((l) => !(l.source === 'user' && shownAsOwn.has(l.line.trim())))
+      : filteredLines;
+    return [...history, ...screenLines];
   }, [filteredLines, frameScreen, agentName, terminalId, sentText]);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
 
