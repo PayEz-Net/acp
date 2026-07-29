@@ -11,6 +11,7 @@ import {
   type NoTeamEngagedPayload,
   type SpawnFailedPayload,
   type TerminalProvider,
+  type ClaudeEffort as SharedClaudeEffort,
 } from '../shared/types';
 import {
   type AcpEventPayload,
@@ -150,7 +151,7 @@ interface ManagedPty {
   // Handle for the Kimi/Codex inbox poller. Claude agents use the MCP
   // channel server (acp-mail-channel.js) instead and leave this null.
   mailPollTimer: NodeJS.Timeout | null;
-  // Path to the boot-prompt tmp file passed via --system-prompt (Claude)
+  // Path to the boot-prompt tmp file passed via --system-prompt-file (Claude)
   // or kept for reference when PTY-injected (Kimi/Codex). Cleaned up on
   // PTY exit. Null when no boot-prompt was provided (legacy 4-pane mode
   // or the orchestrator passed bootPrompt:null).
@@ -171,12 +172,17 @@ interface ManagedPty {
 
 export type AgentRuntime = TerminalProvider;
 
-export type ClaudeEffort = 'low' | 'medium' | 'high' | 'max';
+/**
+ * Re-exported from shared/types so main-process callers keep importing
+ * `ClaudeEffort` from here. The union itself lives in ONE place now
+ * (CLAUDE_EFFORTS) — this was a hand-written duplicate missing 'xhigh'.
+ */
+export type ClaudeEffort = SharedClaudeEffort;
 
 export interface SpawnAgentOptions {
   /** Wave D assembled system prompt from `/v1/projects/:id/boot-prompt/:agent_id`.
    *  When provided, replaces the legacy "report as <Agent>" kickoff: Claude
-   *  receives it via `--system-prompt <file>`; Kimi/Codex receive it via
+   *  receives it via `--system-prompt-file <file>`; Kimi/Codex receive it via
    *  PTY-injection after banner (until those CLIs add a --system-prompt
    *  flag — code-commented in the spawn paths). */
   bootPrompt?: string;
@@ -556,7 +562,7 @@ function cleanupBootPromptTmpFile(filepath: string | null): void {
  *
  * When `opts.bootPrompt` is provided (Wave C/D), it overrides the
  * legacy "report as <Agent>" kickoff string. Claude takes it via
- * `--system-prompt <file>` (full Wave D assembled prompt). Kimi/Codex
+ * `--system-prompt-file <file>` (full Wave D assembled prompt). Kimi/Codex
  * take a shorter PTY-injected form because those CLIs don't expose a
  * system-prompt flag yet (verify with `kimi --help` / `codex --help`
  * upstream; migrate when the flag lands per `feedback_no_acknowledged_defect_ships`).
@@ -773,7 +779,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
   });
 
   // Write boot-prompt to a tmp file up-front so the spawn command can
-  // reference it via --system-prompt (Claude) and the orchestrator
+  // reference it via --system-prompt-file (Claude) and the orchestrator
   // can clean it up on PTY exit (any runtime).
   const bootPromptTmpPath = bootPrompt
     ? writeBootPromptTmpFile(agentName, bootPrompt)
@@ -894,8 +900,24 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       //     system prompt first, then takes the user message.
       //   - Legacy path (no bootPrompt) no longer exists; we always
       //     synthesize a code-generated boot prompt.
+      // `--system-prompt-file`, NOT `--system-prompt`. This is the LIVE spawn
+      // string — providerConfigs.ptyCommand looks like it does this job but has
+      // ZERO callers and is dead in all three providers. Fixing it there does
+      // nothing; it has now misled two work orders in one day.
+      //
+      // `--system-prompt` takes literal prompt TEXT. Passing a path meant every
+      // Claude pane booted with the literal string
+      // "C:\...\boot-prompt-<Agent>-<ts>.txt" as its ENTIRE system prompt — no
+      // persona, no role, no mail discipline, no project instructions. Not
+      // degraded: absent. Agents only appeared to work because they are
+      // competent generalists who open a path when handed one.
+      //
+      // Proven A/B on the wire (claude 2.1.220), same file both arms:
+      //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
+      //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."  (the file's instruction)
+      // Found by QAPert 2026-07-29. Do not "simplify" this back.
       const systemPromptFlag = bootPromptTmpPath
-        ? ` --system-prompt "${bootPromptTmpPath}"`
+        ? ` --system-prompt-file "${bootPromptTmpPath}"`
         : '';
       // NOTE — claude has NO mail delivery path (Gate B, wire-verified
       // 2026-07-29), and this spawn no longer pretends otherwise.
