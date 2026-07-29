@@ -110,6 +110,26 @@ const PROVIDER_CHROME =
  */
 const PROVIDER_EMPTY_CHROME = /^(?:[\s│┃]*[>›❯][\s]*|[\s│┃─━═_]{3,})$/;
 
+/**
+ * Named status furniture that is HIDDEN outright, by exact phrase.
+ *
+ * Dimming was not enough: it still occupies rows at the bottom of every pane
+ * forever, and in a tool scanned at a glance a permanently-present block is a
+ * permanent tax on the reader. None of it is information — it restates a
+ * launch-time setting, a keybinding we already surface, and an env artifact.
+ *
+ * DELIBERATELY PHRASE-SPECIFIC, not `/^⚠/`. A blanket warning filter would also
+ * swallow a REAL provider warning (rate limit, quota, degraded model), which is
+ * exactly the content you most need to see. Each entry here is a known-constant
+ * string; anything unrecognised stays visible and merely dims via
+ * PROVIDER_CHROME. Add to this list only with a phrase you can point at.
+ *
+ * `esc to interrupt` is safe to hide because TURN_ACTIVE reads the UNFILTERED
+ * frame — the header's live-state signal does not depend on the row being shown.
+ */
+const PROVIDER_NOISE =
+  /bypass permissions|shift\+tab to cycle|Transcript saving is off|Debug ACP development environment startup/i;
+
 const SAMPLE_CHARS = 'MMMMMMMMMM';
 const AUTO_SCROLL_THRESHOLD_PX = 40;
 const FOOTER_DEBOUNCE_MS = 100;
@@ -280,7 +300,7 @@ export function UnifiedTerminal({
   const displayLines = useMemo<AgentOutputLine[]>(() => {
     if (!frameScreen || frameScreen.length === 0) return filteredLines;
     const screenLines: AgentOutputLine[] = frameScreen
-      .filter((line) => !PROVIDER_EMPTY_CHROME.test(line))
+      .filter((line) => !PROVIDER_EMPTY_CHROME.test(line) && !PROVIDER_NOISE.test(line))
       .map((line, i) => {
       // Frame rows were unconditionally stamped 'agent', so the user's OWN
       // message — echoed back by the provider TUI — rendered identically to the
