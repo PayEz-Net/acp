@@ -181,8 +181,14 @@ export class AcpRuntimeManager extends EventEmitter {
   // mid-turn STEERS in to influence the live task — but text only posts at
   // turn end, so a perpetually-busy agent (mail storms, long tool chains)
   // never owes the human a reply. The FIRST human steer of a busy episode
-  // arms this timer (later steers don't extend the deadline); on expiry the
-  // turn is cancelled and a front-of-queue nudge opens a dedicated reply turn.
+  // arms this two-stage timer (later steers don't extend the deadline):
+  //   1. HUMAN_REPLY_WARN_MS — a warning steer asks the agent to close its
+  //      step and answer; the task list survives because the agent ends its
+  //      OWN turn cleanly (Jon's preference: don't shut the task down).
+  //   2. HUMAN_REPLY_GRACE_MS — last resort: session/cancel + a front-of-queue
+  //      nudge that TELLS the agent it was cut off and to resume after
+  //      answering.
+  private humanWaitWarnTimer: ReturnType<typeof setTimeout> | null = null;
   private humanWaitTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Crash-recovery state. We track whether a kill was intentional so an
@@ -861,6 +867,18 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   private armHumanWaitBackstop(): void {
     if (this.humanWaitTimer) return;
+    // Stage 1 (45s): warn, don't cancel. The agent closes its own turn at a
+    // clean boundary — the task list is never shut down when it complies.
+    this.humanWaitWarnTimer = setTimeout(() => {
+      this.humanWaitWarnTimer = null;
+      if (!this.promptInFlight || !this.process?.isRunning()) return;
+      console.warn(
+        `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_WARN_MS}ms inside a busy turn — sending wrap-up warning steer`,
+      );
+      void this.steerThrough([{ type: 'text', text: HUMAN_WAIT_WARNING }], { queueOnBusy: false });
+    }, HUMAN_REPLY_WARN_MS);
+    // Stage 2 (60s): last resort. Cancel, and the nudge tells the agent it was
+    // cut off so it can resume after answering.
     this.humanWaitTimer = setTimeout(() => {
       this.humanWaitTimer = null;
       // Turn ended in the meantime — the natural turn flow owned the reply.
@@ -878,6 +896,10 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private clearHumanWaitBackstop(): void {
+    if (this.humanWaitWarnTimer) {
+      clearTimeout(this.humanWaitWarnTimer);
+      this.humanWaitWarnTimer = null;
+    }
     if (this.humanWaitTimer) {
       clearTimeout(this.humanWaitTimer);
       this.humanWaitTimer = null;
@@ -1603,13 +1625,27 @@ const AGENT_BUSY_CANCEL_AFTER = 3;
 const HUMAN_REPLY_GRACE_MS = 60_000;
 
 /**
+ * Stage 1 of the human-reply backstop: after this long with the human's
+ * steered message still unanswered, send a wrap-up warning INTO the live turn
+ * (a steer, not a cancel). The agent ends its own turn at a clean boundary —
+ * the task list is never shut down when it complies.
+ */
+const HUMAN_REPLY_WARN_MS = 45_000;
+
+const HUMAN_WAIT_WARNING =
+  '[ACP] The human sent you a message during this turn and is still waiting for a direct reply. ' +
+  'Wrap up your current step and answer them in text NOW. If this turn is still running in ~15 seconds, ' +
+  'the platform will end it so they get a reply turn — closing it cleanly yourself keeps your task intact.';
+
+/**
  * Front-of-queue nudge dispatched after the human-reply backstop cancels a
- * busy turn. The human's steered message is already in the session's context
- * — this only opens the dedicated reply turn and pins its purpose.
+ * busy turn. The human's steered message is already in the session's context;
+ * this opens the dedicated reply turn, TELLS the agent it was cut off (Jon's
+ * rule: never let an agent wonder why its turn died), and pins the resume.
  */
 const HUMAN_WAITING_NUDGE =
-  '[ACP] The human sent you a message during your previous turn (it is in your context above) and is still waiting for a direct reply. ' +
-  'Answer them now — briefly, in text, no tools — then resume your work.';
+  '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
+  'Answer the human’s message now — briefly, in text, no tools — then resume the task from where you were cut off.';
 
 /**
  * Detect a turn.agent_busy rejection. AcpProcess flattens JSON-RPC errors to

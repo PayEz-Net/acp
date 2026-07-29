@@ -524,9 +524,18 @@ describe('AcpRuntimeManager', () => {
       const human2 = manager.prompt('hello??');
       await vi.advanceTimersByTimeAsync(0);
 
-      // 60s from the FIRST unanswered steer, with the turn still running →
-      // cancel + reply-turn nudge.
-      await vi.advanceTimersByTimeAsync(30_000);
+      // Stage 1 at 45s: a wrap-up WARNING steers into the live turn — no
+      // cancel yet; the agent may close its own turn cleanly.
+      await vi.advanceTimersByTimeAsync(15_000);
+      const texts45 = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts45.some((t) => t.includes('Wrap up your current step'))).toBe(true);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+
+      // Stage 2 at 60s from the FIRST unanswered steer, turn still running →
+      // cancel + reply-turn nudge that tells the agent it was cut off.
+      await vi.advanceTimersByTimeAsync(15_000);
       expect(process.notifications).toContainEqual({
         method: 'session/cancel',
         params: { sessionId: 'sess-backstop' },
@@ -543,7 +552,9 @@ describe('AcpRuntimeManager', () => {
       const texts = process.requests
         .filter((r) => r.method === 'session/prompt')
         .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
-      expect(texts.some((t) => t.includes('still waiting for a direct reply'))).toBe(true);
+      const nudge = texts.find((t) => t.includes('MID-TASK'));
+      expect(nudge).toBeDefined();
+      expect(nudge).toContain('resume the task from where you were cut off');
     } finally {
       vi.useRealTimers();
     }
@@ -571,14 +582,15 @@ describe('AcpRuntimeManager', () => {
       await first;
       await human;
 
-      // Long past the grace: no cancel, no reply-turn nudge, ever.
+      // Long past the grace: no cancel, no warning steer, no reply-turn nudge.
       await vi.advanceTimersByTimeAsync(120_000);
       const process = getProcess();
       expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
       const texts = process.requests
         .filter((r) => r.method === 'session/prompt')
         .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
-      expect(texts.some((t) => t.includes('still waiting for a direct reply'))).toBe(false);
+      expect(texts.some((t) => t.includes('MID-TASK'))).toBe(false);
+      expect(texts.some((t) => t.includes('Wrap up your current step'))).toBe(false);
     } finally {
       vi.useRealTimers();
     }
