@@ -89,12 +89,6 @@ interface ManagedPty {
   // PTY exit. Null when no boot-prompt was provided (legacy 4-pane mode
   // or the orchestrator passed bootPrompt:null).
   bootPromptTmpPath: string | null;
-  // Path to the per-spawn MCP config tmp file passed via --mcp-config so
-  // Claude's `--dangerously-load-development-channels server:acp-mail`
-  // resolves the acp-mail push channel. Per-spawn (not a shared cwd
-  // .mcp.json) so each agent's ACP_AGENT_NAME is collision-free. Cleaned
-  // on PTY exit. Null for non-claude / when the channel script is absent.
-  mcpConfigTmpPath: string | null;
   // Paced-write FIFO state (paste-truncation fix). A single large
   // pty.write() of a paste overruns the Windows ConPTY console-input
   // buffer faster than the child TUI drains stdin → overflow bytes are
@@ -480,40 +474,6 @@ function writeBootPromptTmpFile(agentName: string, bootPrompt: unknown): string 
   return filepath;
 }
 
-/**
- * Per-spawn MCP config so Claude's `--dangerously-load-development-
- * channels server:acp-mail` finds an MCP server named `acp-mail`
- * (claude-code-guide: that flag requires a registered server of that
- * name; --mcp-config satisfies it and must precede the flag). Per-spawn
- * (not a shared-cwd .mcp.json) → each agent's ACP_AGENT_NAME is
- * collision-free across the 5 concurrent agents sharing the workspace.
- * channelJs = resources/bin/acp-mail-channel.js (X-ACP-Agent auth, reads
- * ACP_AGENT_NAME/ACP_API_URL — no secret). Returns the tmp path, or null
- * if the channel script is missing (skip the flag; no push but spawn
- * unaffected — same as today, never worse).
- */
-function writeMcpConfigTmpFile(agentName: string, channelJs: string, apiUrl: string): string | null {
-  if (!fs.existsSync(channelJs)) {
-    console.warn(`[PTY] acp-mail channel script missing (${channelJs}); ${agentName} spawns WITHOUT push (mail still pollable)`);
-    return null;
-  }
-  const cfg = {
-    mcpServers: {
-      'acp-mail': {
-        type: 'stdio',
-        command: 'node',
-        args: [channelJs],
-        env: { ACP_AGENT_NAME: agentName, VIBE_AGENT: agentName, ACP_API_URL: apiUrl },
-      },
-    },
-  };
-  const dir = path.join(app.getPath('userData'), 'tmp');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const filepath = path.join(dir, `mcp-acp-mail-${agentName}-${Date.now()}.json`);
-  fs.writeFileSync(filepath, JSON.stringify(cfg, null, 2), { encoding: 'utf8' });
-  return filepath;
-}
-
 function cleanupBootPromptTmpFile(filepath: string | null): void {
   if (!filepath) return;
   try {
@@ -762,7 +722,6 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     bracketedPasteEnabled: false,
     mailPollTimer: null,
     bootPromptTmpPath,
-    mcpConfigTmpPath: null,
     writeBuf: '',
     writeDraining: false,
   };
@@ -833,7 +792,6 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       managed.mailPollTimer = null;
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
-    cleanupBootPromptTmpFile(managed.mcpConfigTmpPath);
     disposeTerminalScreen(id);
     terminals.delete(id);
     // Report to acp-api via callback
@@ -877,35 +835,29 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       const systemPromptFlag = bootPromptTmpPath
         ? ` --system-prompt "${bootPromptTmpPath}"`
         : '';
-      // Register the `acp-mail` MCP server for THIS spawn. Tmp-file (not
-      // inline JSON) — PowerShell PTY can't safely carry quoted JSON, same
-      // reason boot-prompt is a file.
+      // NOTE — claude has NO mail delivery path (Gate B, wire-verified
+      // 2026-07-29), and this spawn no longer pretends otherwise.
       //
-      // NOTE — claude currently has NO mail delivery path (Gate B, wire-
-      // verified 2026-07-29). The channel registration this config was
-      // written to support never worked: the shipped validator builds its
-      // valid-channel-name set ONLY from the enterprise|user|project|local
-      // config scopes, and `--mcp-config` is ephemeral and enters none of
-      // them, so `server:acp-mail` was rejected with "no MCP server
-      // configured with that name" on every spawn. The
-      // `--dangerously-load-development-channels server:acp-mail` flag that
-      // accompanied it delivered zero function while costing one human
-      // keystroke per agent per boot (its consent gate), so it is removed.
+      // It used to register the `acp-mail` MCP server via `--mcp-config` so
+      // that `--dangerously-load-development-channels server:acp-mail` would
+      // resolve. That never worked: the shipped channel validator builds its
+      // valid-name set ONLY from the enterprise|user|project|local config
+      // scopes, and `--mcp-config` is ephemeral and enters none of them, so
+      // the entry was rejected with "no MCP server configured with that
+      // name" on every spawn. Both flags are now gone — the channels flag
+      // because its only observable effect was a consent gate costing one
+      // human keystroke per agent per boot, and the mcp-config because
+      // acp-mail-channel.js exposes zero tools (it answers tools/list,
+      // resources/list and prompts/list empty; it is a pure notification
+      // emitter). With the notification path dead it was 8 orphan node
+      // processes per boot polling acp-api to no effect.
       //
-      // This config is retained deliberately, NOT because it works: whether
-      // to also drop it is open, and the tradeoff is that with no channel
-      // registration the server spawns and polls to no effect. Claude also
-      // has no inbox poller (see the provider check below), so until the
-      // stream-json adapter lands there is no delivery path at all — do not
-      // read a rendered "[ACP Mail]" line in the pane as delivery.
-      const mcpCfg = writeMcpConfigTmpFile(
-        agentName,
-        path.join(acpBinDir, 'acp-mail-channel.js'),
-        process.env.ACP_API_URL || 'http://localhost:3001',
-      );
-      managed.mcpConfigTmpPath = mcpCfg;
-      const mcpConfigFlag = mcpCfg ? ` --mcp-config "${mcpCfg}"` : '';
-      const cmd = `claude "Begin."${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort}${systemPromptFlag}\r`;
+      // Claude also has no inbox poller (see the provider check below), so
+      // there is no delivery path at all until the stream-json adapter (G4)
+      // lands. Do NOT read a rendered "[ACP Mail]" line in a claude pane as
+      // delivery — that line is the renderer's unconditional visual echo
+      // (SEV-1 #114823), not proof the agent received anything.
+      const cmd = `claude "Begin." --dangerously-skip-permissions --effort ${effort}${systemPromptFlag}\r`;
       ptyProcess.write(cmd);
       console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
