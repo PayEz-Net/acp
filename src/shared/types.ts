@@ -275,6 +275,85 @@ export interface Notification {
 }
 
 // App settings persisted to disk
+/**
+ * Claude Code `--effort` levels, verified against `claude --help` on 2.1.220
+ * (2026-07-29): low | medium | high | xhigh | max.
+ *
+ * SINGLE SOURCE OF TRUTH. Before this existed the same union was written out
+ * by hand in SEVEN places — pty.ts's ClaudeEffort, AppSettings.claudeEffort,
+ * two annotations in SettingsPanel.tsx, projectStore's effort_override, a
+ * hardcoded <option> list, and the narrowing guards at both spawn boundaries
+ * (spawn-orchestrator.ts and lifecycle-server.ts) — and ALL SEVEN were missing
+ * `xhigh`, so a level Claude accepts could never be selected. Enumerate this
+ * array in the UI; do not hand-write the options next to it.
+ *
+ * It is a runtime array, not just a type, precisely so the UI can map over it.
+ */
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
+
+/** Human labels for the effort picker, keyed so a new level cannot be unlabelled. */
+export const CLAUDE_EFFORT_LABELS: Record<ClaudeEffort, string> = {
+  low: 'Low (fastest)',
+  medium: 'Medium',
+  high: 'High (recommended)',
+  xhigh: 'Extra high',
+  max: 'Max (slowest)',
+};
+
+/**
+ * Narrow an untrusted effort value (DB column, HTTP body) to a level Claude
+ * accepts, or `undefined` to mean "defer to the global default".
+ *
+ * Both spawn boundaries MUST call this rather than re-listing the levels. The
+ * two hand-written copies this replaces were the reason `xhigh` was unreachable
+ * end-to-end: the picker could offer it and the DB could store it, but each
+ * boundary quietly rewrote it to `undefined`, i.e. inherit. Silent, and
+ * invisible to any test that only asserted the builder's output.
+ *
+ * `undefined` is deliberate — NOT a substituted literal. Returning e.g. 'high'
+ * here would install a second authority on the default (see resolveClaudeEffort).
+ */
+export function isClaudeEffort(value: unknown): value is ClaudeEffort {
+  return typeof value === 'string' && (CLAUDE_EFFORTS as readonly string[]).includes(value);
+}
+
+/** As `isClaudeEffort`, but returns the narrowed value or `undefined`. */
+export function narrowClaudeEffort(value: unknown): ClaudeEffort | undefined {
+  return isClaudeEffort(value) ? value : undefined;
+}
+
+/**
+ * Claude `--model` aliases offered in the per-agent override picker.
+ *
+ * Verified on the wire against claude 2.1.220 (BAPert, 2026-07-29):
+ * `claude -p --model <x> "Reply with exactly: OK"` returned OK for haiku,
+ * sonnet and opus. Note `haiku` is NOT in `claude --help`'s alias examples but
+ * works anyway — the help text is not the catalogue, so do not "correct" this
+ * list against --help output.
+ *
+ * Passed through to `--model` VERBATIM; there is no alias→full-name mapping to
+ * maintain, because the CLI accepts either form.
+ *
+ * Claude-only. A placement whose resolved runtime is kimi stores kimi model ids
+ * ('k3', 'kimi-for-coding-highspeed') in the same `model_override` column, so
+ * the picker must be gated on the resolved runtime rather than offering these
+ * unconditionally — a claude alias saved onto a kimi placement is a combination
+ * that can only fail at spawn.
+ */
+export const CLAUDE_MODELS = ['haiku', 'sonnet', 'opus', 'fable'] as const;
+
+export type ClaudeModel = (typeof CLAUDE_MODELS)[number];
+
+/** Human labels for the model picker, keyed so a new alias cannot be unlabelled. */
+export const CLAUDE_MODEL_LABELS: Record<ClaudeModel, string> = {
+  haiku: 'Haiku (fastest, cheapest)',
+  sonnet: 'Sonnet (balanced)',
+  opus: 'Opus (most capable)',
+  fable: 'Fable',
+};
+
 export interface AppSettings {
   layout: LayoutMode;
   focusAgent: string;
@@ -297,11 +376,11 @@ export interface AppSettings {
   vibeClientId?: string;
   // AI Agent provider
   agentProvider?: 'claude' | 'kimi' | 'codex';
-  // Claude Code effort level: low, medium, high, max
-  // Default is 'high' (Aurum 1355): good output without max-burn. 'max' is
-  // selectable but is the silent-expensive default we deliberately do NOT ship.
-  // Only used when agentProvider is 'claude'
-  claudeEffort?: 'low' | 'medium' | 'high' | 'max';
+  // Claude Code effort level. Default is 'high' (Aurum 1355): good output
+  // without max-burn. 'max' is selectable but is the silent-expensive default
+  // we deliberately do NOT ship. Only used when agentProvider is 'claude'.
+  // Typed from CLAUDE_EFFORTS — do not inline a parallel union here.
+  claudeEffort?: ClaudeEffort;
   // Codex model override (default: codex-mini)
   codexModel?: string;
   // Settings schema version — bump when defaults change so existing installs migrate

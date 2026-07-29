@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
+import { type ClaudeEffort } from '@shared/types';
 import { useAppStore } from './appStore';
 
 // --- Types ---
@@ -65,12 +66,16 @@ export interface ProjectTeamMember {
   canonical_role: string | null;
   role: string | null;
   runtime_override: 'claude' | 'kimi' | 'codex' | null;
-  /** Per-agent Claude effort override (Claude-only). NULL = inherit the single
-   *  global default at spawn (pty.ts resolver). Consumed via a-renderer. */
-  effort_override: 'low' | 'medium' | 'high' | 'max' | null;
-  /** Per-agent model override (kimi). NULL = inherit the CLI default. The
-   *  renderer POSTs it as `model` on manual spawn so the k3 effort gate can
-   *  fire on hand-spawned agents too (WO 11469). */
+  /** Per-PLACEMENT effort override. NULL = inherit the global default at spawn
+   *  (resolveClaudeEffort). Typed from CLAUDE_EFFORTS — the hand-written union
+   *  that used to sit here was missing 'xhigh'. The column is varchar(32) with
+   *  no CHECK constraint, so validity is enforced client-side. */
+  effort_override: ClaudeEffort | null;
+  /** Per-PLACEMENT model override. NULL = inherit the CLI default. Interpreted
+   *  according to the placement's RESOLVED runtime: 'opus' is only valid when
+   *  that resolves to claude, 'k3' only for kimi. The three *_override columns
+   *  are read as a tuple at spawn, so offering a model that does not match the
+   *  resolved runtime saves a combination that can only fail at spawn. */
   model_override: string | null;
   work_dir_override: string | null;
   position_hint: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null;
@@ -207,6 +212,18 @@ interface ProjectStore {
   fetchProjects: () => Promise<void>;
   fetchActiveProject: (opts?: { force?: boolean }) => Promise<void>;
   fetchCurrentProjectTeam: (projectId: number, opts?: { force?: boolean }) => Promise<void>;
+  // Per-PLACEMENT model/effort override write (B-1). Scoped to this project's
+  // slot for that agent — the same agent on another project keeps its own
+  // values, because the row is (project, agent), not the agent record.
+  //
+  // TRI-STATE, matching the acp-api whitelist: a key that is ABSENT keeps the
+  // current value, an explicit `null` clears to inherit, and a blank string is
+  // a 400. Callers must therefore pass `null`, never `''`, for "Default".
+  updateTeamMemberOverrides: (
+    projectId: number,
+    agentId: number,
+    patch: { model_override?: string | null; effort_override?: ClaudeEffort | null },
+  ) => Promise<{ ok: boolean; error?: string }>;
   switchProject: (projectId: number) => Promise<boolean>;
   // First-pick from picker when current_project_state is 'unset' or
   // 'empty' — thin POST wrapper, no PTY work. Distinct from switchProject
@@ -413,6 +430,65 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } catch (err) {
       console.error('[Projects] Failed to fetch project team:', err);
       set({ loadingTeam: false });
+    }
+  },
+
+  updateTeamMemberOverrides: async (projectId, agentId, patch) => {
+    if (!useAppStore.getState().backendAvailable) {
+      return { ok: false, error: 'Backend unavailable' };
+    }
+    // Guard the tri-state at the boundary rather than trusting every caller:
+    // '' would 400 upstream, and the UI's "Default (inherit)" option is exactly
+    // the case that must arrive as null. A dropped key means "keep current", so
+    // an accidental '' silently becoming absent would be WORSE than the 400 —
+    // the user would see the picker snap back with no error.
+    const body: Record<string, string | null> = {};
+    for (const key of ['model_override', 'effort_override'] as const) {
+      if (!(key in patch)) continue;
+      const value = patch[key];
+      body[key] = value === null || value === undefined || value === '' ? null : value;
+    }
+    if (Object.keys(body).length === 0) return { ok: true };
+
+    // Optimistic paint: the selects are controlled off currentProjectTeam, so
+    // without this the picker visibly lags a round-trip on every change.
+    const previous = get().currentProjectTeam;
+    set({
+      currentProjectTeam: previous.map((m) =>
+        m.agent_id === agentId ? { ...m, ...(body as Partial<ProjectTeamMember>) } : m,
+      ),
+    });
+
+    try {
+      const res = await projectRequest(`/${projectId}/team/${agentId}`, {
+        method: 'PUT',
+        body,
+      });
+      if (!res.ok) {
+        // Roll the optimistic paint back — leaving it would show a value the
+        // DB does not hold, which survives until the next poll and reads as
+        // "it saved". Silent divergence is the failure mode to avoid here.
+        set({ currentProjectTeam: previous });
+        let message = `HTTP ${res.status}`;
+        try {
+          const payload = await res.json();
+          message = payload?.error?.message || message;
+        } catch {
+          /* non-JSON body — keep the status */
+        }
+        console.error('[Projects] Override write rejected:', message);
+        return { ok: false, error: message };
+      }
+      // Re-read with force so the roster reflects what the DB actually stored,
+      // not what we asked for. acp-api already cleared its team cache on the
+      // PUT; force_refresh makes sure the cloud read is fresh too. This is also
+      // what proves persistence rather than assuming the echo.
+      await get().fetchCurrentProjectTeam(projectId, { force: true });
+      return { ok: true };
+    } catch (err: any) {
+      set({ currentProjectTeam: previous });
+      console.error('[Projects] Failed to write team overrides:', err);
+      return { ok: false, error: err?.message || 'Request failed' };
     }
   },
 

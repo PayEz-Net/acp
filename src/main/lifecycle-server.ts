@@ -10,6 +10,7 @@ import http from 'http';
 import { spawnAgent, killTerminal, resizeTerminal, getAgentSessionByAgent, getActiveTerminals, setOnPtyExit, WorkDirError, RuntimeNotSetError } from './pty';
 import { getLocalSecret } from './api-server';
 import { getSettings } from './store';
+import { narrowClaudeEffort } from '../shared/types';
 
 let server: http.Server | null = null;
 let callbackPort: number | null = null;
@@ -136,11 +137,14 @@ export async function startLifecycleServer(): Promise<number | null> {
         // discipline as runtime: unknown/absent -> undefined so pty.ts
         // defers to the single global default (no second authority).
         // Honored per-member (Aurum 1401/1411), unlike runtime which is
-        // project-uniform. Dormant until acp-api includes body.effort.
-        const rawEffort = body.effort as string | undefined;
-        const effort = (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high' || rawEffort === 'max')
-          ? rawEffort
-          : undefined;
+        // project-uniform.
+        //
+        // Narrowed by the SHARED guard, not a local list. This was a
+        // hand-written chain that omitted 'xhigh', so an xhigh override POSTed
+        // by TerminalPane silently became undefined = inherit. This is the
+        // MANUAL spawn lane, which is the one a human exercises when testing a
+        // picker change, so the drop was invisible exactly where it mattered.
+        const effort = narrowClaudeEffort(body.effort);
         // Model override: pass through any non-empty string un-narrowed —
         // the spawn boundary (providerConfigs KIMI_MODEL_ALIASES) is the
         // fail-loud authority on unknown ids, never this layer (WO 11469).

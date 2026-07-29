@@ -96,8 +96,14 @@ export interface ProviderConfig {
   supportsAcp: boolean;
   /** Command + args for ACP mode. */
   acpCommand: string[];
-  /** Command + args for PTY fallback mode. */
-  ptyCommand: (opts: { bootPrompt?: string; effort?: string }) => string[];
+  // NO ptyCommand. It existed here for all three providers with ZERO callers
+  // anywhere in src/, while each provider's real PTY invocation is composed as
+  // a string in pty.ts. Deleted 2026-07-29 after it misled two work orders in
+  // one day and caused a false P0 closure: QAPert's --system-prompt identity
+  // fix was applied here, reported done, and changed nothing, because the live
+  // spawn was untouched. Claude's live composition now lives in
+  // claudeSpawnCommand.ts, which is unit-tested. Do not reintroduce a
+  // plausible-looking command builder that nothing calls.
   /** Client capabilities advertised during ACP initialize. */
   defaultCapabilities: ClientCapabilities;
   /** Automatically approve permission requests (yolo mode). */
@@ -121,28 +127,9 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
     // require `--print`, and token-level streaming requires
     // `--include-partial-messages`. See claudeStreamJson.ts.
     acpCommand: ['claude', ...CLAUDE_STREAM_JSON_ARGS],
-    ptyCommand: ({ bootPrompt, effort }) => {
-      const args = ['claude'];
-      // `bootPrompt` is a PATH to the assembled prompt file, so it must go to
-      // `--system-prompt-file`. `--system-prompt` takes literal prompt TEXT.
-      //
-      // This was `--system-prompt` until 2026-07-29, which meant every Claude
-      // pane booted with the literal string "C:\...\boot-prompt-<Agent>-<ts>.txt"
-      // as its ENTIRE system prompt — no persona, no role, no mail discipline,
-      // no project instructions. Not degraded: absent. Agents appeared to work
-      // only because they are competent generalists who read files when asked.
-      //
-      // Proven A/B on the wire (claude 2.1.220), same file both arms:
-      //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
-      //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."   (the file's instruction)
-      //
-      // `claude --help` corroborates: "--system-prompt <prompt>" and the
-      // --append-system-prompt entry names the pair as "--system-prompt[-file]".
-      // Found by QAPert. Do not "simplify" this back.
-      if (bootPrompt) args.push('--system-prompt-file', bootPrompt);
-      if (effort) args.push('--effort', effort);
-      return args;
-    },
+    // PTY invocation: see buildClaudeSpawnCommand() in claudeSpawnCommand.ts.
+    // It carries the --system-prompt-file / --effort / --model composition and
+    // is unit-tested; the dead builder that used to sit here was not.
     defaultCapabilities: MINIMAL_CAPABILITIES,
   },
   kimi: {
@@ -150,12 +137,8 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
     displayName: 'Kimi Code',
     supportsAcp: true,
     acpCommand: ['kimi', '--yolo', 'acp'],
-    ptyCommand: ({ bootPrompt }) => {
-      const args = ['kimi', '--yolo'];
-      // Kimi does not yet support --system-prompt; PTY-inject after banner if needed.
-      void bootPrompt;
-      return args;
-    },
+    // PTY invocation is composed in pty.ts (kimiLaunch). Kimi exposes no
+    // --system-prompt flag, so its boot prompt is PTY-injected after the banner.
     defaultCapabilities: MINIMAL_CAPABILITIES,
     autoApprove: true,
   },
@@ -164,19 +147,20 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
     displayName: 'Codex CLI',
     supportsAcp: false,
     acpCommand: ['codex', 'app-server'],
-    ptyCommand: ({ bootPrompt }) => {
-      const args = ['codex'];
-      // ⚠️ SUSPECTED SAME DEFECT AS CLAUDE, DELIBERATELY NOT CHANGED.
-      // `bootPrompt` is a path; if codex's `--system-prompt` also takes literal
-      // text, every Codex pane boots with no system prompt (see the claude
-      // entry above). NOBODY HAS VERIFIED CODEX'S FLAG SURFACE — it is a
-      // different CLI and may well take a path here, or use another flag name.
-      // Fixing by analogy would be guessing on a spawn path, so it stays as-is
-      // until someone runs the same A/B against a real `codex`. Tracked with
-      // the claude fix (QAPert, 2026-07-29).
-      if (bootPrompt) args.push('--system-prompt', bootPrompt);
-      return args;
-    },
+    // ⚠️ OPEN HAZARD, PRESERVED FROM THE DELETED ptyCommand — do not drop this
+    // note just because the dead code it annotated is gone.
+    //
+    // Codex may carry the SAME identity defect Claude had: pty.ts hands the boot
+    // prompt to codex as a PATH, and if codex's `--system-prompt` takes literal
+    // TEXT (as Claude's does), every Codex pane boots with the path string as
+    // its entire system prompt — no persona at all, and nothing in any
+    // acceptance bar fails on it.
+    //
+    // NOBODY HAS VERIFIED CODEX'S FLAG SURFACE. It is a different CLI and may
+    // take a path here, or use a different flag name. Fixing by analogy would
+    // be guessing on a live spawn path. Needs the same A/B QAPert ran against
+    // claude 2.1.220: same file both arms, check whether the persona takes.
+    // (QAPert 2026-07-29.)
     defaultCapabilities: MINIMAL_CAPABILITIES,
   },
 };

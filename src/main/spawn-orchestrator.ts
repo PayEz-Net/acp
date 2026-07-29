@@ -27,6 +27,7 @@ import { getSettings } from './store';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { acpApiGetAgentProfile, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
+import { narrowClaudeEffort } from '../shared/types';
 
 const ACP_API_BASE = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
@@ -379,10 +380,12 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // global default (opts?.effort || settings.claudeEffort || 'high') —
     // no silent wrong value, no second authority. Claude-only: pty reads
     // effort solely in the claude branch, so this is ignored for kimi/codex.
-    const rawEffort = member.effort_override || '';
-    const effort = (rawEffort === 'low' || rawEffort === 'medium' || rawEffort === 'high' || rawEffort === 'max')
-      ? rawEffort
-      : undefined;
+    //
+    // Narrowed by the SHARED guard, not a local list. This was a hand-written
+    // `raw === 'low' || ... || raw === 'max'` chain that omitted 'xhigh', so a
+    // stored xhigh silently became undefined = inherit — the picker offered a
+    // level that could never reach the child. Do not re-inline the union here.
+    const effort = narrowClaudeEffort(member.effort_override);
     // Per-agent MODEL override (WO-KIMI-MODEL-OVERRIDE): passed through RAW,
     // deliberately UNLIKE effort above. The spawn boundary validates the bare
     // id and throws ModelNotRecognizedError on anything unknown — narrowing

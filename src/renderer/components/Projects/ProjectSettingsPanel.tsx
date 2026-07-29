@@ -1,5 +1,12 @@
-import { useEffect } from 'react';
-import { Settings, X, ExternalLink, Crown } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Settings, X, ExternalLink, Crown, Loader2 } from 'lucide-react';
+import {
+  CLAUDE_EFFORTS,
+  CLAUDE_EFFORT_LABELS,
+  CLAUDE_MODELS,
+  CLAUDE_MODEL_LABELS,
+  type ClaudeEffort,
+} from '@shared/types';
 import { useProjectStore, Project, ProjectTeamMember } from '../../stores/projectStore';
 
 interface ProjectSettingsPanelProps {
@@ -7,11 +14,19 @@ interface ProjectSettingsPanelProps {
   onClose: () => void;
 }
 
-// Read-only settings panel per Wave B workorder §4.2 + vision doc
+// Mostly-read-only settings panel per Wave B workorder §4.2 + vision doc
 // "How humans understand projects" (settings panel as load-bearing UX).
 // Drawer slides from right, scoped to the current project. Edits route
 // through "Edit on idealvibe.online" deeplink — ACP is a viewer in
 // Phase 1 (idealvibe.online is the canonical edit surface).
+//
+// DELIBERATE EXCEPTION to that read-only rule: per-agent Model and Effort are
+// EDITABLE here (B-1). Jon asked for it directly and twice — "i want to be able
+// to pick claude model and effort on team agents overrides" — and the point of
+// the feature is mixing models across one team, which is a per-pane operating
+// decision made while looking at the team, not a project record you go edit on
+// a website and wait 60s to propagate. Everything else on this panel stays a
+// viewer; do not generalise this exception into "the panel is editable now".
 //
 // Sections:
 //   - Identity: name, description, goal_summary, owner, id, timestamps
@@ -20,7 +35,8 @@ interface ProjectSettingsPanelProps {
 //     stack_topology, compliance, advisor_output (read-only blob preview)
 //   - Team: per-project agent table with role, runtime override, work_dir
 //     override, position_hint, is_lead. Inherit values shown in italic
-//     when overrides are null.
+//     when overrides are null. Model + effort are EDITABLE selects
+//     (per-placement, see MemberOverrides).
 //
 // Empty fields render "—" placeholder per Wave B settings panel spec
 // (visibility > editability > hiding). Click Edit-on-idealvibe to fill in.
@@ -85,7 +101,11 @@ export function ProjectSettingsPanel({ isOpen, onClose }: ProjectSettingsPanelPr
               <IdentitySection project={activeProject} />
               <StackRuntimeSection project={activeProject} />
               <WaveA1DetailSection project={activeProject} />
-              <TeamSection team={currentProjectTeam} loading={loadingTeam} />
+              <TeamSection
+                team={currentProjectTeam}
+                loading={loadingTeam}
+                project={activeProject}
+              />
             </>
           )}
         </div>
@@ -102,7 +122,8 @@ export function ProjectSettingsPanel({ isOpen, onClose }: ProjectSettingsPanelPr
             Edit on idealvibe.online
           </a>
           <p className="text-[11px] text-slate-500 mt-1">
-            ACP shows project state read-only. Edits propagate back within 60s.
+            Model and effort are editable here and save immediately. Other fields
+            are read-only; edits made on idealvibe.online propagate back within 60s.
           </p>
         </div>
       </div>
@@ -171,7 +192,15 @@ function WaveA1DetailSection({ project }: { project: Project }) {
   );
 }
 
-function TeamSection({ team, loading }: { team: ProjectTeamMember[]; loading: boolean }) {
+function TeamSection({
+  team,
+  loading,
+  project,
+}: {
+  team: ProjectTeamMember[];
+  loading: boolean;
+  project: Project;
+}) {
   if (loading && team.length === 0) {
     return (
       <Section title="Team">
@@ -215,10 +244,171 @@ function TeamSection({ team, loading }: { team: ProjectTeamMember[]; loading: bo
               <TeamCell label="Runtime" value={m.runtime_override} inheritFrom={m.runtime_override === null ? 'project default' : null} />
               <TeamCell label="WorkDir" value={m.work_dir_override} inheritFrom={m.work_dir_override === null ? 'project repo' : null} mono />
             </div>
+            <MemberOverrides member={m} project={project} />
           </div>
         ))}
       </div>
     </Section>
+  );
+}
+
+/**
+ * Per-PLACEMENT model + effort pickers (B-1, B-5).
+ *
+ * PER-PLACEMENT, NOT PER-AGENT: the write targets this project's
+ * team_agent_instances row, so NextPert on project 12 and NextPert on project 30
+ * hold independent values. The agent record itself is never touched.
+ *
+ * Both selects are controlled off the store, so what renders is what the roster
+ * says — after a successful write the store is re-read from the DB, which is why
+ * the value survives a reload rather than just surviving this render.
+ */
+function MemberOverrides({
+  member,
+  project,
+}: {
+  member: ProjectTeamMember;
+  project: Project;
+}) {
+  const updateTeamMemberOverrides = useProjectStore((s) => s.updateTeamMemberOverrides);
+  const [saving, setSaving] = useState<null | 'model' | 'effort'>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // The runtime a spawn will ACTUALLY use for this placement. Deliberately
+  // project.runtime_choice and NOT member.runtime_override: the orchestrator
+  // does not apply per-member runtime yet (spawn-orchestrator.ts — the whole
+  // team runs the project's single runtime), so gating the model list on the
+  // override would offer claude aliases for a placement that spawns as kimi.
+  // Gate on what spawns, not on what the column says.
+  const resolvedRuntime = project.runtime_choice ?? null;
+  const isClaude = resolvedRuntime === 'claude';
+
+  const commit = async (
+    field: 'model' | 'effort',
+    patch: { model_override?: string | null; effort_override?: ClaudeEffort | null },
+  ) => {
+    setSaving(field);
+    setError(null);
+    const result = await updateTeamMemberOverrides(project.id, member.agent_id, patch);
+    setSaving(null);
+    if (!result.ok) setError(result.error ?? 'Save failed');
+  };
+
+  // Non-claude placements: show what is stored, but do not offer claude
+  // aliases. `model_override` is one column shared with kimi (which stores 'k3',
+  // 'kimi-for-coding-highspeed'), so writing 'opus' onto a kimi placement saves
+  // a combination that can only fail at spawn. Read-only is the honest state
+  // until there is a verified kimi/codex model catalogue to enumerate.
+  if (!isClaude) {
+    return (
+      <div className="mt-2 pt-2 border-t border-slate-800/70 text-[11px] space-y-0.5">
+        <TeamCell
+          label="Model"
+          value={member.model_override}
+          inheritFrom={member.model_override === null ? 'CLI default' : null}
+          mono
+        />
+        <TeamCell
+          label="Effort"
+          value={member.effort_override}
+          inheritFrom={member.effort_override === null ? 'global default' : null}
+        />
+        <p className="text-slate-600 italic pt-0.5">
+          {resolvedRuntime
+            ? `Model/effort pickers are Claude-only — this project runs ${resolvedRuntime}.`
+            : 'Set the project runtime before overriding model or effort.'}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 pt-2 border-t border-slate-800/70 space-y-1.5">
+      <OverrideSelect
+        label="Model"
+        value={member.model_override ?? ''}
+        busy={saving === 'model'}
+        // '' is the "Default (inherit)" sentinel in the DOM only — a <select>
+        // cannot hold null. It is converted to an explicit null on the way to
+        // the store, because only NULL means inherit; '' would 400 upstream.
+        onChange={(next) => commit('model', { model_override: next === '' ? null : next })}
+        options={CLAUDE_MODELS.map((model) => ({
+          value: model,
+          label: CLAUDE_MODEL_LABELS[model],
+        }))}
+        agentName={member.agent_name}
+      />
+      <OverrideSelect
+        label="Effort"
+        value={member.effort_override ?? ''}
+        busy={saving === 'effort'}
+        onChange={(next) =>
+          commit('effort', {
+            effort_override: next === '' ? null : (next as ClaudeEffort),
+          })
+        }
+        // Enumerated from CLAUDE_EFFORTS, so 'xhigh' appears here for free and
+        // a future level cannot go missing the way xhigh did in seven places.
+        options={CLAUDE_EFFORTS.map((level) => ({
+          value: level,
+          label: CLAUDE_EFFORT_LABELS[level],
+        }))}
+        agentName={member.agent_name}
+      />
+      {error && (
+        <p className="text-[11px] text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function OverrideSelect({
+  label,
+  value,
+  options,
+  onChange,
+  busy,
+  agentName,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (next: string) => void;
+  busy: boolean;
+  agentName: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label
+        className="text-[11px] text-slate-500 flex-shrink-0 w-14"
+        htmlFor={`override-${agentName}-${label}`}
+      >
+        {label}
+      </label>
+      <div className="relative flex-1 min-w-0">
+        <select
+          id={`override-${agentName}-${label}`}
+          value={value}
+          disabled={busy}
+          onChange={(e) => onChange(e.target.value)}
+          className={`w-full bg-slate-800 border border-slate-700 text-xs rounded px-2 py-1 disabled:opacity-50 ${
+            value === '' ? 'text-slate-500 italic' : 'text-slate-200'
+          }`}
+        >
+          <option value="">Default (inherit)</option>
+          {options.map((opt) => (
+            <option key={opt.value} value={opt.value} className="text-slate-200 not-italic">
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        {busy && (
+          <Loader2 className="w-3 h-3 text-emerald-400 animate-spin absolute right-6 top-1/2 -translate-y-1/2" />
+        )}
+      </div>
+    </div>
   );
 }
 

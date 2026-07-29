@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { IDP_CLIENT_APP, IDP_CLIENT_APP_HEADER } from '@shared/idp-config';
+import { CLAUDE_EFFORTS, CLAUDE_EFFORT_LABELS, type ClaudeEffort } from '@shared/types';
 import { useAppStore } from '../../stores/appStore';
 import { CODE_PROVIDERS, CodeProvider, PROVIDER_LABELS } from '../../lib/agentProviders';
 import { X, Server, Users, Radio, RefreshCw, Bot, Brain } from 'lucide-react';
@@ -24,7 +25,7 @@ function AgentProviderSection() {
     setSettings({ ...settings, agentProvider: newProvider });
   };
 
-  const handleEffortChange = async (newEffort: 'low' | 'medium' | 'high' | 'max') => {
+  const handleEffortChange = async (newEffort: ClaudeEffort) => {
     setEffort(newEffort);
     await window.electronAPI.setSettings({ 
       ...settings, 
@@ -71,13 +72,16 @@ function AgentProviderSection() {
           <label className="text-xs text-slate-400 mb-2 block">Thinking Effort</label>
           <select
             value={effort}
-            onChange={(e) => handleEffortChange(e.target.value as 'low' | 'medium' | 'high' | 'max')}
+            onChange={(e) => handleEffortChange(e.target.value as ClaudeEffort)}
             className="w-full bg-slate-800 border border-slate-700 text-slate-200 text-sm rounded px-3 py-2"
           >
-            <option value="low">Low (fastest)</option>
-            <option value="medium">Medium</option>
-            <option value="high">High (recommended)</option>
-            <option value="max">Max (slowest)</option>
+            {/* Enumerated from CLAUDE_EFFORTS so a new level cannot be missing
+                here — this list was hand-written and omitted 'xhigh' entirely. */}
+            {CLAUDE_EFFORTS.map((level) => (
+              <option key={level} value={level}>
+                {CLAUDE_EFFORT_LABELS[level]}
+              </option>
+            ))}
           </select>
           <p className="text-xs text-slate-500 mt-1">
             Higher effort = more thorough analysis but slower responses.
