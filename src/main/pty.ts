@@ -169,6 +169,14 @@ interface ManagedPty {
   // PayEzVibe agent session token for the active session; used to authorize
   // agent-output POSTs without relying on name/id resolution.
   sessionToken?: string;
+  /**
+   * Set when this PTY is being torn down ON PURPOSE (kill, restart, project
+   * teardown). The `onExit` handler cannot distinguish a crash from a deliberate
+   * kill by exit code alone — a tree-kill exits non-zero exactly like a crash —
+   * so intent has to be recorded here BEFORE the process dies and passed to the
+   * exit report. Undefined = a genuine unexpected exit, i.e. a real crash.
+   */
+  intentionalExit?: import('./agentSessionLifecycle').AgentSessionEndReason;
 }
 
 export type AgentRuntime = TerminalProvider;
@@ -377,7 +385,15 @@ export function emitNoTeamEngaged(payload: NoTeamEngagedPayload): void {
 }
 
 // Exit callback — set by lifecycle-server to report PTY exits to acp-api
-let onPtyExit: ((agentName: string, terminalId: string, exitCode: number) => void) | null = null;
+let onPtyExit:
+  | ((
+      agentName: string,
+      terminalId: string,
+      exitCode: number,
+      /** Absent = genuine crash. Present = we killed it on purpose. */
+      reason?: import('./agentSessionLifecycle').AgentSessionEndReason,
+    ) => void)
+  | null = null;
 
 export function setOnPtyExit(callback: typeof onPtyExit) {
   onPtyExit = callback;
@@ -863,9 +879,11 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     }
     cleanupBootPromptTmpFile(managed.bootPromptTmpPath);
     terminals.delete(id);
-    // Report to acp-api via callback
+    // Report to acp-api via callback, WITH intent. Without the reason, acp-api
+    // read every exit as a crash and crash-restarted panes we had deliberately
+    // killed — see `intentionalExit` on ManagedPty.
     if (onPtyExit) {
-      onPtyExit(agentName, id, exitCode);
+      onPtyExit(agentName, id, exitCode, managed.intentionalExit);
     }
   });
 
@@ -1097,6 +1115,13 @@ export function killTerminal(terminalId: string): boolean {
   void endAgentSession(terminalId, 'killed');
   const terminal = terminals.get(terminalId);
   if (terminal) {
+    // Record INTENT before the process dies. The onExit handler cannot tell a
+    // crash from a deliberate kill on its own, and acp-api was therefore
+    // treating every exit as a crash — so a restart (kill, then spawn) had its
+    // kill reported as a crash, crash-restart fired, the freshly-spawned pane
+    // was already up, and the attempt came back 409. Observed as a QAPert
+    // restart loop on 2026-07-29. Intent must survive the exit.
+    terminal.intentionalExit = 'killed';
     dropPtyOutput(terminalId);
     if (terminal.mailPollTimer) {
       clearInterval(terminal.mailPollTimer);

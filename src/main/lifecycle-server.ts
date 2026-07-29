@@ -286,11 +286,13 @@ export function stopLifecycleServer(): void {
  * Task 2: PTY exit reporting — notify acp-api when a PTY exits.
  */
 function setupExitReporting() {
-  setOnPtyExit((agentName, terminalId, exitCode) => {
+  setOnPtyExit((agentName, terminalId, exitCode, reason) => {
     const secret = getLocalSecret();
     if (!secret) return;
 
-    const body = JSON.stringify({ agentName, terminalId, exitCode });
+    // `reason` present = we killed it on purpose. acp-api needs this to avoid
+    // crash-restarting a pane we deliberately stopped (restart = kill + spawn).
+    const body = JSON.stringify({ agentName, terminalId, exitCode, ...(reason ? { reason } : {}) });
     const options = {
       hostname: '127.0.0.1',
       port: 3001,
@@ -304,7 +306,7 @@ function setupExitReporting() {
     };
 
     const req = http.request(options, (res) => {
-      console.log(`[Lifecycle] Exit reported for ${agentName} (code=${exitCode}): ${res.statusCode}`);
+      console.log(`[Lifecycle] Exit reported for ${agentName} (code=${exitCode}${reason ? `, reason=${reason}` : ''}): ${res.statusCode}`);
     });
     req.on('error', (err) => {
       console.error(`[Lifecycle] Failed to report exit for ${agentName}:`, err.message);
