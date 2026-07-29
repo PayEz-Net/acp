@@ -877,13 +877,27 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       const systemPromptFlag = bootPromptTmpPath
         ? ` --system-prompt "${bootPromptTmpPath}"`
         : '';
-      // Register the `acp-mail` MCP server for THIS spawn so
-      // `--dangerously-load-development-channels server:acp-mail`
-      // actually resolves (root cause of "claude has no push" — the
-      // channel server was never configured: "no MCP server configured
-      // with that name"). Tmp-file (not inline JSON) — PowerShell PTY
-      // can't safely carry quoted JSON, same reason boot-prompt is a
-      // file. MUST precede the channels flag (claude-code-guide).
+      // Register the `acp-mail` MCP server for THIS spawn. Tmp-file (not
+      // inline JSON) — PowerShell PTY can't safely carry quoted JSON, same
+      // reason boot-prompt is a file.
+      //
+      // NOTE — claude currently has NO mail delivery path (Gate B, wire-
+      // verified 2026-07-29). The channel registration this config was
+      // written to support never worked: the shipped validator builds its
+      // valid-channel-name set ONLY from the enterprise|user|project|local
+      // config scopes, and `--mcp-config` is ephemeral and enters none of
+      // them, so `server:acp-mail` was rejected with "no MCP server
+      // configured with that name" on every spawn. The
+      // `--dangerously-load-development-channels server:acp-mail` flag that
+      // accompanied it delivered zero function while costing one human
+      // keystroke per agent per boot (its consent gate), so it is removed.
+      //
+      // This config is retained deliberately, NOT because it works: whether
+      // to also drop it is open, and the tradeoff is that with no channel
+      // registration the server spawns and polls to no effect. Claude also
+      // has no inbox poller (see the provider check below), so until the
+      // stream-json adapter lands there is no delivery path at all — do not
+      // read a rendered "[ACP Mail]" line in the pane as delivery.
       const mcpCfg = writeMcpConfigTmpFile(
         agentName,
         path.join(acpBinDir, 'acp-mail-channel.js'),
@@ -891,9 +905,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       );
       managed.mcpConfigTmpPath = mcpCfg;
       const mcpConfigFlag = mcpCfg ? ` --mcp-config "${mcpCfg}"` : '';
-      const cmd = `claude "Begin."${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort} --dangerously-load-development-channels server:acp-mail${systemPromptFlag}\r`;
+      const cmd = `claude "Begin."${mcpConfigFlag} --dangerously-skip-permissions --effort ${effort}${systemPromptFlag}\r`;
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: ${mcpCfg ? 'registered via --mcp-config' : 'MISSING — channel script absent'}, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -906,9 +920,18 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       kimiLaunch();
     }
 
-    // Claude gets push via acp-mail-channel.js (MCP channels). Kimi and
-    // Codex don't support MCP channels, so poll the inbox and inject
-    // new-mail lines directly into their PTY stdin.
+    // Kimi and Codex poll the inbox and inject new-mail lines directly into
+    // their PTY stdin.
+    //
+    // Claude is excluded — historically because it was believed to get push
+    // via acp-mail-channel.js (MCP channels). It never did: the channel name
+    // never resolved (Gate B, see the spawn command above), so claude has
+    // BOTH no push and no poll, i.e. no mail delivery whatsoever. The
+    // exclusion is left in place rather than "fixed" by enabling the poller
+    // here, because that is a capability change and not this interim's
+    // scope — and because the stream-json adapter (G4) replaces this path
+    // with injectMail on the runtime manager, which is the only variant
+    // where delivery is acknowledged rather than assumed.
     if (provider !== 'claude') {
       startInboxPoller(managed);
     }
