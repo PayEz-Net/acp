@@ -1,4 +1,5 @@
 import type { TerminalProvider } from '../../shared/types';
+import { CLAUDE_STREAM_JSON_ARGS } from './claudeStreamJson';
 
 /**
  * Per-agent kimi model selection (WO-KIMI-MODEL-OVERRIDE, Jon-locked).
@@ -112,11 +113,33 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
   claude: {
     id: 'claude',
     displayName: 'Claude Code',
+    // WO-G4: stays false until the acceptance bar is met. The PTY path below
+    // remains the live path; this is additive, not a cutover.
     supportsAcp: false,
-    acpCommand: ['claude', '--output-format', 'stream-json', '--input-format', 'stream-json'],
+    // Verified against claude 2.1.220 on the wire (2026-07-29). The previous
+    // literal here could not have run: `--input-format`/`--output-format`
+    // require `--print`, and token-level streaming requires
+    // `--include-partial-messages`. See claudeStreamJson.ts.
+    acpCommand: ['claude', ...CLAUDE_STREAM_JSON_ARGS],
     ptyCommand: ({ bootPrompt, effort }) => {
       const args = ['claude'];
-      if (bootPrompt) args.push('--system-prompt', bootPrompt);
+      // `bootPrompt` is a PATH to the assembled prompt file, so it must go to
+      // `--system-prompt-file`. `--system-prompt` takes literal prompt TEXT.
+      //
+      // This was `--system-prompt` until 2026-07-29, which meant every Claude
+      // pane booted with the literal string "C:\...\boot-prompt-<Agent>-<ts>.txt"
+      // as its ENTIRE system prompt — no persona, no role, no mail discipline,
+      // no project instructions. Not degraded: absent. Agents appeared to work
+      // only because they are competent generalists who read files when asked.
+      //
+      // Proven A/B on the wire (claude 2.1.220), same file both arms:
+      //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
+      //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."   (the file's instruction)
+      //
+      // `claude --help` corroborates: "--system-prompt <prompt>" and the
+      // --append-system-prompt entry names the pair as "--system-prompt[-file]".
+      // Found by QAPert. Do not "simplify" this back.
+      if (bootPrompt) args.push('--system-prompt-file', bootPrompt);
       if (effort) args.push('--effort', effort);
       return args;
     },
@@ -143,6 +166,14 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
     acpCommand: ['codex', 'app-server'],
     ptyCommand: ({ bootPrompt }) => {
       const args = ['codex'];
+      // ⚠️ SUSPECTED SAME DEFECT AS CLAUDE, DELIBERATELY NOT CHANGED.
+      // `bootPrompt` is a path; if codex's `--system-prompt` also takes literal
+      // text, every Codex pane boots with no system prompt (see the claude
+      // entry above). NOBODY HAS VERIFIED CODEX'S FLAG SURFACE — it is a
+      // different CLI and may well take a path here, or use another flag name.
+      // Fixing by analogy would be guessing on a spawn path, so it stays as-is
+      // until someone runs the same A/B against a real `codex`. Tracked with
+      // the claude fix (QAPert, 2026-07-29).
       if (bootPrompt) args.push('--system-prompt', bootPrompt);
       return args;
     },
