@@ -130,6 +130,17 @@ const PROVIDER_EMPTY_CHROME = /^(?:[\s│┃]*[>›❯][\s]*|[\s│┃─━═_
 const PROVIDER_NOISE =
   /bypass permissions|shift\+tab to cycle|Transcript saving is off|Debug ACP development environment startup/i;
 
+/**
+ * Is this screen row the provider echoing back a message WE sent?
+ *
+ * Matched against text we actually wrote (exact), after stripping the prompt
+ * gutter — not by sniffing for `›`, so a TUI restyle cannot break it.
+ */
+function isOwnEcho(line: string, sent: ReadonlySet<string>): boolean {
+  const bare = line.replace(/^[\s>›❯$|┃│]+/, '').trim();
+  return bare.length > 0 && sent.has(bare);
+}
+
 const SAMPLE_CHARS = 'MMMMMMMMMM';
 const AUTO_SCROLL_THRESHOLD_PX = 40;
 const FOOTER_DEBOUNCE_MS = 100;
@@ -300,39 +311,38 @@ export function UnifiedTerminal({
   const displayLines = useMemo<AgentOutputLine[]>(() => {
     if (!frameScreen || frameScreen.length === 0) return filteredLines;
     const screenLines: AgentOutputLine[] = frameScreen
-      .filter((line) => !PROVIDER_EMPTY_CHROME.test(line) && !PROVIDER_NOISE.test(line))
+      .filter(
+        (line) =>
+          !PROVIDER_EMPTY_CHROME.test(line) &&
+          !PROVIDER_NOISE.test(line) &&
+          // Drop the provider's ECHO of what we sent. The store already holds
+          // that message as a `source: 'user'` line and renders it as a bubble,
+          // so the TUI's chevron reprint is a duplicate of it — the same text
+          // twice, in two different styles, which is worse than either alone.
+          // Keep the bubble (ours, styled, unambiguous), drop the echo.
+          !isOwnEcho(line, sentText),
+      )
       .map((line, i) => {
       // Frame rows were unconditionally stamped 'agent', so the user's OWN
       // message — echoed back by the provider TUI — rendered identically to the
       // agent's, distinguished only by a leading chevron. A one-character glyph
       // is not an affordance: nobody should have to learn that `›` means "you".
       // Strip the provider's prompt marker and see if we sent this line.
-      const bare = line.replace(/^[\s>›❯$|┃│]+/, '').trim();
-      const isOwnEcho = bare.length > 0 && sentText.has(bare);
       return {
         id: `frame-${terminalId}-${i}`,
         agent: agentName,
         terminal_id: terminalId ?? '',
-        // Render the bare text: the chevron was the provider's prompt gutter,
-        // and inside a bubble it is noise.
-        line: isOwnEcho ? bare : line,
+        line,
         ts: '',
-        source: isOwnEcho
-          ? ('user' as const)
-          : PROVIDER_CHROME.test(line)
-            ? ('info' as const)
-            : ('agent' as const),
+        source: PROVIDER_CHROME.test(line) ? ('info' as const) : ('agent' as const),
       };
     });
     // Drop the store's own copy of anything the screen model is already showing
     // as the user's line, or the message renders twice.
-    const echoed = new Set(
-      screenLines.filter((l) => l.source === 'user').map((l) => l.line),
-    );
-    const history = echoed.size
-      ? filteredLines.filter((l) => !(l.source === 'user' && echoed.has(l.line.trim())))
-      : filteredLines;
-    return [...history, ...screenLines];
+    // No dedup needed on this side: the provider's echo is filtered out above,
+    // so the store's own `source: 'user'` line is the single copy of a message
+    // we sent, and it renders as the bubble.
+    return [...filteredLines, ...screenLines];
   }, [filteredLines, frameScreen, agentName, terminalId, sentText]);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
 
