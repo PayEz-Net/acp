@@ -58,6 +58,58 @@ export interface UnifiedTerminalProps {
 export const MIN_COLS = 10;
 export const MIN_ROWS = 4;
 
+/**
+ * A turn is running — detected STRUCTURALLY, not from spinner wording.
+ *
+ * `esc to interrupt` is only offered while there is something to interrupt, and
+ * the spinner line always carries an elapsed/token counter regardless of which
+ * adjective precedes it ("Brewed for 16s", "Crunching (1m 11s · ↓ 3.3k tokens)",
+ * "Meandering", "Skedaddling"…). Matching the adjective list is unwinnable —
+ * it is generated flavour text — so match the shape around it instead.
+ */
+const TURN_ACTIVE =
+  /esc to interrupt|\((?:\d+m\s*)?\d+s(?:\s*·[^)]*)?\)|↓\s*[\d.]+k?\s*tokens/i;
+
+/**
+ * Provider status chrome: the permission-mode footer, the transcript-saving
+ * warning, and the labelled separator rules. Classified as `info` so it dims
+ * instead of competing with content at the same weight.
+ *
+ * Pattern-matching another product's UI is fragile — but the FAILURE MODE here
+ * is "chrome goes bright again", never "content disappears". That is why this is
+ * acceptable in the renderer while a filter that HID lines would not be. G4
+ * removes the chrome at the source and this can go with it.
+ */
+const PROVIDER_CHROME =
+  /^[\s│┃]*(?:[⏵▸]{2}|⚠\s|─{3,}|━{3,}|═{3,})|bypass permissions|Transcript saving is off|shift\+tab to cycle|esc to interrupt/i;
+
+/**
+ * Provider chrome that carries NO information and is therefore HIDDEN, not
+ * merely dimmed: the TUI's own empty input box.
+ *
+ * We render our own composer ("Message <agent>…"), so the provider's prompt
+ * gutter and the rules that frame it are duplicate furniture around a field
+ * nobody types into. An empty box is not content, so dropping it cannot lose
+ * anything — which is what separates this from filtering output, and why the
+ * test is deliberately narrow:
+ *   - a bare prompt marker with NOTHING after it
+ *   - a rule made only of box-drawing (a LABELLED rule, e.g. "─ Debug ACP … ─",
+ *     has letters and survives as dimmed `info`)
+ * A prompt line WITH text is the user's own message and is rendered as a bubble
+ * by the echo match above; it never reaches here.
+ *
+ * ⚠️ SHAPE MATTERS, not just meaning. The first draft of this was
+ *   /^[\s│┃]*(?:[>›❯]\s*|[─━═_]{3,}[\s─━═_]*)$/
+ * which took 5.3ms on a 2000-char non-matching line: `[─━═_]{3,}` and
+ * `[\s─━═_]*` are two quantifiers over OVERLAPPING classes, so a long rule
+ * followed by any non-match makes the engine try every split point. That is the
+ * same catastrophic-backtracking bug that froze this app's UI for hours on
+ * 2026-07-29, in this same file. Below, each alternative uses ONE quantifier and
+ * no two quantifiers can claim the same character. Time any regex you add here
+ * against long NON-MATCHING input — correctness tests pass on the broken form.
+ */
+const PROVIDER_EMPTY_CHROME = /^(?:[\s│┃]*[>›❯][\s]*|[\s│┃─━═_]{3,})$/;
+
 const SAMPLE_CHARS = 'MMMMMMMMMM';
 const AUTO_SCROLL_THRESHOLD_PX = 40;
 const FOOTER_DEBOUNCE_MS = 100;
@@ -199,18 +251,69 @@ export function UnifiedTerminal({
   // rows in place instead of appending, which is what makes resize redraws
   // and spinner ticks render correctly.
   const frameScreen = useAgentOutputStore((s) => (terminalId ? s.frames[terminalId] : undefined));
+  // Live-turn detection that does NOT depend on the provider's spinner wording.
+  // `THINKING_LABEL` in terminalStream matches thinking|analyzing|processing|…
+  // while Claude says "Brewed", "Crunching", "Meandering", "Skedaddling",
+  // "Ruminating" — so a busy pane read "Ready". That word list is unwinnable;
+  // it is generated flavour text and changes.
+  // These two markers are structural instead: `esc to interrupt` is only offered
+  // while a turn can be interrupted, and the spinner always carries an
+  // elapsed/token counter whatever adjective precedes it.
+  const frameTurnActive = useMemo(
+    () => !!frameScreen?.some((l) => TURN_ACTIVE.test(l)),
+    [frameScreen],
+  );
+  // Text WE sent, so an echo of it in the screen model can be recognised as the
+  // user's own words rather than agent output. Matching against what we actually
+  // wrote is exact — it is not glyph-sniffing the provider's prompt marker, so a
+  // TUI restyle cannot break it.
+  const sentText = useMemo(() => {
+    const seen = new Set<string>();
+    for (const l of filteredLines) {
+      if (l.source === 'user') {
+        const t = l.line.trim();
+        if (t) seen.add(t);
+      }
+    }
+    return seen;
+  }, [filteredLines]);
   const displayLines = useMemo<AgentOutputLine[]>(() => {
     if (!frameScreen || frameScreen.length === 0) return filteredLines;
-    const screenLines: AgentOutputLine[] = frameScreen.map((line, i) => ({
-      id: `frame-${terminalId}-${i}`,
-      agent: agentName,
-      terminal_id: terminalId ?? '',
-      line,
-      ts: '',
-      source: 'agent' as const,
-    }));
-    return [...filteredLines, ...screenLines];
-  }, [filteredLines, frameScreen, agentName, terminalId]);
+    const screenLines: AgentOutputLine[] = frameScreen
+      .filter((line) => !PROVIDER_EMPTY_CHROME.test(line))
+      .map((line, i) => {
+      // Frame rows were unconditionally stamped 'agent', so the user's OWN
+      // message — echoed back by the provider TUI — rendered identically to the
+      // agent's, distinguished only by a leading chevron. A one-character glyph
+      // is not an affordance: nobody should have to learn that `›` means "you".
+      // Strip the provider's prompt marker and see if we sent this line.
+      const bare = line.replace(/^[\s>›❯$|┃│]+/, '').trim();
+      const isOwnEcho = bare.length > 0 && sentText.has(bare);
+      return {
+        id: `frame-${terminalId}-${i}`,
+        agent: agentName,
+        terminal_id: terminalId ?? '',
+        // Render the bare text: the chevron was the provider's prompt gutter,
+        // and inside a bubble it is noise.
+        line: isOwnEcho ? bare : line,
+        ts: '',
+        source: isOwnEcho
+          ? ('user' as const)
+          : PROVIDER_CHROME.test(line)
+            ? ('info' as const)
+            : ('agent' as const),
+      };
+    });
+    // Drop the store's own copy of anything the screen model is already showing
+    // as the user's line, or the message renders twice.
+    const echoed = new Set(
+      screenLines.filter((l) => l.source === 'user').map((l) => l.line),
+    );
+    const history = echoed.size
+      ? filteredLines.filter((l) => !(l.source === 'user' && echoed.has(l.line.trim())))
+      : filteredLines;
+    return [...history, ...screenLines];
+  }, [filteredLines, frameScreen, agentName, terminalId, sentText]);
   const showThinking = useAppStore((s) => s.settings.showThinking) !== false;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -500,8 +603,12 @@ export function UnifiedTerminal({
   // pill can stay in sync with the footer. In ACP mode the authority is the
   // active turn status, not the PTY line stream.
   useEffect(() => {
-    onThinkingLiveChange?.(isAcpMode ? acpIsThinkingLive : isThinkingLive);
-  }, [isAcpMode, acpIsThinkingLive, isThinkingLive, onThinkingLiveChange]);
+    // OR in the structural frame signal: the stream classifier misses Claude's
+    // spinner wording entirely, so without this a busy pane reports "Ready".
+    onThinkingLiveChange?.(
+      isAcpMode ? acpIsThinkingLive : isThinkingLive || frameTurnActive,
+    );
+  }, [isAcpMode, acpIsThinkingLive, isThinkingLive, frameTurnActive, onThinkingLiveChange]);
 
   // Clear the Escape-interrupt flash after a short delay so it acts as a
   // transient confirmation rather than persistent state.
@@ -1187,7 +1294,11 @@ export function UnifiedTerminal({
           data-testid="terminal-measure"
           aria-hidden="true"
           className={`absolute -left-[9999px] top-0 font-terminal whitespace-pre pointer-events-none select-none ${
-            compact ? 'text-[11px] leading-normal' : 'text-[13px] leading-normal'
+            // MUST stay byte-identical to the content span's size/leading below.
+            // This is the off-screen char-width measurer that feeds the PTY
+            // resize; a mismatch computes the wrong `cols` and reintroduces the
+            // wrapping mess. Change both or neither.
+            compact ? 'text-[13px] leading-normal' : 'text-[15px] leading-normal'
           }`}
         >
           {SAMPLE_CHARS}
@@ -1199,8 +1310,15 @@ export function UnifiedTerminal({
           onContextMenu={handleContextMenu}
           onKeyDown={handleKeyDown}
           onPaste={handleTerminalPaste}
-          className={`h-full w-full overflow-y-auto ${isAcpMode ? 'overflow-x-hidden' : 'overflow-x-auto'} outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-terminal ${
-            compact ? 'text-[11px]' : 'text-[13px]'
+          // overflow-x-HIDDEN for both modes. PTY panes used to scroll
+          // horizontally, which is unusable: nobody scrolls sideways to read a
+          // transcript, and a line that runs off the right edge is a line you
+          // did not read. Lines already carry `whitespace-pre-wrap` + wrapping,
+          // so hiding the axis makes them wrap instead of hide. Kimi panes have
+          // always done this; there was no reason claude should not.
+          className={`h-full w-full overflow-y-auto overflow-x-hidden outline-none focus:ring-1 focus:ring-inset focus:ring-emerald-500/50 font-terminal ${
+            // Paired with the measurer span above — keep sizes identical.
+            compact ? 'text-[13px]' : 'text-[15px]'
           } p-2`}
           role="log"
           aria-live="polite"
@@ -1421,7 +1539,15 @@ function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
     return (
       <div className="flex flex-col py-0.5 rounded px-1 -mx-1 items-end hover:bg-slate-800/30">
         <div className="flex items-start gap-2 max-w-[90%] justify-end">
-          <span className="min-w-0 whitespace-pre-wrap break-words leading-normal rounded px-2 py-1 font-terminal bg-blue-600/25 text-blue-100">
+          {/* YOUR words. This is the anchor the eye returns to when scanning a
+              pane, so it gets everything: right-aligned (breaks the left rag of
+              agent output), a solid accent fill rather than a 25% wash, a left
+              border as a hard edge, and semibold. You should be able to find
+              your last message in a wall of output without reading anything. */}
+          <span
+            data-line-source="user"
+            className="min-w-0 whitespace-pre-wrap break-words leading-relaxed rounded-md rounded-l-sm border-l-2 border-sky-400 px-2.5 py-1 font-terminal font-semibold bg-sky-500/20 text-sky-50 shadow-sm"
+          >
             {line.line}
           </span>
         </div>
@@ -1440,13 +1566,20 @@ function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
         isInfo ? 'opacity-70' : ''
       } hover:bg-slate-800/30`}
     >
+      {/* Contrast is deliberate and tiered — this pane is scanned at a glance,
+          so the three classes must be separable by weight and brightness alone,
+          without reading a single word:
+            agent output → brightest + medium weight (the signal)
+            info/chrome  → dim, italic, small (present but never competing)
+          `slate-300` for agent output was mid-grey on a near-black pane: legible
+          if you stopped to read, invisible if you were skimming. */}
       <span
-        className={`min-w-0 whitespace-pre-wrap leading-normal font-terminal overflow-x-auto ${
+        className={`min-w-0 whitespace-pre-wrap leading-relaxed font-terminal overflow-x-auto ${
           isInfo
-            ? 'text-slate-400 italic text-xs'
+            ? 'text-slate-500 italic text-[12px]'
             : isListItem
-              ? 'text-slate-300 pl-1'
-              : 'text-slate-300'
+              ? 'text-slate-100 font-medium pl-1'
+              : 'text-slate-100 font-medium'
         }`}
       >
         {line.line}

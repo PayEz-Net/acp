@@ -205,10 +205,27 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
       : 'bg-cyan-500/15 text-cyan-300';
 
   return (
+    // State is carried by the WHOLE PANE, not a 2px dot. Across a five-pane
+    // grid you answer "who is working / who wants me / where am I typing" with
+    // peripheral vision, which reads area and colour — not glyphs. Three signals,
+    // deliberately non-competing so they can stack without becoming mush:
+    //   thinking → amber ring + outer glow (motion-free; an animated border
+    //              across 5 panes is a strobe, and this tool gets stared at)
+    //   focused  → indigo ring, brightest, because it answers "where does my
+    //              typing go" and a wrong answer there is destructive
+    //   idle     → recedes entirely
+    // Focus wins when both apply: a thinking pane you are typing into needs to
+    // read as YOURS first.
     <div
       className={`
-        h-full flex flex-col overflow-hidden rounded-xl border
-        ${isFocused ? 'border-acp-border-focus shadow-[inset_0_0_0_1px_rgba(99,102,241,0.3)]' : 'border-acp-border'}
+        h-full flex flex-col overflow-hidden rounded-xl border transition-shadow duration-200
+        ${
+          isFocused
+            ? 'border-indigo-400/70 shadow-[inset_0_0_0_1px_rgba(129,140,248,0.55),0_0_0_1px_rgba(129,140,248,0.25)]'
+            : isThinkingLive
+              ? 'border-amber-400/60 shadow-[0_0_14px_-2px_rgba(251,191,36,0.35)]'
+              : 'border-acp-border'
+        }
         bg-acp-surface
       `}
       onClick={onFocus}
@@ -216,19 +233,26 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     >
       {/* Header — stays at the top */}
       <div className="relative h-10 shrink-0 flex items-center gap-2 px-3 border-b border-acp-border bg-acp-surface-raised">
+        {/* 2px was decorative. 10px reads at a glance and carries a soft halo
+            when live, so "busy" is legible from across the desk. */}
         <span
-          className={`w-2 h-2 rounded-full ${statusPill.color} ${statusPill.animate ? 'animate-pulse' : ''}`}
+          className={`w-2.5 h-2.5 shrink-0 rounded-full ${statusPill.color} ${
+            statusPill.animate ? 'animate-pulse shadow-[0_0_8px_1px_rgba(251,191,36,0.6)]' : ''
+          }`}
           title={statusPill.label}
         />
 
-        <span className="text-sm font-semibold text-acp-text-primary truncate">
+        {/* The agent's NAME is the primary label — you scan for "who", then
+            state. Was text-sm; bumped and tightened so it holds its own against
+            the brighter transcript below without shouting. */}
+        <span className="text-[15px] font-semibold tracking-tight text-acp-text-primary truncate">
           {agent.displayName}
         </span>
 
         <span
           className={`
-            text-[10px] font-medium px-1.5 py-0.5 rounded-full
-            ${statusPill.color}/15 ${statusPill.color.replace('bg-', 'text-')}
+            text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 tabular-nums
+            ${statusPill.color}/20 ${statusPill.color.replace('bg-', 'text-')}
           `}
         >
           {statusPill.label}

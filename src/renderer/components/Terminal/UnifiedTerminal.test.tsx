@@ -2158,7 +2158,11 @@ describe('UnifiedTerminal', () => {
     });
 
     const { container, root } = render(<UnifiedTerminal agentName="NextPert" terminalId="t1" />);
-    const userSpan = container.querySelector('[class*="bg-blue-600/25"]');
+    // Query the semantic hook, NOT a paint colour. This previously matched
+    // `[class*="bg-blue-600/25"]`, so it went red the moment the bubble was
+    // restyled — even though the wrapping behaviour it asserts was unchanged.
+    // A test that breaks on repainting tells you nothing about wrapping.
+    const userSpan = container.querySelector('[data-line-source="user"]');
     expect(userSpan).not.toBeNull();
     expect(userSpan?.classList.contains('break-words')).toBe(true);
     expect(userSpan?.classList.contains('overflow-x-auto')).toBe(false);

@@ -27,6 +27,7 @@ import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
+import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnCommand';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 import { TerminalScreen } from './terminalScreen';
@@ -892,7 +893,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // opts.effort comes from leg (a): the orchestrator plumbs
       // team_agent_instances.effort_override (engaged team's per-placement
       // override) through the spawn payload; undefined = global default.
-      const effort = opts?.effort || settings.claudeEffort || 'high';
+      const effort = resolveClaudeEffort(opts?.effort, settings.claudeEffort);
       // Boot-prompt path:
       //   - Wave C orchestrator / data-driven onboarding → the system
       //     prompt file contains the full onboarding instructions. The
@@ -916,9 +917,6 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
       //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."  (the file's instruction)
       // Found by QAPert 2026-07-29. Do not "simplify" this back.
-      const systemPromptFlag = bootPromptTmpPath
-        ? ` --system-prompt-file "${bootPromptTmpPath}"`
-        : '';
       // NOTE — claude has NO mail delivery path (Gate B, wire-verified
       // 2026-07-29), and this spawn no longer pretends otherwise.
       //
@@ -941,9 +939,16 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // lands. Do NOT read a rendered "[ACP Mail]" line in a claude pane as
       // delivery — that line is the renderer's unconditional visual echo
       // (SEV-1 #114823), not proof the agent received anything.
-      const cmd = `claude "Begin." --dangerously-skip-permissions --effort ${effort}${systemPromptFlag}\r`;
+      // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
+      // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
+      // module load — so the composition lives in a module with no electron dep.
+      const cmd = buildClaudeSpawnCommand({
+        effort,
+        modelOverride: opts?.modelOverride,
+        bootPromptTmpPath,
+      });
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -959,18 +964,32 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     // Kimi and Codex poll the inbox and inject new-mail lines directly into
     // their PTY stdin.
     //
-    // Claude is excluded — historically because it was believed to get push
+    // Claude WAS excluded — historically because it was believed to get push
     // via acp-mail-channel.js (MCP channels). It never did: the channel name
-    // never resolved (Gate B, see the spawn command above), so claude has
-    // BOTH no push and no poll, i.e. no mail delivery whatsoever. The
-    // exclusion is left in place rather than "fixed" by enabling the poller
-    // here, because that is a capability change and not this interim's
-    // scope — and because the stream-json adapter (G4) replaces this path
-    // with injectMail on the runtime manager, which is the only variant
-    // where delivery is acknowledged rather than assumed.
-    if (provider !== 'claude') {
-      startInboxPoller(managed);
-    }
+    // never resolved (Gate B), so claude had BOTH no push and no poll, i.e.
+    // no mail delivery whatsoever.
+    //
+    // INCLUDED 2026-07-29. The prior note said enabling this was "a capability
+    // change and not this interim's scope", and preferred waiting for G4's
+    // injectMail because that is the only variant where delivery is
+    // ACKNOWLEDGED rather than assumed. That reasoning is right and still
+    // stands as the destination — but it was weighing assumed-delivery against
+    // acknowledged-delivery, when the live situation is assumed-delivery
+    // against NONE. Measured cost of "none": Jon hand-relayed every message
+    // between five agents for a full session and was told "you have new mail"
+    // three times for mail that had provably never been delivered (QAPert,
+    // msg 1548). A working path we cannot confirm beats a confirmable path
+    // that does not exist yet.
+    //
+    // ⚠️ WHAT THIS DOES **NOT** BUY: this injects mail lines into the pane's
+    // stdin, so delivery is ASSUMED. A rendered mail line here proves we wrote
+    // bytes at a TUI — never that the agent received or acted on them. Do NOT
+    // grade mail delivery by looking at a pane. A-7's bar stands unchanged:
+    // the injected mail carries a nonce and the AGENT'S OWN OUTPUT must
+    // demonstrate it acted on the nonce.
+    //
+    // Remove this once G4 lands injectMail on the runtime manager.
+    startInboxPoller(managed);
 
     let reportSent = false;
     let buffer = '';
