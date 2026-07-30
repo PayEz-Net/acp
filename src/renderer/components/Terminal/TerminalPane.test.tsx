@@ -283,3 +283,84 @@ describe('TerminalPane', () => {
     cleanup(root, container);
   });
 });
+
+describe('Stop must actually stop — autoStart may not override a human', () => {
+  // Jon, 2026-07-29: "stop doesn't actually stop them." stopAgent ends with
+  // status='offline' and terminalId=undefined, which is exactly what the
+  // autoStart effect spawns on — so Stop killed the pane and the effect
+  // immediately started a new one. The agent looked merely interrupted.
+  it('does NOT auto-spawn after the user pressed Stop', async () => {
+    const spawnCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.includes('/spawn')) spawnCalls.push(u);
+      return new Response(JSON.stringify({ data: { terminalId: 't-new' } }), { status: 200 });
+    }) as any;
+
+    useProjectStore.setState({ activeProject: { id: 1, name: 'p', runtime_choice: 'claude' } as any });
+    useAppStore.setState({ backendAvailable: true, agents: [] });
+
+    // Start from a RUNNING pane, or the header renders Play instead of Stop and
+    // there is nothing to click. (First version of this test got that wrong.)
+    const running = makeAgent({ autoStart: true, status: 'ready', terminalId: 't-old' as any });
+    const { container, root } = render(
+      <TerminalPane agent={running} isFocused={false} onFocus={() => {}} compact />,
+    );
+
+    const stop = container.querySelector('[title="Stop Agent"]') as HTMLButtonElement | null;
+    expect(stop).not.toBeNull();
+
+    await act(async () => {
+      stop!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const afterStop = spawnCalls.length;
+
+    // Re-render in the post-stop state: offline + no terminal — precisely the
+    // condition that used to retrigger autoStart.
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          agent={makeAgent({ autoStart: true, status: 'offline', terminalId: undefined as any })}
+          isFocused={false}
+          onFocus={() => {}}
+          compact
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(spawnCalls.length).toBe(afterStop);
+
+    globalThis.fetch = realFetch;
+    cleanup(root, container);
+  });
+
+  it('DOES auto-spawn an offline agent that was never stopped by hand (crash recovery still works)', async () => {
+    const spawnCalls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.includes('/spawn')) spawnCalls.push(u);
+      return new Response(JSON.stringify({ data: { terminalId: 't-new' } }), { status: 200 });
+    }) as any;
+
+    useProjectStore.setState({ activeProject: { id: 1, name: 'p', runtime_choice: 'claude' } as any });
+    useAppStore.setState({ backendAvailable: true, agents: [] });
+
+    // The control arm: the latch must not become a blanket disable of autoStart.
+    const crashed = makeAgent({ autoStart: true, status: 'offline', terminalId: undefined as any });
+    const { container, root } = render(
+      <TerminalPane agent={crashed} isFocused={false} onFocus={() => {}} compact />,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(spawnCalls.length).toBeGreaterThan(0);
+
+    globalThis.fetch = realFetch;
+    cleanup(root, container);
+  });
+});

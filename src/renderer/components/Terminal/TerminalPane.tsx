@@ -31,6 +31,19 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   // Guard against duplicate spawn calls from React StrictMode double-invoke or
   // rapid prop changes before the first async spawn resolves.
   const spawnPendingRef = useRef(false);
+  /**
+   * The human pressed Stop.
+   *
+   * `stopAgent` ends with status='offline' and terminalId=undefined — which is
+   * EXACTLY the condition the autoStart effect below spawns on, so Stop killed
+   * the pane and the effect immediately started a new one. Stop appeared to do
+   * nothing; the agent looked merely interrupted.
+   *
+   * Deliberately NOT persisted and deliberately not consulted on crash: autoStart
+   * must still recover a pane that died on its own. It must never override a
+   * person. Cleared by startAgent, so Play and Restart both work normally.
+   */
+  const userStoppedRef = useRef(false);
 
   // Provider badge is only useful when the team mixes providers. Use the same
   // runtime_choice authority here so stale agent.provider values don't create a
@@ -54,6 +67,9 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   }, [agent.name, agent.terminalId]);
 
   const startAgent = useCallback(async () => {
+    // An explicit start (Play, or the second half of Restart) is consent to run
+    // again, so it clears the stop latch.
+    userStoppedRef.current = false;
     if (spawnPendingRef.current) {
       console.debug(`[Agent] Spawn already in flight for ${agent.name}; skipping duplicate`);
       return;
@@ -146,6 +162,10 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   }, [agent.id, agent.name, agent.terminalId, backendAvailable, updateAgentStatus, setAgentTerminalId, emitErrorLine]);
 
   const stopAgent = useCallback(async () => {
+    // Latch BEFORE the kill: the state writes at the end of this function are
+    // what trigger the autoStart effect, and it must already be suppressed by
+    // the time they land.
+    userStoppedRef.current = true;
     const tid = agent.terminalId;
     try {
       if (backendAvailable) {
@@ -188,7 +208,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   }, [stopAgent, startAgent]);
 
   useEffect(() => {
-    if (agent.autoStart && agent.status === 'offline' && !agent.terminalId) {
+    // `userStoppedRef` is the difference between "this pane died" (recover it)
+    // and "a person stopped this pane" (leave it alone).
+    if (
+      agent.autoStart &&
+      !userStoppedRef.current &&
+      agent.status === 'offline' &&
+      !agent.terminalId
+    ) {
       startAgent();
     }
   }, [agent.autoStart, agent.status, agent.terminalId, startAgent]);
