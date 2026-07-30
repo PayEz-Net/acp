@@ -545,6 +545,35 @@ function startInboxPoller(managed: ManagedPty): void {
   console.log(`[PTY] Started inbox poller for ${agentName} (base ${MAIL_POLL_INTERVAL_MS}ms, jitter ${MAIL_POLL_JITTER_MAX_MS}ms)`);
 }
 
+/**
+ * Delete boot-prompt / mcp tmp files older than a day.
+ *
+ * `cleanupBootPromptTmpFile` only runs on a GRACEFUL PTY exit, so every crash,
+ * tree-kill, or app kill leaks one file. Observed 2026-07-29: 215 files in the
+ * live userData tmp dir and 860 in a previous one. Individually tiny, unbounded
+ * in aggregate.
+ *
+ * Age-based rather than count-based on purpose: a file belonging to a LIVE pane
+ * must never be deleted — `--system-prompt-file` validates the path, so removing
+ * one from under a running agent kills it on its next respawn. A day is far
+ * longer than any pane's spawn window, so nothing in use can qualify.
+ *
+ * Best-effort by contract: a prune failure must never block a spawn.
+ */
+function pruneStaleTmpFiles(dir: string): void {
+  const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  try {
+    const now = Date.now();
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^(boot-prompt|mcp-acp-mail)-/.test(name)) continue;
+      const f = path.join(dir, name);
+      try {
+        if (now - fs.statSync(f).mtimeMs > MAX_AGE_MS) fs.unlinkSync(f);
+      } catch { /* raced or locked; next spawn retries */ }
+    }
+  } catch { /* unreadable dir is not a spawn failure */ }
+}
+
 function writeBootPromptTmpFile(agentName: string, bootPrompt: unknown): string {
   // Guard: never hand writeFileSync a non-string (the cloud boot_prompt
   // came back as an Object → ERR_INVALID_ARG_TYPE crashed every spawn).
@@ -558,6 +587,8 @@ function writeBootPromptTmpFile(agentName: string, bootPrompt: unknown): string 
   // previous spawn.
   const dir = path.join(app.getPath('userData'), 'tmp');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  // Opportunistic prune of day-old leftovers from crashed/killed panes.
+  pruneStaleTmpFiles(dir);
   const fname = `boot-prompt-${agentName}-${Date.now()}.txt`;
   const filepath = path.join(dir, fname);
   fs.writeFileSync(filepath, text, { encoding: 'utf8' });
