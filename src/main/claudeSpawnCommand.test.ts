@@ -167,3 +167,41 @@ describe('session continuity flags', () => {
     expect(cmd).toContain('--resume u-9');
   });
 });
+
+describe('foreign-runtime model guard', () => {
+  it('DROPS a kimi model id rather than handing it to claude', () => {
+    // Live break on prod 2026-07-29: all 8 panes got --model kimi-for-coding and
+    // failed with "may not exist or you may not have access to it".
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', modelOverride: 'kimi-for-coding' });
+    expect(cmd).not.toContain('--model');
+  });
+
+  it('drops the prefixed spawn-alias form too', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', modelOverride: 'kimi-code/k3' });
+    expect(cmd).not.toContain('--model');
+  });
+
+  it('drops k3 and the highspeed variant', () => {
+    for (const m of ['k3', 'kimi-for-coding-highspeed']) {
+      expect(buildClaudeSpawnCommand({ effort: 'high', modelOverride: m })).not.toContain('--model');
+    }
+  });
+
+  it('PASSES real claude aliases through', () => {
+    for (const m of ['haiku', 'sonnet', 'opus', 'fable']) {
+      expect(buildClaudeSpawnCommand({ effort: 'high', modelOverride: m })).toContain(`--model ${m}`);
+    }
+  });
+
+  it('PASSES an unknown alias through — reject-known-wrong, not allow-known-right', () => {
+    // A future alias must not be silently dropped. `haiku` is already absent from
+    // `claude --help`'s examples yet works, so an allowlist would rot.
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', modelOverride: 'some-future-model-9' });
+    expect(cmd).toContain('--model some-future-model-9');
+  });
+
+  it('passes a full claude model name through', () => {
+    const cmd = buildClaudeSpawnCommand({ effort: 'high', modelOverride: 'claude-opus-5' });
+    expect(cmd).toContain('--model claude-opus-5');
+  });
+});

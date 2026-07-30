@@ -15,6 +15,24 @@ import { type ClaudeEffort } from '../shared/types';
  * Precedence, unchanged from the spawn site: per-placement override →
  * global `settings.claudeEffort` → 'high'.
  */
+/**
+ * Model ids that belong to a runtime OTHER than claude.
+ *
+ * Kept as an explicit deny-list of names we can point at, so a claude alias we
+ * have never heard of still passes through. `kimi-code/` prefixes are matched too
+ * because that is the spawn-time alias form.
+ */
+const FOREIGN_RUNTIME_MODELS: ReadonlySet<string> = new Set([
+  'k3',
+  'kimi-for-coding',
+  'kimi-for-coding-highspeed',
+]);
+
+export function isForeignRuntimeModel(modelId: string): boolean {
+  const bare = modelId.replace(/^kimi-code\//, '').trim();
+  return FOREIGN_RUNTIME_MODELS.has(bare) || bare.startsWith('kimi');
+}
+
 export function resolveClaudeEffort(
   override: ClaudeEffort | undefined | null,
   settingsEffort: ClaudeEffort | undefined | null,
@@ -67,7 +85,28 @@ export function buildClaudeSpawnCommand(opts: {
   // enforced client-side before save (a model is only valid for the resolved
   // runtime of that placement); an unset override must omit the flag entirely,
   // because a bare `--model` fails the spawn.
-  if (opts.modelOverride) parts.push(`--model ${opts.modelOverride}`);
+  // Drop a model that belongs to ANOTHER runtime rather than handing it to
+  // claude. `model_override` is interpreted against the RESOLVED runtime, and
+  // prod carries kimi-era values (`kimi-for-coding`, `k3`) on placements that now
+  // resolve to claude. Passing those through produced "may not exist or you may
+  // not have access to it" on all eight prod panes — the model override existed
+  // for months but was inert until this file started honouring it, so wiring it
+  // correctly turned a dormant data problem into a live break.
+  //
+  // REJECT-KNOWN-WRONG, not allow-known-right: an allowlist of claude aliases
+  // would silently drop each new alias Anthropic ships (`haiku` is already absent
+  // from `claude --help`'s examples yet works). This only refuses ids we can name
+  // as belonging elsewhere, and says so.
+  const foreign = opts.modelOverride && isForeignRuntimeModel(opts.modelOverride);
+  if (foreign) {
+    console.warn(
+      `[ClaudeSpawn] IGNORING model_override '${opts.modelOverride}' — that is a ` +
+        `kimi model id and this placement resolved to claude. Spawning with the ` +
+        `default model. Fix the placement's model_override (or its ` +
+        `runtime_override) so the tuple agrees.`,
+    );
+  }
+  if (opts.modelOverride && !foreign) parts.push(`--model ${opts.modelOverride}`);
   if (opts.bootPromptTmpPath) parts.push(`--system-prompt-file "${opts.bootPromptTmpPath}"`);
   return `${parts.join(' ')}\r`;
 }
