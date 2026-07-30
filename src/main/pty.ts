@@ -472,6 +472,37 @@ function extractMessages(response: any): any[] {
 }
 
 /* ==========================================================================
+ * TODO — RETRACTED DIAGNOSIS, KEPT AS A WARNING. READ BEFORE TOUCHING THIS.
+ * ==========================================================================
+ * The block below claimed the cloud's `?unread=true` filter was broken by a
+ * NULL-vs-false predicate. THAT WAS WRONG and is retracted. It failed twice:
+ *   - SOURCE: no such predicate exists. All three cloud paths test
+ *     `read_at IS NULL` correctly; `is_read` appears only in schema files.
+ *   - WIRE: controlled probe — with one genuinely-unread message present,
+ *     `?unread=true` returned it, unread_count 1. The filter works.
+ *
+ * REAL CAUSE: read-on-GET in the cloud message endpoint, triggered by OUR OWN
+ * notice text, which used to command `curl /v1/mail/messages/N`. Every agent
+ * obediently marked its own mail read before acting on it. Notice text fixed
+ * above; the cloud-side fix (fetch must not stamp read; marking read must be
+ * explicit and mean ACTIONED) is tracked with DotNetPert —
+ * AgentMailController.cs 'Pull = Read'.
+ *
+ * WHY THE WORKAROUND STAYS ANYWAY: not sending `unread=true` is still correct.
+ * This poller's own `seen` set is the authority on "not yet injected", and that
+ * is a different question from "has a human actioned it". Delegating delivery
+ * to someone else's read-state was the coupling that hid this for a day.
+ *
+ * LESSON, recorded because it cost the team an hour: I shipped a MECHANISM
+ * instead of a MEASUREMENT. The fix worked, so the wrong story looked confirmed.
+ * A working fix is not evidence for the reason you gave.
+ * ==========================================================================
+ */
+
+/* ==========================================================================
+ * SUPERSEDED — original (incorrect) note, retained so the retraction has
+ * something to point at.
+ * ==========================================================================
  * TODO — REMOVE WHEN THE CLOUD UNREAD FILTER IS FIXED
  * ==========================================================================
  * The cloud's `?unread=true` inbox filter returns NOTHING. Mail arrives with
@@ -592,10 +623,24 @@ function startInboxPoller(managed: ManagedPty): void {
       seen.add(Number(id));
       const from = m.from_agent ?? 'unknown';
       const subject = m.subject ?? '(no subject)';
+      // The notice used to say `Read it NOW with: curl .../v1/mail/messages/N`.
+      // That GET STAMPS read_at in the cloud, so we were instructing every agent
+      // to run the one call that marks its own mail read — BEFORE acting on it.
+      // Result: 42 of 42 inbox entries carried a read_at nobody set deliberately,
+      // unread_count sat at 0 forever, and the inbox stopped working as a work
+      // queue. Confirmed by controlled probe (DotNetPert-Scout, 2026-07-30):
+      // read_at null -> one GET -> read_at stamped, unread_count 0.
+      //
+      // Team convention is that unread means NOT YET ACTIONED, which is why we
+      // leave mail unread in-session. Read-on-GET redefines it as NOT YET
+      // FETCHED — a different thing, and the difference is what destroyed the
+      // queue. So the notice no longer commands the fetch: it carries enough to
+      // act on, and tells the agent that fetching costs its unread state.
       const text =
         `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
-        `Read it NOW with: curl -s ${apiBase}/v1/mail/messages/${id} -H "X-ACP-Agent: ${agentName}" ` +
-        `and act on actionable messages — do not wait for the human.`;
+        `Act on it. If you need the body: curl -s ${apiBase}/v1/mail/messages/${id} ` +
+        `-H "X-ACP-Agent: ${agentName}" — NOTE that fetching marks it read, so fetch ` +
+        `only when you are ready to action it, not to triage. Do not wait for the human.`;
       // Inject as bracketed paste + a SEPARATE Enter write. A raw
       // `write(text + '\r')` arrives as one input burst; the kimi TUI treats
       // the burst as pasted content and the trailing \r becomes a newline in
