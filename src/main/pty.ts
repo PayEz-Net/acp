@@ -423,7 +423,16 @@ function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ resp
   return new Promise((resolve) => {
     const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
     const u = new URL(`/v1/mail/inbox/${encodeURIComponent(agentName)}`, apiBase);
-    u.searchParams.set('unread', 'true');
+    // DELIBERATELY NOT `unread=true`. The cloud's unread filter returns NOTHING:
+    // messages arrive with `is_read` NULL, and the filter tests `= false`, which
+    // NULL never satisfies in SQL. Verified 2026-07-29 — QAPert's full inbox held
+    // 10 messages (incl. an urgent one) while `?unread=true` returned [] and
+    // unread_count 0. That is why no agent has ever received mail through the
+    // poller, and why mail could only be read by curling the full inbox by hand.
+    //
+    // We do not need the server's filter: this poller already de-dupes against its
+    // own `seen` set, which is the authority on "not yet injected". Asking the
+    // server to decide read-state was the dependency that broke us.
     u.searchParams.set('pageSize', '50');
     if (projectId != null) {
       u.searchParams.set('project_id', String(projectId));
@@ -462,10 +471,48 @@ function extractMessages(response: any): any[] {
   return [];
 }
 
+/* ==========================================================================
+ * TODO — REMOVE WHEN THE CLOUD UNREAD FILTER IS FIXED
+ * ==========================================================================
+ * The cloud's `?unread=true` inbox filter returns NOTHING. Mail arrives with
+ * `is_read` NULL and the filter tests `= false`; in SQL `NULL = false` is NULL,
+ * never true, so no message is ever "unread" and the filter is a permanent
+ * empty set.
+ *
+ * Verified on the wire 2026-07-29 (project 31, prod):
+ *   GET /v1/mail/inbox/QAPert                 -> 10 messages, is_read: null
+ *   GET /v1/mail/inbox/QAPert?unread=true     -> messages: [], unread_count: 0
+ * One of the 10 was importance:urgent. This is why NO agent has ever received
+ * mail through the poller, and why mail could previously only be read by
+ * curling the full inbox by hand.
+ *
+ * WORKAROUND IN THIS FILE (two parts, both marked):
+ *   1. fetchUnreadInbox no longer sends `unread=true` — it pulls the full inbox
+ *      and lets this poller's own `seen` set decide what is new.
+ *   2. the firstPoll baseline is TIME-based rather than blanket, so pulling the
+ *      full inbox does not swallow mail that arrived during a restart.
+ *
+ * OWNER: cloud agentmail / vibe-api (DotNetPert). The server-side fix is to
+ * treat NULL as unread — `is_read IS NOT TRUE`, or COALESCE(is_read,false)=false
+ * — and ideally to default the column to false on insert so the ambiguity
+ * disappears at the source.
+ *
+ * WHEN IT LANDS: restore `unread=true` here, keep the `seen` set (it is still
+ * the authority on "not yet injected"), and keep the loud failure logging. Do
+ * NOT restore the silent non-200 return — a delivery path that cannot report its
+ * own failure is indistinguishable from one with nothing to deliver.
+ * ==========================================================================
+ */
+
+/** Consecutive inbox-poll failures per agent, so a dead delivery path is loud. */
+const mailPollFailures = new Map<string, number>();
+
 function startInboxPoller(managed: ManagedPty): void {
   const { agentName, projectId } = managed;
   const seen = new Set<number>();
   let firstPoll = true;
+  // Cut-off between 'history to skip' and 'mail that arrived since we came up'.
+  const pollerStartedAt = Date.now();
   const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
   let currentInterval = MAIL_POLL_INTERVAL_MS + Math.floor(Math.random() * MAIL_POLL_JITTER_MAX_MS);
   let consecutive429s = 0;
@@ -493,10 +540,22 @@ function startInboxPoller(managed: ManagedPty): void {
     }
 
     if (statusCode !== 200) {
-      // Non-429 error — keep current interval but don't reset backoff entirely
+      // LOUD. This used to return silently, so a permanently-failing inbox fetch
+      // looked identical to an empty inbox: pollers logged "Started" and then
+      // nothing, forever. A delivery path that cannot report its own failure is
+      // indistinguishable from one with nothing to deliver.
+      mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
+      const n = mailPollFailures.get(agentName)!;
+      if (n === 1 || n === 5 || n % 20 === 0) {
+        console.warn(
+          `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
+          `(${n} consecutive). Mail delivery to this pane is NOT working.`,
+        );
+      }
       scheduleNext();
       return;
     }
+    mailPollFailures.set(agentName, 0);
 
     // Success — gradually restore interval
     consecutive429s = Math.max(0, consecutive429s - 1);
@@ -506,13 +565,25 @@ function startInboxPoller(managed: ManagedPty): void {
 
     const messages = extractMessages(response);
     if (firstPoll) {
+      // Baseline HISTORY, not everything. Now that we fetch the full inbox (the
+      // cloud's unread filter is broken — see fetchUnreadInbox), a blanket
+      // baseline would swallow 50 messages including anything that arrived while
+      // this pane was booting. So: mark as seen only what predates the poller
+      // starting, and let anything newer fall through and be injected.
+      //
+      // The point is not to replay history at a fresh pane, and not to lose mail
+      // sent during a restart. Undated messages are treated as history, because
+      // injecting an undateable message risks replaying the archive.
       for (const m of messages) {
         const id = m.message_id ?? m.id;
-        if (id != null) seen.add(Number(id));
+        if (id == null) continue;
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        const isHistory = Number.isNaN(ts) || ts < pollerStartedAt;
+        if (isHistory) seen.add(Number(id));
       }
       firstPoll = false;
-      scheduleNext();
-      return;
+      // Fall THROUGH to delivery: anything newer than pollerStartedAt is real
+      // mail this pane has not seen.
     }
 
     for (const m of messages) {
