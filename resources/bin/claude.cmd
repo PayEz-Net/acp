@@ -55,10 +55,37 @@ set "CLAUDECODE="
 rem Build hooks JSON
 set "HOOKS_JSON={\"hooks\":{\"SessionStart\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook session-start\",\"timeout\":10}]}],\"Stop\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook stop\",\"timeout\":10}]}],\"Notification\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook notification\",\"timeout\":10}]}]}}"
 
-rem Generate session ID via PowerShell
-for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "SESSION_ID=%%G"
+rem The ACP spawn command (buildClaudeSpawnCommand) is the AUTHORITY on session
+rem identity: it passes --session-id <id> to CREATE, or --resume <id> to RESUME.
+rem If we ALSO inject --session-id, a resume reaches the real CLI as
+rem "--session-id X --resume Y", which claude >= 2.1.220 rejects with
+rem "--session-id can only be used with --continue or --resume if --fork-session
+rem is also specified" — killing every resume spawn (and doubling --session-id on
+rem create). So only inject our own session id when the caller passed NO session
+rem flag (a bare/manual `claude` in a pane). SHIFT does not affect %*, so the
+rem passthrough below still forwards the original argument list.
+set "HAS_SESSION_FLAG="
+:scan_session_flag
+if "%~1"=="" goto :scan_session_done
+if /i "%~1"=="--session-id" set "HAS_SESSION_FLAG=1"
+if /i "%~1"=="--resume" set "HAS_SESSION_FLAG=1"
+if /i "%~1"=="-r" set "HAS_SESSION_FLAG=1"
+if /i "%~1"=="--continue" set "HAS_SESSION_FLAG=1"
+if /i "%~1"=="-c" set "HAS_SESSION_FLAG=1"
+shift
+goto :scan_session_flag
+:scan_session_done
 
+if defined HAS_SESSION_FLAG goto :caller_owns_session
+
+rem No caller session flag — generate one so lifecycle hooks still attach.
+for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "SESSION_ID=%%G"
 "%REAL_CLAUDE%" --session-id "%SESSION_ID%" --settings "%HOOKS_JSON%" %*
+exit /b %ERRORLEVEL%
+
+:caller_owns_session
+rem Caller supplied --session-id/--resume/--continue; only attach hooks.
+"%REAL_CLAUDE%" --settings "%HOOKS_JSON%" %*
 exit /b %ERRORLEVEL%
 
 :passthrough
