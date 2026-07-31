@@ -1,6 +1,6 @@
 /**
  * Prepare acp-api for bundling in the Electron installer.
- * Copies ../acp-api to a release directory, builds it, prunes dev deps,
+ * Copies ./acp-api to a release directory, builds it, prunes dev deps,
  * and removes source files so only compiled output + production node_modules ship.
  */
 
