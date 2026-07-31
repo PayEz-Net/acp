@@ -498,6 +498,14 @@ function orchestrateTeardown(projectId: number): void {
 let unsubLifecycle: (() => void) | null = null;
 const lastSeenState = new Map<number, LifecycleState>();
 let isStarted = false;
+// Gate: the orchestrator must not spawn on a background RUNNING push before the
+// user has explicitly picked a project. Opened by LIFECYCLE_RESEED (the picker's
+// Start button) via setSpawnGate(true).
+let spawnGateOpen = false;
+
+export function setSpawnGate(open: boolean): void {
+  spawnGateOpen = open;
+}
 
 export function startSpawnOrchestrator(): void {
   if (isStarted) return;
@@ -521,6 +529,10 @@ export function startSpawnOrchestrator(): void {
 
     // Transition INTO RUNNING — orchestrate spawn for CURRENT project only.
     if (newS === 'RUNNING' && oldS !== 'RUNNING') {
+      if (!spawnGateOpen) {
+        console.log(`[SpawnOrch] project=${pid} RUNNING but spawn gate closed (user hasn't picked a project); ignoring`);
+        return;
+      }
       if (currentProjectId !== null && pid !== currentProjectId) {
         console.log(`[SpawnOrch] project=${pid} RUNNING but current project is ${currentProjectId}; ignoring`);
         return;

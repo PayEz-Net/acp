@@ -254,8 +254,9 @@ async function heartbeat(entry: AgentSessionEntry): Promise<void> {
     }
 
     if (res.status === 404) {
+      const body = typeof res.text === 'function' ? await res.text().catch(() => '') : '';
       console.warn(
-        `[AgentSession] heartbeat 404 for session=${entry.session.id}; re-registering a fresh session`,
+        `[AgentSession] heartbeat 404 for session=${entry.session.id}; re-registering a fresh session | body=${body.slice(0, 200)}`,
       );
       await reregisterSession(entry);
       return;

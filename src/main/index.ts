@@ -16,7 +16,7 @@ import { startOAuthServer, stopOAuthServer, OAUTH_PORT } from './oauth-server';
 import { startApiServer, stopApiServer, getLocalSecret, getApiLogs, setOnBackendStatusChange } from './api-server';
 import { startLifecycleServer, stopLifecycleServer } from './lifecycle-server';
 import { startLifecycleHub, stopLifecycleHub, onLifecycleHubEvent, seedInitialLifecycleState } from './lifecycle-hub';
-import { startSpawnOrchestrator, stopSpawnOrchestrator } from './spawn-orchestrator';
+import { startSpawnOrchestrator, stopSpawnOrchestrator, setSpawnGate } from './spawn-orchestrator';
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
@@ -258,6 +258,10 @@ function setupIpcHandlers() {
   // just hands the orchestrator the state the backend already has (no
   // cloud mutation, no invented transition).
   ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async () => {
+    // The picker's explicit Start opens the spawn gate so the orchestrator will
+    // honor RUNNING transitions. Until this fires, background RUNNING pushes are
+    // ignored (no spawn before project selection).
+    setSpawnGate(true);
     await seedInitialLifecycleState();
   });
 
