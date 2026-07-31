@@ -1,9 +1,10 @@
 # ACP API → Desktop Repo Consolidation (Planned)
 
-**Status:** Planned, not started
-**Owner:** DotNetPert (implementation), BAPert (coordination), Aurum (approval)
-**Priority:** P2 — not blocking; existing sibling-repo layout works via `electron-builder.json` `extraResources` workaround
+**Status:** IN PROGRESS — acp-api imported and paths rewired; pending build verification
+**Owner:** BAPert (lead / coordination), DotNetPert (implementation), Aurum (approval), QAPert (QA), NextPert (docs/tooling)
+**Priority:** P0 — all hands; blocks Mac installer handoff and public OSS release line
 **Written:** 2026-04-14 by Aurum
+**Assigned by:** Operator 2026-07-30
 
 ---
 
