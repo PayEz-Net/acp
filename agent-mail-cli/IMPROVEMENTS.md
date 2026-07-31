@@ -57,7 +57,7 @@ node agent-mail.js status
 
 ### 4. API Endpoint: `POST /v1/mail/inbox/:agent/read-all`
 
-Added to `acp-api/api/routes/mailProxy.ts`:
+Added to `acp-desktop/acp-api/api/routes/mailProxy.ts`:
 
 ```typescript
 // Efficient bulk operation - 1 API call instead of N
@@ -88,7 +88,7 @@ export async function markAllMessagesRead(agent: string): Promise<{ success: boo
 ## Files Changed
 
 1. **NEW**: `acp-desktop/agent-mail-cli/agent-mail-v2.js` → now `agent-mail.js` - Enhanced CLI
-2. **MODIFIED**: `acp-api/api/routes/mailProxy.ts` - Added `/inbox/:agent/read-all` endpoint
+2. **MODIFIED**: `acp-desktop/acp-api/api/routes/mailProxy.ts` - Added `/inbox/:agent/read-all` endpoint
 3. **MODIFIED**: `acp-desktop/src/renderer/stores/mailStore.ts` - Added `markAllMessagesRead()`
 
 ## Migration Complete

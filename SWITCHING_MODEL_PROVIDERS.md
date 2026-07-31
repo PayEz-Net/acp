@@ -99,7 +99,7 @@ You can override some behavior without touching code:
 
 | Variable | Repo | Effect |
 |----------|------|--------|
-| `ACP_CONTRACTOR_CMD` | `acp-api` | Overrides the contractor binary (default: `kimi`) |
+| `ACP_CONTRACTOR_CMD` | `acp-desktop/acp-api` | Overrides the contractor binary (default: `kimi`) |
 | `KIMI_MODEL` | System | Model passed to Kimi CLI |
 
 ---
@@ -112,11 +112,11 @@ You can override some behavior without touching code:
    Change `|| 'claude'` → `|| 'kimi'`
 3. **Hook runtime** (`acp-stable/resources/bin/acp-hook.mjs`)  
    Change `'claude-code'` → `'kimi-cli'`
-4. **API profile** (`acp-api/api/routes/agents.ts`)  
+4. **API profile** (`acp-desktop/acp-api/api/routes/agents.ts`)  
    `program: 'kimi-cli'`, `model: 'moonshotai/kimi-k2.5'`
-5. **Contractor defaults** (`acp-api/api/contractors/sessionManager.ts`)  
+5. **Contractor defaults** (`acp-desktop/acp-api/api/contractors/sessionManager.ts`)  
    `this.contractorCmd = ... || 'kimi'`
-6. **Process monitor** (`acp-api/api/contractors/processMonitor.ts`)  
+6. **Process monitor** (`acp-desktop/acp-api/api/contractors/processMonitor.ts`)  
    `output.toLowerCase().includes('kimi')`
 7. **Restart the desktop app** so new sessions pick up the change.
 

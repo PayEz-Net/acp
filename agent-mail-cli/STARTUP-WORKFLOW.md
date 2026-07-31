@@ -6,7 +6,7 @@
 
 ### Step 1: One-Time Setup
 ```bash
-cd E:/Repos/acp-desktop/agent-mail-cli
+cd acp-desktop/agent-mail-cli
 node agent-mail.js init
 # Enter your agent name
 # Environment: local (default)
@@ -49,7 +49,7 @@ C:\Users\<username>\.acp-mail.json
 
 ### Setup
 ```bash
-cd E:/Repos/acp-desktop/agent-mail-cli
+cd acp-desktop/agent-mail-cli
 node agent-mail.js init
 # Enter your agent name
 # Environment: prod
