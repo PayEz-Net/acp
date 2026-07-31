@@ -1,10 +1,22 @@
 # ACP API → Desktop Repo Consolidation (Planned)
 
-**Status:** IN PROGRESS — acp-api imported and paths rewired; pending build verification
+**Status:** IMPLEMENTATION COMPLETE — acp-api imported, paths rewired, standalone repo deprecated; pending QAPert build verification
 **Owner:** BAPert (lead / coordination), DotNetPert (implementation), Aurum (approval), QAPert (QA), NextPert (docs/tooling)
 **Priority:** P0 — all hands; blocks Mac installer handoff and public OSS release line
 **Written:** 2026-04-14 by Aurum
 **Assigned by:** Operator 2026-07-30
+
+---
+
+## Implementation notes (2026-07-31)
+
+- acp-api was imported from tag `pre-consolidation-v1` into `acp-desktop/acp-api/`.
+- Dev spawn path in `src/main/api-server.ts` now resolves to the `acp-api/` subfolder.
+- `scripts/prepare-acp-api.cjs` installs deps in `acp-api-release/` via `npm ci` (copying `node_modules` broke npm bin wrappers on macOS).
+- Build config lives in `package.json` (`extraResources` from `acp-api-release`); `electron-builder.json` does not exist in this repo.
+- Root `package.json` has `postinstall: "cd acp-api && npm install"` (Phase 4 Option A approved by Aurum).
+- Standalone acp-api repo tagged `pre-consolidation-v1` and marked deprecated with a README.
+- Remaining work: QAPert verifies `npm run dev:electron` and packaged builds; NextPert sweeps docs for stale references.
 
 ---
 
