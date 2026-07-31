@@ -2,18 +2,8 @@
  * PayEzVibe agent session lifecycle unit tests.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { buildVsqlCacheAuthHeaders, hasCapability } from './vibe-api-auth';
 
-vi.mock('./vibe-api-auth', () => ({
-  buildVsqlCacheAuthHeaders: vi.fn().mockResolvedValue({
-    Authorization: 'Bearer test-token',
-  }),
-  hasCapability: vi.fn().mockResolvedValue(true),
-}));
-
-vi.mock('./env', () => ({
-  VIBE_API_URL: 'https://api.idealvibe.online',
-}));
+const ACP_API_URL = 'http://127.0.0.1:3001';
 
 async function loadModule() {
   const mod = await import('./agentSessionLifecycle');
@@ -40,14 +30,7 @@ describe('agentSessionLifecycle', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers({ shouldAdvanceTime: false });
-    vi.mocked(buildVsqlCacheAuthHeaders).mockResolvedValue({
-      Authorization: 'Bearer test-token',
-    });
-    vi.mocked(hasCapability).mockResolvedValue(true);
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(makeOkResponse()),
-    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(makeOkResponse()));
     vi.spyOn(console, 'warn').mockReturnValue(undefined);
     vi.spyOn(console, 'log').mockReturnValue(undefined);
   });
@@ -67,7 +50,7 @@ describe('agentSessionLifecycle', () => {
     expect(getAgentSession('term-1')).toEqual({ id: 'sess-1', sessionToken: 'tok', agentId: 42 });
   });
 
-  it('POSTs start with agentId, content-type and bearer token', async () => {
+  it('POSTs start with agent_id to the local sidecar', async () => {
     const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-2'));
     vi.stubGlobal('fetch', fetchMock);
     const { startAgentSession } = await loadModule();
@@ -76,10 +59,10 @@ describe('agentSessionLifecycle', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://api.idealvibe.online/v1/sessions/start');
+    expect(url).toBe(`${ACP_API_URL}/v1/agent-sessions/start`);
     expect(init.method).toBe('POST');
     expect(init.headers['Content-Type']).toBe('application/json');
-    expect(init.headers.Authorization).toBe('Bearer test-token');
+    expect(init.headers.Authorization).toBeUndefined();
     expect(JSON.parse(init.body)).toEqual({ agent_id: 7 });
   });
 
@@ -102,7 +85,7 @@ describe('agentSessionLifecycle', () => {
     expect(result.ok && result.session.id).toBe('sess-flat');
   });
 
-  it('POSTs start with agent_id and project_id when projectId is supplied', async () => {
+  it('ignores the projectId argument and lets the sidecar inject it', async () => {
     const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-proj'));
     vi.stubGlobal('fetch', fetchMock);
     const { startAgentSession } = await loadModule();
@@ -110,23 +93,7 @@ describe('agentSessionLifecycle', () => {
     await startAgentSession('term-proj', 7, 25);
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(JSON.parse(init.body)).toEqual({ agent_id: 7, project_id: 25 });
-  });
-
-  it('returns a 403 result when agent_terminal_output capability is missing', async () => {
-    vi.mocked(hasCapability).mockResolvedValue(false);
-    const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-cap'));
-    vi.stubGlobal('fetch', fetchMock);
-    const { startAgentSession } = await loadModule();
-
-    const result = await startAgentSession('term-cap', 1);
-
-    expect(result).toEqual({
-      ok: false,
-      status: 403,
-      message: expect.stringContaining('agent_terminal_output'),
-    });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.parse(init.body)).toEqual({ agent_id: 7 });
   });
 
   it('returns a failed result and logs when start fails', async () => {
@@ -150,10 +117,7 @@ describe('agentSessionLifecycle', () => {
   });
 
   it('does not block on start failures', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValue(new Error('network down')),
-    );
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
     const { startAgentSession } = await loadModule();
 
     await expect(startAgentSession('term-err', 1)).resolves.toEqual({
@@ -162,7 +126,7 @@ describe('agentSessionLifecycle', () => {
     });
   });
 
-  it('sends heartbeat every 30 seconds', async () => {
+  it('sends heartbeat every 30 seconds via the local sidecar', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(makeStartResponse('sess-hb'))
@@ -177,7 +141,7 @@ describe('agentSessionLifecycle', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const [url] = fetchMock.mock.calls[1];
-    expect(url).toBe('https://api.idealvibe.online/v1/sessions/sess-hb/heartbeat');
+    expect(url).toBe(`${ACP_API_URL}/v1/agent-sessions/sess-hb/heartbeat`);
   });
 
   it('stops heartbeat after session end', async () => {
@@ -196,7 +160,7 @@ describe('agentSessionLifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('ends session with reason query param', async () => {
+  it('ends session with reason query param via the local sidecar', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(makeStartResponse('sess-reason'))
@@ -207,12 +171,10 @@ describe('agentSessionLifecycle', () => {
     await startAgentSession('term-reason', 4);
     await endAgentSession('term-reason', 'teardown');
 
-    const endCalls = fetchMock.mock.calls.filter(([url]) =>
-      String(url).includes('/end'),
-    );
+    const endCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/end'));
     expect(endCalls).toHaveLength(1);
     expect(endCalls[0][0]).toBe(
-      'https://api.idealvibe.online/v1/sessions/sess-reason/end?reason=teardown',
+      `${ACP_API_URL}/v1/agent-sessions/sess-reason/end?reason=teardown`,
     );
   });
 
@@ -255,7 +217,7 @@ describe('agentSessionLifecycle', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const hbCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/heartbeat'));
     expect(hbCalls).toHaveLength(2);
-    expect(hbCalls[1][0]).toBe('https://api.idealvibe.online/v1/sessions/sess-new/heartbeat');
+    expect(hbCalls[1][0]).toBe(`${ACP_API_URL}/v1/agent-sessions/sess-new/heartbeat`);
   });
 
   it('keeps the old session and retries next tick when re-register fails', async () => {
@@ -304,17 +266,12 @@ describe('agentSessionLifecycle', () => {
     await vi.advanceTimersByTimeAsync(0); // flush microtasks up to sendStart await
     await endAgentSession('term-pending', 'normal');
 
-    resolveStart!(
-      makeStartResponse('sess-pending'),
-    );
+    resolveStart!(makeStartResponse('sess-pending'));
     await started;
     await vi.advanceTimersByTimeAsync(0);
     await new Promise((resolve) => process.nextTick(resolve));
-    console.log('fetch calls', fetchMock.mock.calls);
 
-    const endCalls = fetchMock.mock.calls.filter(([url]) =>
-      String(url).includes('/end'),
-    );
+    const endCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/end'));
     expect(endCalls).toHaveLength(1);
     expect(endCalls[0][0]).toContain('reason=normal');
   });

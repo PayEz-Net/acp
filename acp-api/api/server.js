@@ -47,6 +47,7 @@ import teamsRoutes from './routes/teams.js';
 import cliProxyRoutes from './routes/cliProxy.js';
 import authRoutes from './routes/auth.js';
 import authDiagRoutes from './routes/authDiag.js';
+import agentSessionProxyRoutes from './routes/agentSessionProxy.js';
 import { setTerminalDeadEmitter } from './auth/tokenManager.js';
 import magicLinkEmailRoutes from './routes/magicLinkEmail.js';
 
@@ -99,6 +100,10 @@ export async function createApp(cfg) {
   // acp-stable-api e265ffd/8dccbbe for QAPert's ACP→IDP round-trip smoke).
   // No /issue or /redeem in this repo; just the one thin /email pass-through.
   app.use('/v1/auth/magic-link', magicLinkEmailRoutes());
+
+  // Agent session lifecycle proxy — local-only, sidecar injects current project
+  // and IDP bearer so the desktop doesn't need to manage either.
+  app.use('/v1/agent-sessions', agentSessionProxyRoutes(appConfig));
 
   // Apply local auth middleware to all routes after this point
   app.use(localAuth(appConfig.acpLocalSecret || null, storage));

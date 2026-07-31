@@ -6,13 +6,16 @@
  * does not mark them inactive; sessions are ended when the agent is killed,
  * exits, or the project lifecycle tears down.
  *
+ * Calls are routed through the local acp-api sidecar so the desktop does not
+ * need to manage IDP bearer tokens or project_id injection. The sidecar reads
+ * the active project from its cache and forwards to the cloud.
+ *
  * The module keeps its own state keyed by terminal/runtime id so it can be
  * driven from both the PTY path and the ACP runtime path without leaking
  * lifecycle details into those modules.
  */
 
-import { VIBE_API_URL } from './env';
-import { buildVsqlCacheAuthHeaders, hasCapability } from './vibe-api-auth';
+const ACP_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
 export interface AgentSession {
   /** PayEzVibe agent session id. */
@@ -33,7 +36,6 @@ export type AgentSessionStartResult =
 interface SessionState {
   terminalId: string;
   agentId: number;
-  projectId?: number;
   session: AgentSession | null;
   heartbeatTimer: NodeJS.Timeout | null;
   status: 'starting' | 'active' | 'ending' | 'ended';
@@ -58,16 +60,8 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 export async function startAgentSession(
   terminalId: string,
   agentId: number,
-  projectId?: number,
+  _projectId?: number,
 ): Promise<AgentSessionStartResult> {
-  if (!(await hasCapability('agent_terminal_output'))) {
-    return {
-      ok: false,
-      status: 403,
-      message: 'Agent session could not be started. Missing capability: agent_terminal_output.',
-    };
-  }
-
   if (sessions.has(terminalId)) {
     console.warn(
       `[AgentSession] session already tracked for terminal=${terminalId}; ignoring duplicate start`,
@@ -78,7 +72,6 @@ export async function startAgentSession(
   const state: SessionState = {
     terminalId,
     agentId,
-    projectId,
     session: null,
     heartbeatTimer: null,
     status: 'starting',
@@ -87,7 +80,7 @@ export async function startAgentSession(
   sessions.set(terminalId, state);
 
   try {
-    const session = await sendStart(agentId, projectId);
+    const session = await sendStart(agentId);
     state.session = session;
     state.status = 'active';
     console.log(
@@ -189,7 +182,7 @@ async function heartbeat(state: SessionState): Promise<void> {
 
   try {
     const res = await fetchSessionEndpoint(
-      `/v1/sessions/${state.session.id}/heartbeat`,
+      `/v1/agent-sessions/${state.session.id}/heartbeat`,
       'POST',
     );
 
@@ -240,7 +233,7 @@ async function reregisterSession(state: SessionState): Promise<void> {
   state.reregistering = true;
   try {
     const previousId = state.session?.id;
-    const session = await sendStart(state.agentId, state.projectId);
+    const session = await sendStart(state.agentId);
     if (state.status !== 'active') {
       // The session was ended while the start was in flight — don't leak the
       // fresh record on the backend.
@@ -281,12 +274,8 @@ function formatStartError(status: number, body: string): StartError {
   return new StartError(`Agent session could not be started. Server returned HTTP ${status}.`, status);
 }
 
-async function sendStart(agentId: number, projectId?: number): Promise<AgentSession> {
-  const body: Record<string, unknown> = { agent_id: agentId };
-  if (projectId !== undefined) {
-    body.project_id = projectId;
-  }
-  const res = await fetchSessionEndpoint('/v1/sessions/start', 'POST', body);
+async function sendStart(agentId: number): Promise<AgentSession> {
+  const res = await fetchSessionEndpoint('/v1/agent-sessions/start', 'POST', { agent_id: agentId });
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -308,7 +297,7 @@ async function sendStart(agentId: number, projectId?: number): Promise<AgentSess
 
 async function sendEnd(sessionId: string, reason: AgentSessionEndReason): Promise<void> {
   const res = await fetchSessionEndpoint(
-    `/v1/sessions/${sessionId}/end?reason=${encodeURIComponent(reason)}`,
+    `/v1/agent-sessions/${sessionId}/end?reason=${encodeURIComponent(reason)}`,
     'POST',
   );
 
@@ -323,16 +312,14 @@ async function fetchSessionEndpoint(
   method: 'POST',
   body?: unknown,
 ): Promise<Response> {
-  const headers = await buildVsqlCacheAuthHeaders(method, path);
-  const init: RequestInit = {
-    method,
-    headers,
-  };
+  const init: RequestInit = { method };
+  const headers: Record<string, string> = {};
   if (body !== undefined) {
-    (init.headers as Record<string, string>)['Content-Type'] = 'application/json';
+    headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  return fetch(`${VIBE_API_URL}${path}`, init);
+  init.headers = headers;
+  return fetch(`${ACP_API_URL}${path}`, init);
 }
 
 function extractSession(json: Record<string, unknown>): Record<string, unknown> | null {
