@@ -10,9 +10,10 @@
  * need to manage IDP bearer tokens or project_id injection. The sidecar reads
  * the active project from its cache and forwards to the cloud.
  *
- * The module keeps its own state keyed by terminal/runtime id so it can be
- * driven from both the PTY path and the ACP runtime path without leaking
- * lifecycle details into those modules.
+ * Sessions are deduplicated by agent_id. The cloud's StartSession ends any
+ * existing active session for the same user+agent, so multiple terminals/runtimes
+ * for the same agent must share one cloud session or they will fight and 404 each
+ * other's heartbeats.
  */
 
 const ACP_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -33,18 +34,28 @@ export type AgentSessionStartResult =
   | { ok: true; session: AgentSession }
   | { ok: false; status?: number; message: string };
 
-interface SessionState {
-  terminalId: string;
+interface AgentSessionEntry {
   agentId: number;
-  session: AgentSession | null;
+  session: AgentSession;
+  /** Terminal/runtime ids that are using this agent session. */
+  refs: Set<string>;
   heartbeatTimer: NodeJS.Timeout | null;
-  status: 'starting' | 'active' | 'ending' | 'ended';
-  pendingEndReason?: AgentSessionEndReason;
+  status: 'active' | 'ending' | 'ended';
   /** Guards against overlapping re-register attempts after a heartbeat 404. */
   reregistering: boolean;
+  /** Promise for an in-flight start so concurrent starts for the same agent
+   *  share the result instead of racing. */
+  startPromise?: Promise<AgentSessionStartResult>;
+  /** End reason queued while the session was still starting. */
+  pendingEndReason?: AgentSessionEndReason;
 }
 
-const sessions = new Map<string, SessionState>();
+// Active cloud sessions keyed by agent_id. Multiple terminals for the same
+// agent share one entry.
+const agentSessions = new Map<number, AgentSessionEntry>();
+
+// Reverse lookup: terminal -> agent. Used by endAgentSession to find the entry.
+const terminalToAgent = new Map<string, number>();
 
 // Backend inactivity cutoff is ~5 minutes. 30s keeps us well under it while
 // not spamming the API.
@@ -62,161 +73,203 @@ export async function startAgentSession(
   agentId: number,
   _projectId?: number,
 ): Promise<AgentSessionStartResult> {
-  if (sessions.has(terminalId)) {
+  if (terminalToAgent.has(terminalId)) {
+    const existingAgentId = terminalToAgent.get(terminalId)!;
+    const existingEntry = agentSessions.get(existingAgentId);
     console.warn(
-      `[AgentSession] session already tracked for terminal=${terminalId}; ignoring duplicate start`,
+      `[AgentSession] terminal=${terminalId} already mapped to agent=${existingAgentId}; ignoring duplicate start`,
     );
-    return { ok: true, session: sessions.get(terminalId)!.session! };
+    return existingEntry
+      ? { ok: true, session: existingEntry.session }
+      : { ok: false, message: 'Terminal mapped to a session that is no longer tracked' };
   }
 
-  const state: SessionState = {
-    terminalId,
+  const existingEntry = agentSessions.get(agentId);
+  if (existingEntry) {
+    // Share the existing cloud session. If it's still starting, wait for it.
+    if (existingEntry.startPromise) {
+      const result = await existingEntry.startPromise;
+      if (result.ok) {
+        existingEntry.refs.add(terminalId);
+        terminalToAgent.set(terminalId, agentId);
+      }
+      return result;
+    }
+    existingEntry.refs.add(terminalId);
+    terminalToAgent.set(terminalId, agentId);
+    console.log(
+      `[AgentSession] reusing session=${existingEntry.session.id} for terminal=${terminalId} agent=${agentId}`,
+    );
+    return { ok: true, session: existingEntry.session };
+  }
+
+  const entry: AgentSessionEntry = {
     agentId,
-    session: null,
+    session: null as any, // set before promise resolves externally
+    refs: new Set([terminalId]),
     heartbeatTimer: null,
-    status: 'starting',
+    status: 'active',
     reregistering: false,
   };
-  sessions.set(terminalId, state);
+  agentSessions.set(agentId, entry);
+  terminalToAgent.set(terminalId, agentId);
 
-  try {
-    const session = await sendStart(agentId);
-    state.session = session;
-    state.status = 'active';
-    console.log(
-      `[AgentSession] started session=${session.id} for terminal=${terminalId} agent=${agentId}`,
-    );
-    startHeartbeat(state);
+  const startPromise = (async (): Promise<AgentSessionStartResult> => {
+    try {
+      const session = await sendStart(agentId);
+      entry.session = session;
+      delete entry.startPromise;
+      console.log(
+        `[AgentSession] started session=${session.id} for terminal=${terminalId} agent=${agentId}`,
+      );
+      startHeartbeat(entry);
 
-    // If an end was requested while we were still starting, honor it now.
-    if (state.pendingEndReason) {
-      void endAgentSession(terminalId, state.pendingEndReason);
+      // If an end was requested while we were starting, honor it now.
+      if (entry.pendingEndReason) {
+        const reason = entry.pendingEndReason;
+        delete entry.pendingEndReason;
+        void endAgentForAgent(agentId, reason);
+      }
+
+      return { ok: true, session };
+    } catch (err) {
+      const status = err instanceof StartError ? err.status : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[AgentSession] failed to start session for terminal=${terminalId} agent=${agentId}:`,
+        err,
+      );
+      entry.status = 'ended';
+      agentSessions.delete(agentId);
+      terminalToAgent.delete(terminalId);
+      return { ok: false, status, message };
     }
+  })();
 
-    return { ok: true, session };
-  } catch (err) {
-    const status = err instanceof StartError ? err.status : undefined;
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[AgentSession] failed to start session for terminal=${terminalId} agent=${agentId}:`,
-      err,
-    );
-    state.status = 'ended';
-    sessions.delete(terminalId);
-    return { ok: false, status, message };
-  }
+  entry.startPromise = startPromise;
+  return startPromise;
 }
 
 /**
  * End the PayEzVibe agent session for the given terminal/runtime.
  *
  * Idempotent: subsequent calls are ignored once a session is ending/ended or
- * after the terminal id is no longer tracked.
+ * after the terminal id is no longer tracked. The cloud session is only ended
+ * when the last terminal for that agent goes away.
  */
 export async function endAgentSession(
   terminalId: string,
   reason: AgentSessionEndReason = 'normal',
 ): Promise<void> {
-  const state = sessions.get(terminalId);
-  if (!state) return;
+  const agentId = terminalToAgent.get(terminalId);
+  if (agentId === undefined) return;
+  terminalToAgent.delete(terminalId);
 
-  if (state.status === 'ending' || state.status === 'ended') return;
+  const entry = agentSessions.get(agentId);
+  if (!entry) return;
 
-  // If start hasn't completed yet, queue the end reason. The first caller wins
-  // so lifecycle teardown doesn't get overwritten by a later user kill.
-  if (state.status === 'starting') {
-    if (!state.pendingEndReason) {
-      state.pendingEndReason = reason;
+  entry.refs.delete(terminalId);
+
+  // If still starting, queue the end. The first caller wins.
+  if (entry.startPromise) {
+    if (!entry.pendingEndReason) {
+      entry.pendingEndReason = reason;
     }
     return;
   }
 
-  state.status = 'ending';
-  stopHeartbeat(state);
+  if (entry.status === 'ending' || entry.status === 'ended') return;
 
-  const session = state.session;
-  if (session) {
-    try {
-      await sendEnd(session.id, reason);
-      console.log(
-        `[AgentSession] ended session=${session.id} reason=${reason} terminal=${terminalId}`,
-      );
-    } catch (err) {
-      console.warn(
-        `[AgentSession] failed to end session=${session.id} reason=${reason} terminal=${terminalId}:`,
-        err,
-      );
-    }
+  // Only end the cloud session when the last terminal drops.
+  if (entry.refs.size === 0) {
+    await endAgentForAgent(agentId, reason);
+  }
+}
+
+async function endAgentForAgent(agentId: number, reason: AgentSessionEndReason): Promise<void> {
+  const entry = agentSessions.get(agentId);
+  if (!entry) return;
+  if (entry.status === 'ending' || entry.status === 'ended') return;
+
+  entry.status = 'ending';
+  stopHeartbeat(entry);
+
+  try {
+    await sendEnd(entry.session.id, reason);
+    console.log(
+      `[AgentSession] ended session=${entry.session.id} reason=${reason} agent=${agentId}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[AgentSession] failed to end session=${entry.session.id} reason=${reason} agent=${agentId}:`,
+      err,
+    );
   }
 
-  state.status = 'ended';
-  sessions.delete(terminalId);
+  entry.status = 'ended';
+  agentSessions.delete(agentId);
 }
 
 /**
  * Return the active PayEzVibe session for a terminal, if any.
  */
 export function getAgentSession(terminalId: string): AgentSession | null {
-  const state = sessions.get(terminalId);
-  return state?.session ?? null;
+  const agentId = terminalToAgent.get(terminalId);
+  if (agentId === undefined) return null;
+  const entry = agentSessions.get(agentId);
+  return entry?.session ?? null;
 }
 
-function startHeartbeat(state: SessionState): void {
-  if (state.heartbeatTimer) {
-    clearInterval(state.heartbeatTimer);
+function startHeartbeat(entry: AgentSessionEntry): void {
+  if (entry.heartbeatTimer) {
+    clearInterval(entry.heartbeatTimer);
   }
-  state.heartbeatTimer = setInterval(() => {
-    void heartbeat(state);
+  entry.heartbeatTimer = setInterval(() => {
+    void heartbeat(entry);
   }, HEARTBEAT_INTERVAL_MS);
 }
 
-function stopHeartbeat(state: SessionState): void {
-  if (state.heartbeatTimer) {
-    clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = null;
+function stopHeartbeat(entry: AgentSessionEntry): void {
+  if (entry.heartbeatTimer) {
+    clearInterval(entry.heartbeatTimer);
+    entry.heartbeatTimer = null;
   }
 }
 
-async function heartbeat(state: SessionState): Promise<void> {
-  if (!state.session || state.status !== 'active') return;
+async function heartbeat(entry: AgentSessionEntry): Promise<void> {
+  if (entry.status !== 'active') return;
 
   try {
     const res = await fetchSessionEndpoint(
-      `/v1/agent-sessions/${state.session.id}/heartbeat`,
+      `/v1/agent-sessions/${entry.session.id}/heartbeat`,
       'POST',
     );
 
     if (res.status === 401 || res.status === 403) {
       console.warn(
-        `[AgentSession] heartbeat auth failed for session=${state.session.id}; stopping heartbeat`,
+        `[AgentSession] heartbeat auth failed for session=${entry.session.id}; stopping heartbeat`,
       );
-      stopHeartbeat(state);
+      stopHeartbeat(entry);
       return;
     }
 
     if (res.status === 404) {
-      // The backend no longer holds this session (inactivity expiry or a
-      // transient backend blip — observed 404ing for ~a minute, then
-      // recovering). Every further heartbeat 404s until a runtime restart
-      // happens to re-register, and the agent's own mail calls fail with
-      // SESSION_INACTIVE in the meantime — agents read that as "I am
-      // deactivated" and go silent. Re-register immediately instead.
       console.warn(
-        `[AgentSession] heartbeat 404 for session=${state.session.id}; re-registering a fresh session`,
+        `[AgentSession] heartbeat 404 for session=${entry.session.id}; re-registering a fresh session`,
       );
-      await reregisterSession(state);
+      await reregisterSession(entry);
       return;
     }
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.warn(
-        `[AgentSession] heartbeat failed for session=${state.session.id}: HTTP ${res.status} ${body.slice(0, 200)}`,
+        `[AgentSession] heartbeat failed for session=${entry.session.id}: HTTP ${res.status} ${body.slice(0, 200)}`,
       );
     }
   } catch (err) {
     console.warn(
-      `[AgentSession] heartbeat exception for session=${state.session.id}:`,
+      `[AgentSession] heartbeat exception for session=${entry.session.id}:`,
       err,
     );
   }
@@ -224,33 +277,31 @@ async function heartbeat(state: SessionState): Promise<void> {
 
 /**
  * Re-register the agent session after a heartbeat 404. Starts a fresh
- * backend session and swaps it into the tracked state so subsequent
- * heartbeats (and the backend's reachability view of the agent) recover on
- * the next tick instead of waiting for a runtime restart.
+ * backend session and swaps it into the shared entry so subsequent
+ * heartbeats recover on the next tick.
  */
-async function reregisterSession(state: SessionState): Promise<void> {
-  if (state.reregistering) return;
-  state.reregistering = true;
+async function reregisterSession(entry: AgentSessionEntry): Promise<void> {
+  if (entry.reregistering) return;
+  entry.reregistering = true;
   try {
-    const previousId = state.session?.id;
-    const session = await sendStart(state.agentId);
-    if (state.status !== 'active') {
-      // The session was ended while the start was in flight — don't leak the
-      // fresh record on the backend.
+    const previousId = entry.session.id;
+    const session = await sendStart(entry.agentId);
+    if (entry.status !== 'active') {
+      // The session was ended while the start was in flight — clean up.
       await sendEnd(session.id, 'normal').catch(() => {});
       return;
     }
-    state.session = session;
+    entry.session = session;
     console.log(
-      `[AgentSession] re-registered session=${session.id} (was ${previousId}) for terminal=${state.terminalId} agent=${state.agentId}`,
+      `[AgentSession] re-registered session=${session.id} (was ${previousId}) agent=${entry.agentId}`,
     );
   } catch (err) {
     console.warn(
-      `[AgentSession] re-register failed for terminal=${state.terminalId}; retrying on next heartbeat:`,
+      `[AgentSession] re-register failed for agent=${entry.agentId}; retrying on next heartbeat:`,
       err,
     );
   } finally {
-    state.reregistering = false;
+    entry.reregistering = false;
   }
 }
 

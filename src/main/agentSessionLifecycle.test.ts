@@ -253,6 +253,43 @@ describe('agentSessionLifecycle', () => {
     expect(second).toEqual(first);
   });
 
+  it('shares one cloud session across multiple terminals for the same agent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-shared'));
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession, getAgentSession } = await loadModule();
+
+    const first = await startAgentSession('term-a', 6);
+    const second = await startAgentSession('term-b', 6);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+    if (!first.ok) throw new Error('expected first start to succeed');
+    expect(getAgentSession('term-a')).toEqual(first.session);
+    expect(getAgentSession('term-b')).toEqual(first.session);
+  });
+
+  it('only ends the cloud session when the last terminal for that agent ends', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeStartResponse('sess-multi'))
+      .mockResolvedValue(makeOkResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession, endAgentSession } = await loadModule();
+
+    await startAgentSession('term-x', 6);
+    await startAgentSession('term-y', 6);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await endAgentSession('term-x', 'normal');
+    // term-y still active; no /end call yet
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/end'))).toHaveLength(0);
+
+    await endAgentSession('term-y', 'normal');
+    const endCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/end'));
+    expect(endCalls).toHaveLength(1);
+    expect(endCalls[0][0]).toContain('sess-multi');
+  });
+
   it('queues end while start is in flight and ends after start resolves', async () => {
     let resolveStart: (value: unknown) => void;
     const startPromise = new Promise((resolve) => {
