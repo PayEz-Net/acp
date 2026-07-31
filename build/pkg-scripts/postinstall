@@ -1,0 +1,76 @@
+#!/bin/bash
+#
+# ACP macOS .pkg post-install (COL-6 M5.2 Mac counterpart).
+#
+# Writes the installer -> app handoff JSON that src/main/installerHandoff.ts
+# reads on first authenticated launch. This is the macOS equivalent of the
+# Windows NSIS customInstall handoff writer in build/installer.nsh.
+#
+# Notes:
+#   - pkg postinstall scripts run as root, so we must resolve the real
+#     console user (the person running Installer.app) and write into THEIR
+#     ~/Library/Application Support, not root's.
+#   - The workspace root defaults to ~/Repos. If the user wants a different
+#     working folder they can change it in-app before colonization runs.
+#   - Consent is recorded here as a HARD gate (spec §2.3 / §8 AC7): declining
+#     is not offered in the pkg flow, so we only write the handoff when the
+#     installer successfully reaches postinstall. Users who do not want
+#     colonization should drag the .dmg instead.
+
+set -e
+
+# Resolve the installing user. /dev/console is the safest heuristic for
+# GUI installs; fall back to logname / $USER for headless/remote cases.
+CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null || true)
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  CONSOLE_USER=$(logname 2>/dev/null || true)
+fi
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  CONSOLE_USER="$USER"
+fi
+
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  echo "[acp-pkg] Could not determine installing user; skipping handoff." >&2
+  exit 0
+fi
+
+USER_HOME=$(dscl . -read /Users/"$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)
+if [ -z "$USER_HOME" ]; then
+  USER_HOME="/Users/$CONSOLE_USER"
+fi
+
+# Electron packaged app name is 'ACP' (package.json build.extraMetadata.name).
+# Dev builds use the repo name 'agent-collaboration-platform'; the pkg is for
+# packaged installs, so we target the ACP support directory.
+APP_SUPPORT="$USER_HOME/Library/Application Support/ACP"
+mkdir -p "$APP_SUPPORT"
+
+# Default ACP workspace. ColonizeWorkspace will create agent skill folders here.
+WORKSPACE_ROOT="$USER_HOME/Repos"
+mkdir -p "$WORKSPACE_ROOT"
+
+# Try to read the installed app version so the handoff matches the Windows shape.
+VERSION="unknown"
+for APP_PATH in "/Applications/ACP.app" "$USER_HOME/Applications/ACP.app"; do
+  PLIST="$APP_PATH/Contents/Info.plist"
+  if [ -f "$PLIST" ]; then
+    VERSION=$(defaults read "$PLIST" CFBundleShortVersionString 2>/dev/null || echo "unknown")
+    break
+  fi
+done
+
+HANDOFF="$APP_SUPPORT/installer-handoff.json"
+cat > "$HANDOFF" <<EOF
+{
+  "workspaceRoot": "$WORKSPACE_ROOT",
+  "colonizationConsented": true,
+  "installerVersion": "pkg-mac-$VERSION"
+}
+EOF
+
+# Make sure the installing user owns their own support directory.
+chown -R "$CONSOLE_USER:staff" "$APP_SUPPORT" 2>/dev/null || true
+chmod 600 "$HANDOFF" 2>/dev/null || true
+
+echo "[acp-pkg] Handoff written for $CONSOLE_USER: $HANDOFF (workspace: $WORKSPACE_ROOT)"
+exit 0
