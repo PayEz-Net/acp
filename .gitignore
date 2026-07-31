@@ -48,3 +48,4 @@ src/main/env.generated.ts
 # build outputs (stale-secret hygiene — never track; like release/)
 release-win/
 release-smoke/
+acp-api/data/*.sqlite*

@@ -24,13 +24,10 @@ jobs:
         with:
           path: acp-desktop
 
-      # The installer bundles the sibling acp-api (scripts/prepare-acp-api.cjs
-      # copies + builds ../../acp-api). Check it out as a sibling so the path resolves.
-      - name: Checkout acp-api (bundled into the installer)
-        uses: actions/checkout@v4
-        with:
-          repository: PayEz-Net/acp-api
-          path: acp-api
+      # acp-api now lives as a subfolder inside acp-desktop. The prepare script
+      # copies + builds ./acp-api for bundling.
+      - name: Verify acp-api subfolder
+        run: test -d acp-desktop/acp-api
 
       - name: Setup Node
         uses: actions/setup-node@v4

@@ -10,7 +10,7 @@ stable home.
 git checkout release
 npm install
 npx electron-rebuild        # rebuild node-pty against Electron's ABI (required on a fresh machine)
-npm run dev:electron        # dev run (auto-spawns the sibling ../acp-api)
+npm run dev:electron        # dev run (auto-spawns the bundled acp-api/ subfolder)
 npm run dist:win            # packaged Windows installer (NSIS + portable)
 npm run dist:mac            # packaged macOS dmg/zip
 ```

@@ -25,6 +25,8 @@
         "dist:linux": "npm run dist -- --linux",
         "release:github": "node scripts/publish-github-release.cjs",
         "guard:workspace": "node scripts/guard-workspace-debt.mjs",
+        "colonize": "node scripts/manual-colonize.cjs",
+        "postinstall": "cd acp-api && npm install",
         "pretest": "node scripts/guard-workspace-debt.mjs",
         "test": "vitest run",
         "test:watch": "vitest"
@@ -116,7 +118,8 @@
         "mac": {
             "target": [
                 "dmg",
-                "zip"
+                "zip",
+                "pkg"
             ],
             "icon": "build/icon.icns",
             "category": "public.app-category.developer-tools",
@@ -127,6 +130,10 @@
         },
         "dmg": {
             "sign": false
+        },
+        "pkg": {
+            "scripts": "build/pkg-scripts",
+            "installLocation": "/Applications"
         },
         "linux": {
             "target": [

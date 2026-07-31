@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const source = path.resolve(__dirname, '../../acp-api');
+const source = path.resolve(__dirname, '../acp-api');
 const dest = path.resolve(__dirname, '../acp-api-release');
 
 function copyDir(src, dst) {

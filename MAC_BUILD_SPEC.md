@@ -126,7 +126,7 @@ npm run dist:mac
 ```
 
 This executes:
-1. `prepare-acp-api.cjs` — copies `../acp-api`, builds it, prunes dev deps
+1. `prepare-acp-api.cjs` — copies `./acp-api`, builds it, prunes dev deps
 2. `npm run build:electron` — compiles renderer + main TypeScript
 3. `electron-builder --mac` — produces:
    - `release/ACP-0.1.0.dmg` — drag-and-drop installer

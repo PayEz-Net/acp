@@ -1,13 +1,13 @@
 # ACP — Agent Collaboration Platform (Desktop Shell)
 
-This is the **desktop UI** of ACP. The backend API lives at `E:\Repos\acp-api`.
+This is the **desktop UI** of ACP. The backend API lives in `acp-desktop/acp-api/`.
 
 ACP is one product with two halves:
 
 | Layer | Repo | Tech |
 |-------|------|------|
 | **Desktop Shell** | `E:\Repos\acp-desktop` (this repo) | Electron 28 + React 18 + TypeScript + Vite |
-| **Backend API** | `E:\Repos\acp-api` | Node.js + Express (migrating to TypeScript) |
+| **Backend API** | `acp-desktop/acp-api/` | Node.js + Express (migrating to TypeScript) |
 
 ## What This Repo Contains
 
@@ -116,7 +116,7 @@ Each pane spawns a Claude Code session via node-pty and auto-injects `"report as
 
 ## External Services
 
-- **ACP Backend API**: `E:\Repos\acp-api` (port 3001)
+- **ACP Backend API**: `acp-desktop/acp-api/` (port 3001)
 - **Agent Mail**: `https://api.idealvibe.online` (enterprise auth)
 - **VibeSQL**: `http://localhost:52411` (vibe-serverapi, HMAC auth)
 - **Agent Mail CLI**: bundled at `agent-mail-cli/`
@@ -129,7 +129,7 @@ Each pane spawns a Claude Code session via node-pty and auto-injects `"report as
 
 - **Chat Architecture**: `E:\Repos\Agents\BAPert\specs\ACP-agent-chat-architecture-v1.md`
 - **Harness Spec**: `E:\Repos\Agents\BAPert\specs\planned\VIBE_AGENTS_HARNESS_SPEC.md`
-- **Harness Analysis**: `E:\Repos\acp-api\docs\acp_harness_analysis.md`
+- **Harness Analysis**: `acp-desktop/acp-api/docs/acp_harness_analysis.md`
 
 <!-- gitnexus:start — DISABLED 2026-07-29 (Jon): the GitNexus MCP tools are not
      connected to this project, so the "MUST run impact analysis before editing any

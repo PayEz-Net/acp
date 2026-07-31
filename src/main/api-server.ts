@@ -79,8 +79,8 @@ function getApiPath(): string {
       return bundledPath;
     } catch { /* fall through to dev paths */ }
   }
-  // Dev: sibling folder
-  const devPath = path.resolve(__dirname, '../../../acp-api');
+  // Dev: acp-api now lives as a subfolder inside acp-desktop
+  const devPath = path.resolve(__dirname, '../../acp-api');
   const legacyPath = path.resolve(__dirname, '../../../acp');
   try {
     require('fs').accessSync(path.join(devPath, 'api/server.js'));
