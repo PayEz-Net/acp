@@ -26,21 +26,22 @@ Optional but recommended:
 
 ## 2. Repository Layout
 
-ACP is two sibling repos. The desktop app **expects** `acp-api` to live next to it in dev mode.
+ACP desktop and backend API live in a single repo. The backend API is nested under `acp-desktop/acp-api/`.
 
 ```
 ~/Repos/
-├── acp-desktop/     # this repo
-└── acp-api/         # backend API (sibling)
+└── acp-desktop/     # this repo
+    └── acp-api/     # backend API (nested)
 ```
 
-Clone them:
+Clone it:
 
 ```bash
 cd ~/Repos
 git clone <acp-desktop-url>
-git clone <acp-api-url>
 ```
+
+> **Historical note:** `acp-api` was previously a standalone sibling repo. It was consolidated into `acp-desktop/acp-api/` and the standalone repo is deprecated.
 
 (Ask Jon/Aurum for the exact remotes if you don't have them — they are Azure DevOps repos.)
 

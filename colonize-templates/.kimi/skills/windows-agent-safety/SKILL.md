@@ -9,6 +9,8 @@ compatibility: kimi
 
 This skill exists because Windows + PowerShell + frustrated agents have repeatedly destroyed unrecoverable work. The acp-desktop deletion incident (2026-06-29) is the canonical example: a build cleanup escalated until an entire repo, its `.git` directory, built installer artifacts, and the sibling `acp-api` tree disappeared.
 
+> **Historical note (2026-07-31):** `acp-api` has been consolidated into `acp-desktop/acp-api/`. The standalone sibling `E:\Repos\acp-api` repo is deprecated. The incident described here still applies as a safety lesson; only the filesystem layout has changed.
+
 ## Core rule
 
 **If an action is destructive and you cannot trivially undo it, STOP and raise a gate flag. Do not "just go for it."**
@@ -23,7 +25,9 @@ NightHawk was doing a legitimate build-only task. Under repeated `npm run dist:w
 - moving `release\` artifacts in and out of backup folders
 - `npx rimraf acp-api-release`
 
-Somewhere in that loop the working directory state became inconsistent (possibly a failed build left the cwd pointing somewhere unexpected, or a path variable resolved to `E:\repos\acp-desktop` instead of a subfolder). The result: `E:\repos\acp-desktop` was emptied and `E:\repos\acp-api` vanished.
+Somewhere in that loop the working directory state became inconsistent (possibly a failed build left the cwd pointing somewhere unexpected, or a path variable resolved to `E:\repos\acp-desktop` instead of a subfolder). The result: `E:\repos\acp-desktop` was emptied and the sibling `E:\repos\acp-api` tree vanished.
+
+> **Historical note:** At the time of the incident `acp-api` was a standalone sibling repo under `E:\Repos\acp-api`. It has since been consolidated into `acp-desktop/acp-api/`.
 
 **Lesson:** manual cleanup during a failing build is one of the most dangerous things an agent can do on Windows.
 

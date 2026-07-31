@@ -1,6 +1,6 @@
 # ACP API → Desktop Repo Consolidation (Planned)
 
-**Status:** IMPLEMENTATION COMPLETE — acp-api imported, paths rewired, standalone repo deprecated; pending QAPert build verification
+**Status:** VERIFIED — acp-api imported, paths rewired, standalone repo deprecated; QAPert build verification complete (8/10 flows clean; F4 email-OTP flow stands down and will not be deck-claimed end-to-end)
 **Owner:** BAPert (lead / coordination), DotNetPert (implementation), Aurum (approval), QAPert (QA), NextPert (docs/tooling)
 **Priority:** P0 — all hands; blocks Mac installer handoff and public OSS release line
 **Written:** 2026-04-14 by Aurum
@@ -16,7 +16,8 @@
 - Build config lives in `package.json` (`extraResources` from `acp-api-release`); `electron-builder.json` does not exist in this repo.
 - Root `package.json` has `postinstall: "cd acp-api && npm install"` (Phase 4 Option A approved by Aurum).
 - Standalone acp-api repo tagged `pre-consolidation-v1` and marked deprecated with a README.
-- Remaining work: QAPert verifies `npm run dev:electron` and packaged builds; NextPert sweeps docs for stale references.
+- QAPert verification complete 2026-07-31: `npm run build:electron` clean; `npm run dist:mac` produces working artifacts (GH_TOKEN publish failure expected locally); dev path resolves to nested `acp-api/`; 8/10 end-to-end flows clean; F4 (email-OTP) stands down and will not be deck-claimed end-to-end.
+- Remaining work: NextPert sweeps docs for stale references.
 
 ---
 
