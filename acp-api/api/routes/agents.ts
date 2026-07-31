@@ -647,18 +647,31 @@ export default function agentRoutes(_storage: any): Router {
 
   // ── Skills persistence (NextPert #5 skill chips) ─────────────────────────
 
-  // Load acp-skills.json catalog once at module init for validation
+  // Load acp-skills.json catalog once at module init for validation.
+  // Layout-aware: acp-api may be a sibling (legacy) or nested inside acp-desktop
+  // (post-consolidation), and the packaged app copies it under acp-api/acp-desktop/.
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   function loadSkillsCatalog(): string[] {
-    try {
-      const catalogPath = path.resolve(__dirname, '../../../acp-desktop/skills/acp-skills.json');
-      const raw = fs.readFileSync(catalogPath, 'utf-8');
-      const json = JSON.parse(raw);
-      return (json.skills || []).map((s: any) => s.name);
-    } catch (err) {
-      console.warn('[agents/skills] Could not load acp-skills.json:', err);
-      return [];
+    const candidates = [
+      // acp-api nested inside acp-desktop (dev): routes -> api -> acp-api -> acp-desktop
+      path.resolve(__dirname, '../../../skills/acp-skills.json'),
+      // packaged extraResources layout: Resources/acp-api/dist/api/routes
+      path.resolve(__dirname, '../../../acp-desktop/skills/acp-skills.json'),
+      // acp-api as sibling of acp-desktop (legacy dev)
+      path.resolve(__dirname, '../../../acp-desktop/skills/acp-skills.json'),
+    ];
+    for (const catalogPath of candidates) {
+      try {
+        if (!fs.existsSync(catalogPath)) continue;
+        const raw = fs.readFileSync(catalogPath, 'utf-8');
+        const json = JSON.parse(raw);
+        return (json.skills || []).map((s: any) => s.name);
+      } catch (err) {
+        console.warn('[agents/skills] Could not load acp-skills.json from', catalogPath, err);
+      }
     }
+    console.warn('[agents/skills] acp-skills.json not found in any candidate path');
+    return [];
   }
   const skillsCatalog = loadSkillsCatalog();
 
