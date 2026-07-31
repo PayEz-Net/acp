@@ -47,7 +47,29 @@ unset CLAUDECODE
 # Build hooks JSON — tells Claude Code to call acp-hook on lifecycle events
 HOOKS_JSON="{\"hooks\":{\"SessionStart\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook session-start\",\"timeout\":10}]}],\"Stop\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook stop\",\"timeout\":10}]}],\"Notification\":[{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"acp-hook notification\",\"timeout\":10}]}]}}"
 
-# Generate session ID
-SESSION_ID="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "acp-$(date +%s)-$$")"
+# The ACP spawn command (buildClaudeSpawnCommand) is the AUTHORITY on session
+# identity: it passes --session-id <id> to CREATE, or --resume <id> to RESUME.
+# If we ALSO inject --session-id, a resume reaches the real CLI as
+# "--session-id X --resume Y", which claude >= 2.1.220 rejects with
+# "--session-id can only be used with --continue or --resume if --fork-session
+# is also specified" — killing every resume spawn (and doubling --session-id on
+# create). So only inject our own session id when the caller passed NO session
+# flag (a bare/manual `claude` in a pane).
+HAS_SESSION_FLAG=0
+for arg in "$@"; do
+  case "$arg" in
+    --session-id|--session-id=*|--resume|--resume=*|-r|--continue|-c)
+      HAS_SESSION_FLAG=1
+      break
+      ;;
+  esac
+done
 
+if [ "$HAS_SESSION_FLAG" = "1" ]; then
+  # Caller supplied --session-id/--resume/--continue; only attach hooks.
+  exec "$REAL_CLAUDE" --settings "$HOOKS_JSON" "$@"
+fi
+
+# No caller session flag — generate one so lifecycle hooks still attach.
+SESSION_ID="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || echo "acp-$(date +%s)-$$")"
 exec "$REAL_CLAUDE" --session-id "$SESSION_ID" --settings "$HOOKS_JSON" "$@"
