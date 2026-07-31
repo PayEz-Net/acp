@@ -104,22 +104,33 @@ export default function agentSessionProxyRoutes(cfg: Config): Router {
   const router = Router();
 
   // POST /v1/agent-sessions/start -> cloud /v1/sessions/start
-  // Desktop doesn't need to know the current project; the sidecar injects it
-  // from its project cache, which is kept in sync with the renderer's active
-  // project via /v1/projects/current.
+  // The desktop supplies project_id — the machine-local project the agent was
+  // spawned under — and that wins. The cache fallback below is a per-user slot
+  // shared by every machine on the account, so it can carry another machine's
+  // project; it is only used when the caller supplied nothing.
   router.post('/start', async (req: Request, res: Response) => {
     try {
-      const { agent_id } = req.body || {};
+      const { agent_id, project_id } = req.body || {};
       if (typeof agent_id !== 'number') {
         res.status(400).json(error('VALIDATION_ERROR', 'agent_id is required and must be a number', 'agent_session_start', (req as any).requestId));
         return;
       }
-      const projectId = resolveCurrentProjectId();
+      // null is "no project" over the wire — JSON callers cannot send undefined,
+      // and `project_id: state.projectId ?? null` is the idiom used elsewhere in
+      // this API. Treat it as absent (fall back), not as a 400.
+      if (project_id !== undefined && project_id !== null && typeof project_id !== 'number') {
+        res.status(400).json(error('VALIDATION_ERROR', 'project_id must be a number or null when provided', 'agent_session_start', (req as any).requestId));
+        return;
+      }
+      const projectId = typeof project_id === 'number' ? project_id : resolveCurrentProjectId();
       const forwardBody: Record<string, unknown> = { agent_id };
       if (projectId != null) {
         forwardBody.project_id = projectId;
+        if (typeof project_id !== 'number') {
+          console.warn(`[agentSessionProxy] POST /start: caller sent no project_id — falling back to shared current-project slot ${projectId}`);
+        }
       } else {
-        console.warn('[agentSessionProxy] POST /start: no current_project_id in cache — forwarding without it');
+        console.warn('[agentSessionProxy] POST /start: no project_id from caller and no current_project_id in cache — forwarding without it');
       }
       const result = await proxyToCloud(cfg, '/start', 'POST', forwardBody);
       res.status(result.status).json(result.data);

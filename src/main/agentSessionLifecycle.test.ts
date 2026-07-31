@@ -85,7 +85,7 @@ describe('agentSessionLifecycle', () => {
     expect(result.ok && result.session.id).toBe('sess-flat');
   });
 
-  it('ignores the projectId argument and lets the sidecar inject it', async () => {
+  it('sends the machine-local projectId as project_id on start', async () => {
     const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-proj'));
     vi.stubGlobal('fetch', fetchMock);
     const { startAgentSession } = await loadModule();
@@ -93,7 +93,38 @@ describe('agentSessionLifecycle', () => {
     await startAgentSession('term-proj', 7, 25);
 
     const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ agent_id: 7, project_id: 25 });
+  });
+
+  it('omits project_id when no local project was supplied', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeStartResponse('sess-noproj'));
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession } = await loadModule();
+
+    await startAgentSession('term-noproj', 7);
+
+    const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init.body)).toEqual({ agent_id: 7 });
+  });
+
+  it('re-registers after a heartbeat 404 with the same project_id', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(makeStartResponse('sess-404-proj'))
+      .mockResolvedValueOnce({ ok: false, status: 404, text: () => Promise.resolve('') } as Response)
+      .mockResolvedValueOnce(makeStartResponse('sess-404-proj-2'));
+    vi.stubGlobal('fetch', fetchMock);
+    const { startAgentSession } = await loadModule();
+
+    await startAgentSession('term-404-proj', 13, 31);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // Two starts total: the original, then the re-register after the 404.
+    expect(fetchMock.mock.calls.filter(([url]: [string]) => url === `${ACP_API_URL}/v1/agent-sessions/start`)).toHaveLength(2);
+    // The re-register must carry the same project. If entry.projectId were lost
+    // across the session swap this is `{ agent_id: 13 }` and the churn loop
+    // falls back to the shared per-user slot.
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ agent_id: 13, project_id: 31 });
   });
 
   it('returns a failed result and logs when start fails', async () => {

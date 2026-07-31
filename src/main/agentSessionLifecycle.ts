@@ -7,13 +7,18 @@
  * exits, or the project lifecycle tears down.
  *
  * Calls are routed through the local acp-api sidecar so the desktop does not
- * need to manage IDP bearer tokens or project_id injection. The sidecar reads
- * the active project from its cache and forwards to the cloud.
+ * need to manage IDP bearer tokens. The desktop DOES supply the project: the
+ * machine-local spawn project is sent as `project_id` on start, because the
+ * sidecar's own fallback (`/v1/projects/current`) is a single per-user slot
+ * shared across machines — one account on two machines with two projects would
+ * otherwise stamp both sessions with whichever machine wrote that slot last.
  *
  * Sessions are deduplicated by agent_id. The cloud's StartSession ends any
- * existing active session for the same user+agent, so multiple terminals/runtimes
- * for the same agent must share one cloud session or they will fight and 404 each
- * other's heartbeats.
+ * existing active session for the same user+agent+project, so multiple
+ * terminals/runtimes for the same agent must share one cloud session or they
+ * will fight and 404 each other's heartbeats. Same agent + same project on two
+ * machines still collides — deliberate scope boundary, see
+ * SPEC-multi-machine-one-account-session-project.md.
  */
 
 const ACP_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -36,6 +41,9 @@ export type AgentSessionStartResult =
 
 interface AgentSessionEntry {
   agentId: number;
+  /** Machine-local project the agent was spawned under. Stamped on the cloud
+   *  session so two machines on one account don't clobber each other. */
+  projectId?: number;
   session: AgentSession;
   /** Terminal/runtime ids that are using this agent session. */
   refs: Set<string>;
@@ -71,7 +79,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 export async function startAgentSession(
   terminalId: string,
   agentId: number,
-  _projectId?: number,
+  projectId?: number,
 ): Promise<AgentSessionStartResult> {
   if (terminalToAgent.has(terminalId)) {
     const existingAgentId = terminalToAgent.get(terminalId)!;
@@ -105,6 +113,7 @@ export async function startAgentSession(
 
   const entry: AgentSessionEntry = {
     agentId,
+    projectId,
     session: null as any, // set before promise resolves externally
     refs: new Set([terminalId]),
     heartbeatTimer: null,
@@ -116,7 +125,7 @@ export async function startAgentSession(
 
   const startPromise = (async (): Promise<AgentSessionStartResult> => {
     try {
-      const session = await sendStart(agentId);
+      const session = await sendStart(agentId, projectId);
       entry.session = session;
       delete entry.startPromise;
       console.log(
@@ -286,7 +295,7 @@ async function reregisterSession(entry: AgentSessionEntry): Promise<void> {
   entry.reregistering = true;
   try {
     const previousId = entry.session.id;
-    const session = await sendStart(entry.agentId);
+    const session = await sendStart(entry.agentId, entry.projectId);
     if (entry.status !== 'active') {
       // The session was ended while the start was in flight — clean up.
       await sendEnd(session.id, 'normal').catch(() => {});
@@ -326,8 +335,19 @@ function formatStartError(status: number, body: string): StartError {
   return new StartError(`Agent session could not be started. Server returned HTTP ${status}.`, status);
 }
 
-async function sendStart(agentId: number): Promise<AgentSession> {
-  const res = await fetchSessionEndpoint('/v1/agent-sessions/start', 'POST', { agent_id: agentId });
+async function sendStart(agentId: number, projectId?: number): Promise<AgentSession> {
+  // project_id is the machine's own spawn project. The sidecar only falls back
+  // to its cached (per-user, cross-machine) current project when it is absent,
+  // so omitting it here re-opens the multi-machine clobber.
+  const body: Record<string, unknown> = { agent_id: agentId };
+  if (typeof projectId === 'number') {
+    body.project_id = projectId;
+  } else {
+    console.warn(
+      `[AgentSession] start for agent=${agentId} has no local project_id; sidecar will fall back to the shared current-project slot`,
+    );
+  }
+  const res = await fetchSessionEndpoint('/v1/agent-sessions/start', 'POST', body);
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
