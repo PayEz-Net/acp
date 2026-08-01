@@ -228,7 +228,7 @@ async function readList(
   }
 }
 
-async function readCurrent(userId: string): Promise<CurrentResult> {
+async function readCurrent(cfg: Config, userId: string): Promise<CurrentResult> {
   const projectId = getStartedProjectId();
   if (projectId === null) {
     // Nothing started. The picker renders for this; do not supply a project.
@@ -241,10 +241,26 @@ async function readCurrent(userId: string): Promise<CurrentResult> {
     };
   }
 
-  // The cache only fills in display fields for the started project.
-  // It never decides which project this is.
+  // Display fields (name, repo_path, team) for the project the click chose.
+  // The cache first, then the cloud by EXPLICIT ID. Neither one decides WHICH
+  // project this is — that is settled above and never reconsidered. A cold boot
+  // has an empty cache, and returning an id with no project record left the
+  // shell un-onboarded: no terminals, no mail.
   const cached = cache.current.getStale(userId);
-  const project = cached?.project?.id === projectId ? cached.project : null;
+  let project = cached?.project?.id === projectId ? cached.project : null;
+
+  if (!project) {
+    try {
+      const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${projectId}`);
+      if (status >= 200 && status < 300) {
+        project = (payload as any)?.data?.project ?? (payload as any)?.data ?? null;
+      } else {
+        console.warn(`[projects] started project ${projectId} details: cloud HTTP ${status}`);
+      }
+    } catch (err: any) {
+      console.warn(`[projects] started project ${projectId} details unavailable: ${err.message}`);
+    }
+  }
 
   return {
     current_project_id: projectId,
@@ -271,7 +287,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
 
       const [listR, currentR] = await Promise.all([
         readList(cfg, userId, req.query as Record<string, unknown>, forceRefreshFlag),
-        readCurrent(userId),
+        readCurrent(cfg, userId),
       ]);
 
       // Combined source resolution: if either side is cache/defaults,
@@ -334,7 +350,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       if (!session) throw new NotAuthenticatedError();
       const userId = session.userId || '0';
       const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
-      const result = await readCurrent(userId);
+      const result = await readCurrent(cfg, userId);
       res.json(success(
         {
           project: result.project,
