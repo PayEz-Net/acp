@@ -19,7 +19,7 @@ import { startLifecycleHub, stopLifecycleHub, onLifecycleHubEvent, seedInitialLi
 import { startSpawnOrchestrator, stopSpawnOrchestrator, setSpawnGate } from './spawn-orchestrator';
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
-import { replayStartedProjectOnBoot } from './started-project';
+import { replayStartedProjectOnBoot, declareStartedProject } from './started-project';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
 import { IPC_CHANNELS } from '../shared/types';
 import type {
@@ -258,6 +258,32 @@ function setupIpcHandlers() {
   // spawn-orchestrator. The project is already RUNNING cloud-side; this
   // just hands the orchestrator the state the backend already has (no
   // cloud mutation, no invented transition).
+  // THE START CLICK — the only thing that sets this machine's current project.
+  //
+  // Fired by ProjectPicker.handleStart BEFORE the spawn fan-out, so the sidecar
+  // knows which project this rig is on before a single agent is instantiated.
+  //
+  // Previously the sidecar answered "what project am I on?" from the cloud — a
+  // SINGLE PER-USER SLOT SHARED ACROSS MACHINES. A second machine clicking Start
+  // on a different project silently reassigned this one: agents on this project
+  // became unreachable (every send AGENT_NOT_FOUND), mail filed into the wrong
+  // project, and a cold restart came back somewhere else entirely.
+  //
+  // Persisted machine-locally and replayed on every boot, so the answer is always
+  // "the project the dev clicked Start on, here" — never what another machine wrote.
+  ipcMain.handle(IPC_CHANNELS.PROJECT_DECLARE_STARTED, async (_e, payload: unknown) => {
+    const p = payload as { projectId?: unknown; projectName?: unknown } | null;
+    const projectId = typeof p?.projectId === 'number' ? p.projectId : Number(p?.projectId);
+    if (!Number.isFinite(projectId) || projectId <= 0) {
+      // NO FALLBACK: an unusable project id is an error, not a reason to guess.
+      const msg = `PROJECT_DECLARE_STARTED requires a positive numeric projectId, got ${String(p?.projectId)}`;
+      console.error(`[StartedProject] ${msg}`);
+      return { success: false, errorMessage: msg };
+    }
+    const projectName = typeof p?.projectName === 'string' ? p.projectName : null;
+    return declareStartedProject(projectId, projectName);
+  });
+
   ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async () => {
     // The picker's explicit Start opens the spawn gate so the orchestrator will
     // honor RUNNING transitions. Until this fires, background RUNNING pushes are

@@ -23,6 +23,7 @@ const IPC_CHANNELS = {
   SETTINGS_SET: 'settings:set',
   CLOUD_ENDPOINTS: 'cloud:endpoints',
   LIFECYCLE_RESEED: 'lifecycle:reseed',
+  PROJECT_DECLARE_STARTED: 'project:declare-started',
   AUTH_LOGIN: 'auth:login',
   AUTH_LOGOUT: 'auth:logout',
   AUTH_REFRESH: 'auth:refresh',
@@ -250,6 +251,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Re-read current-project + lifecycle and feed the orchestrator. Used
   // by the picker Start button (project already RUNNING cloud-side).
+  declareStartedProject: (projectId: number, projectName: string | null): Promise<{ success: boolean; errorMessage?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DECLARE_STARTED, { projectId, projectName });
+  },
   reseedLifecycle: (): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED);
   },
@@ -566,6 +570,7 @@ declare global {
       onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
+      declareStartedProject: (projectId: number, projectName: string | null) => Promise<{ success: boolean; errorMessage?: string }>;
       reseedLifecycle: () => Promise<void>;
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<boolean>;

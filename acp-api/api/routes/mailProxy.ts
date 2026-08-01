@@ -5,6 +5,7 @@ import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
+import { getStartedProject } from '../projects/startedProject.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -51,9 +52,15 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
 function resolveCurrentProjectId(): number | null {
   const session = getSession();
   if (!session?.userId) return null;
-  const entry = projectsCache.current.getFresh(session.userId)
-    ?? projectsCache.current.getStale(session.userId);
-  return entry?.current_project_id ?? null;
+  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
+  //
+  // Never the cloud — it cannot know which project a developer wants to work on.
+  // Never a cache, fresh or stale. `/v1/users/me/current-project` is a SINGLE
+  // PER-USER SLOT SHARED ACROSS MACHINES; reading it here is how this rig routed
+  // a sprint's mail into another project and left agents unreachable for a night.
+  //
+  // Nothing declared returns null, and callers must refuse rather than guess.
+  return getStartedProject(session.userId)?.projectId ?? null;
 }
 
 /**

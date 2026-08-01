@@ -135,6 +135,32 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
       // the team runtime (conforming ones are left untouched).
       await useProjectStore.getState().reconcileTeamRuntime(startProjectId);
 
+      // DECLARE THE START CLICK — before any agent spawns.
+      //
+      // This is the ONLY thing that sets this machine's current project. Without
+      // it the sidecar answers "what project am I on?" from the cloud, which is a
+      // SINGLE PER-USER SLOT SHARED ACROSS MACHINES: a second machine clicking
+      // Start on a different project silently reassigns this one. That produced
+      // agents unreachable by anyone (every send AGENT_NOT_FOUND), mail filed
+      // into the wrong project, and cold restarts landing elsewhere.
+      //
+      // Ordered BEFORE reseedLifecycle deliberately: the spawn fan-out and every
+      // agent it instantiates must inherit the project the dev actually chose,
+      // not whatever the shared slot happened to hold.
+      //
+      // A failure here is LOUD but not fatal: the value is already persisted
+      // machine-locally, so the next boot replays it. Blocking the dev's Start
+      // over a transport hiccup would be the worse trade.
+      const declared = await window.electronAPI.declareStartedProject(
+        startProjectId,
+        proj?.name ?? targetProjectNameForId(startProjectId),
+      );
+      if (!declared.success) {
+        console.error(
+          `[ProjectPicker] started-project declaration failed for ${startProjectId}: ${declared.errorMessage}`,
+        );
+      }
+
       await window.electronAPI.reseedLifecycle();
       return true;
     };

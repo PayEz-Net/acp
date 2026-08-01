@@ -486,6 +486,9 @@ export const IPC_CHANNELS = {
   // user "go" (picker Start) for an already-RUNNING project — no cloud
   // mutation, just hand the orchestrator the state the backend already has.
   LIFECYCLE_RESEED: 'lifecycle:reseed',
+  /** Renderer → Main. The dev clicked START on a project. The ONLY thing that
+   *  sets the current project for this machine. */
+  PROJECT_DECLARE_STARTED: 'project:declare-started',
 
   // Auth (main process handles IDP calls + token storage)
   AUTH_LOGIN: 'auth:login',

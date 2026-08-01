@@ -229,24 +229,31 @@ async function readList(
 }
 
 async function readCurrent(
-  cfg: Config,
+  _cfg: Config,
   userId: string,
-  forceRefreshFlag: boolean,
+  _forceRefreshFlag: boolean,
 ): Promise<CurrentResult> {
-  // MACHINE-LOCAL DECLARATION WINS — ALWAYS, and before anything else.
+  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
   //
-  // The current project is what the dev clicked START on, on this machine
-  // (Jon, 2026-08-01). It is never hydrated from the cloud: the cloud holds a
-  // single per-user slot shared across machines, so a second machine clicking
-  // Start on a different project silently reassigns this one. That is the exact
-  // bug that left two agents unreachable for a night and misrouted a sprint's
-  // mail into another project.
+  // Not the cloud. Not a cache, fresh or stale. Not the picker's default row.
+  // Not a previous session. There is no other factor to consider.
   //
-  // Note this ignores forceRefreshFlag on purpose: there is nothing to refresh
-  // FROM. A refresh can only re-read the shared slot, which is the defect.
+  // The cloud CANNOT know which project a developer wants to work on, and
+  // `/v1/users/me/current-project` is worse than merely uninformed: it is a
+  // SINGLE PER-USER SLOT SHARED ACROSS MACHINES, so a second machine clicking
+  // Start on a different project silently reassigns this one. Measured
+  // 2026-07-31/08-01: two agents unreachable by anyone for a full night (every
+  // send AGENT_NOT_FOUND), a sprint's mail filed into another project's history,
+  // and a cold restart returning on the wrong project entirely.
+  //
+  // `forceRefreshFlag` is ignored on purpose — there is nothing to refresh FROM.
+  // A refresh could only re-read the shared slot, which IS the defect.
   const started = getStartedProject(userId);
   if (started) {
     const known = cache.current.getStale(userId);
+    // The cached row is used ONLY to enrich the response with the project's
+    // display fields, and ONLY when it is the same project the dev started.
+    // It never decides WHICH project this is.
     const project =
       known && known.project && known.project.id === started.projectId ? known.project : null;
     return {
@@ -258,84 +265,19 @@ async function readCurrent(
     };
   }
 
-  if (!forceRefreshFlag) {
-    const fresh = cache.current.getFresh(userId);
-    if (fresh) {
-      return {
-        current_project_id: fresh.current_project_id,
-        project: fresh.project,
-        current_project_state: fresh.current_project_state,
-        source: 'cache',
-        fetchedAt: fresh.fetchedAt,
-      };
-    }
-  }
-  try {
-    const { status, payload } = await callCloud(cfg, 'GET', CLOUD_CURRENT_PROJECT_PATH);
-    if (status >= 200 && status < 300 && (payload as any)?.success) {
-      const mapped = extractAndMapCurrent(payload);
-      const entry = cache.current.set(userId, mapped);
-      console.log(
-        '[ProjectsProxy] current-project for user', userId,
-        '→ project_id:', entry.current_project_id,
-        'project:', entry.project ? { id: entry.project.id, name: entry.project.name, status: entry.project.status, is_active: entry.project.is_active } : null,
-        'state:', entry.current_project_state
-      );
-      return {
-        current_project_id: entry.current_project_id,
-        project: entry.project,
-        current_project_state: entry.current_project_state,
-        source: 'cloud',
-        fetchedAt: entry.fetchedAt,
-      };
-    }
-    const stale = cache.current.getStale(userId);
-    if (stale) {
-      return {
-        current_project_id: stale.current_project_id,
-        project: stale.project,
-        current_project_state: stale.current_project_state,
-        source: 'cache',
-        fetchedAt: stale.fetchedAt,
-        warning: `Cloud returned HTTP ${status}; serving last-known current`,
-      };
-    }
-    // No cache, cloud unhappy → conservative default: 'unset'. The FE will
-    // render the first-boot prompt; that's the safe assumption when we
-    // genuinely don't know whether a row exists. Better than silently
-    // assuming 'empty' (would show create-CTA over a real-but-unreachable
-    // user account).
-    return {
-      current_project_id: null,
-      project: null,
-      current_project_state: 'unset',
-      source: 'defaults',
-      fetchedAt: new Date().toISOString(),
-      warning: `Cloud returned HTTP ${status}; no cache available`,
-    };
-  } catch (err: any) {
-    if (err instanceof NotAuthenticatedError) throw err;
-    const stale = cache.current.getStale(userId);
-    const reason = err?.name === 'AbortError' ? 'Cloud unreachable (timeout)' : `Cloud unreachable (${err?.message || 'error'})`;
-    if (stale) {
-      return {
-        current_project_id: stale.current_project_id,
-        project: stale.project,
-        current_project_state: stale.current_project_state,
-        source: 'cache',
-        fetchedAt: stale.fetchedAt,
-        warning: `${reason}; serving last-known current`,
-      };
-    }
-    return {
-      current_project_id: null,
-      project: null,
-      current_project_state: 'unset',
-      source: 'defaults',
-      fetchedAt: new Date().toISOString(),
-      warning: `${reason}; no cache available`,
-    };
-  }
+  // NOTHING DECLARED = NO PROJECT ENGAGED. This is a complete, correct answer.
+  //
+  // NO FALLBACK. Do not consult the cloud, do not serve a cache, do not guess.
+  // A dev who has not clicked Start has not chosen a project, and the FE renders
+  // the picker for exactly this state. Supplying a value here is how the rig ends
+  // up operating on a project nobody selected.
+  return {
+    current_project_id: null,
+    project: null,
+    current_project_state: 'unset',
+    source: 'started',
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Router {
