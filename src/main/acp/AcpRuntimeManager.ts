@@ -1029,6 +1029,16 @@ export class AcpRuntimeManager extends EventEmitter {
     }
 
     this.promptInFlight = true;
+    if (kind === 'human') {
+      // The human's own prompt is becoming the active turn — they are being
+      // SERVED, not waiting behind someone else's busy turn. A backstop armed
+      // while they sat in the queue must not fire against their answer turn
+      // (BAPert 2026-08-01: the 60s grace cancel killed the turn that was
+      // mid-answer to the human's question; the nudge turn that followed only
+      // carried the later "be precise"). If the human speaks again mid-turn,
+      // prompt() re-arms the backstop for the new wait — no re-arm needed here.
+      this.clearHumanWaitBackstop();
+    }
     resolveDispatched?.(true);
     const sessionId = this.sessionId;
     const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);

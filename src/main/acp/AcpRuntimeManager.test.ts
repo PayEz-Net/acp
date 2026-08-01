@@ -786,6 +786,60 @@ describe('AcpRuntimeManager', () => {
     manager.kill();
   });
 
+  it('clears the human-reply backstop when the queued human question becomes the active turn (BAPert 2026-08-01)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-backstop-retry' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      // The runtime insists a (zombie) turn is still active: the human's
+      // question is rejected turn.agent_busy and re-queued — the manager
+      // never started a turn (the BAPert 2026-08-01 trace).
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 50) is active'),
+      );
+      const question = manager.prompt('so you are suggesting i start my test');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // A second human message mid-episode steers, busy-rejects, queues —
+      // and ARMS the 60s human-reply backstop.
+      const second = manager.prompt('be precise');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The next busy probe (5s) re-dispatches the question and the runtime
+      // accepts: the human's own question becomes the active turn.
+      let endQuestionTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { endQuestionTurn = resolve; }));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const process = getProcess();
+      const texts = () =>
+        process.requests
+          .filter((r) => r.method === 'session/prompt')
+          .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts().some((t) => t.includes('so you are suggesting'))).toBe(true);
+
+      // The answer turn runs long, well past the 60s deadline: the backstop
+      // must NOT cancel it — the human is being served, not waiting.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+      expect(texts().some((t) => t.includes('MID-TASK'))).toBe(false);
+
+      // Natural end; the queued 'be precise' drains as its own turn.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      endQuestionTurn({ stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(0);
+      await question;
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-no-stop' });
