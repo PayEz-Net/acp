@@ -160,7 +160,7 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
       // the team runtime (conforming ones are left untouched).
       await useProjectStore.getState().reconcileTeamRuntime(startProjectId);
 
-      await window.electronAPI.reseedLifecycle();
+      await window.electronAPI.reseedLifecycle(startProjectId);
       return true;
     };
 

@@ -284,11 +284,27 @@ function setupIpcHandlers() {
     return declareStartedProject(projectId, projectName);
   });
 
-  ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async () => {
+  ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async (_event, projectId?: number) => {
     // The picker's explicit Start opens the spawn gate so the orchestrator will
     // honor RUNNING transitions. Until this fires, background RUNNING pushes are
     // ignored (no spawn before project selection).
     setSpawnGate(true);
+    // The same Start TELLS the sidecar this machine's project: mail/roster
+    // scoping refuses with 409 PROJECT_NOT_ENGAGED until this lands, and scopes
+    // from THIS value afterwards — never the shared per-user cloud slot. This
+    // IPC is the one wire every ProjectPicker Start branch shares (POST
+    // /current does NOT fire on stored-confirm). Fire-and-forget — a failure
+    // must not block Start; the sidecar simply keeps refusing.
+    if (typeof projectId === 'number') {
+      void acpApiCall('/v1/projects/engaged', {
+        method: 'POST',
+        body: JSON.stringify({ project_id: projectId }),
+      }).catch((err) => {
+        console.warn('[Lifecycle] sidecar /v1/projects/engaged call failed — mail stays Start-gated:', err);
+      });
+    } else {
+      console.warn('[Lifecycle] LIFECYCLE_RESEED without projectId — sidecar NOT engaged; mail stays Start-gated');
+    }
     await seedInitialLifecycleState();
   });
 

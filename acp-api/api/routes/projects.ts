@@ -54,6 +54,7 @@ import {
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
 import { getStartedProjectId } from '../projects/startedProject.js';
+import { markProjectEngaged } from '../projects/engagement.js';
 
 const PROXY_TIMEOUT_MS = 10_000;
 const CLOUD_PROJECTS_PATH = '/v1/projects';
@@ -439,6 +440,27 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     } catch (err: any) {
       sendProxyError(res, req, err, 'project_set_current');
     }
+  });
+
+  // POST /v1/projects/engaged { project_id } — the user's Start TELLS the
+  // sidecar this machine's project. Called by the desktop main process from
+  // the LIFECYCLE_RESEED IPC handler (the one wire every ProjectPicker Start
+  // branch shares). Until this lands, mail/roster scoping refuses with 409
+  // PROJECT_NOT_ENGAGED. This machine's Start is the ONLY authority — the
+  // stored cloud pointer is picker display, never consulted for scoping.
+  router.post('/engaged', (req: Request, res: Response) => {
+    const { project_id } = req.body || {};
+    const id = parseInt(String(project_id), 10);
+    if (project_id === undefined || project_id === null || isNaN(id)) {
+      res.status(400).json(error('VALIDATION_ERROR', 'project_id required (integer)', 'project_engaged', (req as any).requestId));
+      return;
+    }
+    markProjectEngaged(id);
+    res.json(success(
+      { engaged: true, project_id: id },
+      'project_engaged',
+      (req as any).requestId,
+    ));
   });
 
   // POST /v1/projects — CREATE retired (lives on idealvibe).

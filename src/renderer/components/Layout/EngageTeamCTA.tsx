@@ -77,7 +77,7 @@ export function EngageTeamCTA() {
       store.clearNoTeamEngaged();
       // Re-run the spawn fan-out: the no-team abort left the RUNNING
       // transition unconsumed, so this reseed re-fires the orchestrator.
-      await window.electronAPI.reseedLifecycle();
+      await window.electronAPI.reseedLifecycle(projectId);
       setRefreshError(null);
     } catch (e) {
       // Engage already committed server-side; only the local convergence

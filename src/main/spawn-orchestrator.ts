@@ -343,7 +343,11 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // "report as" skill kickoff.
     const cloudBootPrompt = await fetchBootPrompt(projectId, member.agent_id);
     const localBootPrompt = localBootPrompts.get(member.agent_name) ?? buildAgentBootPrompt(member.agent_name);
-    const bootPrompt = cloudBootPrompt?.trim() ? cloudBootPrompt.trim() : localBootPrompt;
+    // Jon 2026-08-01: NO ONBOARDING. Boot bare — no cloud or synthesized
+    // onboarding prompt is injected at spawn. Each onboarding prompt was a
+    // turn-stack item multiplied by every agent on every boot; agents get
+    // their context from work, not from a welcome wall of text.
+    const bootPrompt = undefined;
     if (cloudBootPrompt?.trim()) {
       console.log(`[SpawnOrch] using cloud boot-prompt for ${member.agent_name}`);
     } else {

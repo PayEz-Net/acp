@@ -36,7 +36,7 @@ declare global {
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string; envName: string; isPackaged: boolean; isInternalDevBuild: boolean }>;
       /** The dev clicked START. The ONLY thing that sets this machine's current project. */
       declareStartedProject: (projectId: number, projectName: string | null) => Promise<{ success: boolean; errorMessage?: string }>;
-      reseedLifecycle: () => Promise<void>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5).
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<void>;

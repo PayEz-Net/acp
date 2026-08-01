@@ -254,8 +254,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   declareStartedProject: (projectId: number, projectName: string | null): Promise<{ success: boolean; errorMessage?: string }> => {
     return ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DECLARE_STARTED, { projectId, projectName });
   },
-  reseedLifecycle: (): Promise<void> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED);
+  reseedLifecycle: (projectId?: number): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED, projectId);
   },
 
   // Pre-flight working-dir check (SPEC-workdir-invalid §3.5). Returns whether
@@ -571,7 +571,7 @@ declare global {
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
       declareStartedProject: (projectId: number, projectName: string | null) => Promise<{ success: boolean; errorMessage?: string }>;
-      reseedLifecycle: () => Promise<void>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<boolean>;
       minimizeWindow: () => void;

@@ -754,7 +754,14 @@ export class AcpRuntimeManager extends EventEmitter {
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
     this.recordUserPrompt(text);
     if (this.promptInFlight) {
-      return this.steerThrough(prompt, { queueOnBusy: false });
+      // Jon 2026-08-01: mail NEVER interrupts an active turn. The steer path
+      // beheads the in-flight step (StepInterrupted ~1s — measured across
+      // three agents simultaneously: agents mailing each other meant every
+      // step died, and restarting the sessions did not cure it). Mail is
+      // durable in the inbox; defer it. The idle catch-up synthesis
+      // re-notifies when the turn completes.
+      console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; idle catch-up will deliver`);
+      return false;
     }
     this.executePrompt(prompt);
     return true;

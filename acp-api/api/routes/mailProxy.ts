@@ -154,6 +154,12 @@ function rewriteSessionInactive(
 }
 
 function sendProxyError(res: Response, req: Request, err: any, operation: string): void {
+  if (err instanceof ProjectNotEngagedError) {
+    res.status(409).json(
+      error('PROJECT_NOT_ENGAGED', err.message, operation, (req as any).requestId)
+    );
+    return;
+  }
   if (err instanceof NotAuthenticatedError) {
     res.status(401).json(
       error('NOT_AUTHENTICATED', err.message, operation, (req as any).requestId)
