@@ -5,7 +5,7 @@ import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
-import { getStartedProject } from '../projects/startedProject.js';
+import { requireStartedProjectId, ProjectNotEngagedError } from '../projects/startedProject.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -29,38 +29,6 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };
-}
-
-/**
- * Resolve the active session's current project_id from acp-api's projects
- * cache. Server-derived from the same source LifecycleHub on the desktop uses
- * (GET /v1/projects/current → `cache.current`), so the sidecar's view stays
- * lock-step with the renderer's.
- *
- * Used by all mail proxy routes to stamp `project_id` on every upstream call.
- * The cloud enforces project-scoped isolation (WO-agent-mail-project-isolation
- * §Sidecar + §Cloud). Both read and write paths carry the parameter so the
- * .NET backend can filter inbox, messages, search, and sidebar by project.
- *
- * Prefer fresh (60s TTL); fall back to stale for resilience inside a desktop
- * session. Project switches always relaunch the app (project-switch.ts), so a
- * stale entry within a single session is identical to fresh by construction.
- * Returns null when no session or no cached current — the call site logs and
- * forwards without project_id; the cloud will respond per its enforcement
- * policy (400 if client-supplied is required, 401/403 if server-derived).
- */
-function resolveCurrentProjectId(): number | null {
-  const session = getSession();
-  if (!session?.userId) return null;
-  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
-  //
-  // Never the cloud — it cannot know which project a developer wants to work on.
-  // Never a cache, fresh or stale. `/v1/users/me/current-project` is a SINGLE
-  // PER-USER SLOT SHARED ACROSS MACHINES; reading it here is how this rig routed
-  // a sprint's mail into another project and left agents unreachable for a night.
-  //
-  // Nothing declared returns null, and callers must refuse rather than guess.
-  return getStartedProject(session.userId)?.projectId ?? null;
 }
 
 /**
@@ -192,6 +160,12 @@ function sendProxyError(res: Response, req: Request, err: any, operation: string
     );
     return;
   }
+  if (err instanceof ProjectNotEngagedError) {
+    res.status(err.status).json(
+      error(err.code, err.message, operation, (req as any).requestId)
+    );
+    return;
+  }
   const msg = err.name === 'AbortError' ? 'Upstream timeout (10s)' : err.message;
   res.status(502).json(
     error('PROXY_ERROR', `Mail proxy failed: ${msg}`, operation, (req as any).requestId)
@@ -207,17 +181,13 @@ export default function mailProxyRoutes(
   const router = Router();
 
   // GET /v1/mail/inbox/:agent -> idealvibe.online/v1/agentmail/inbox/:agent
-  // WO-agent-mail-project-isolation: stamp project_id from session cache so
-  // the cloud filters inbox to the active project only.
+  // Every route below stamps the STARTED project, or refuses. There is no
+  // unfiltered call to the cloud from this file — that is what leaked mail
+  // between projects.
   router.get('/inbox/:agent', async (req: Request, res: Response) => {
     try {
-      const projectId = resolveCurrentProjectId();
       const query: Record<string, any> = { ...(req.query as Record<string, any>) };
-      if (projectId != null) {
-        query.project_id = projectId;
-      } else {
-        console.warn(`[mailProxy] GET /inbox/${req.params.agent}: no current_project_id in cache — forwarding without project filter`);
-      }
+      query.project_id = requireStartedProjectId(`reading ${req.params.agent}'s inbox`);
       const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', query);
 
       // TEMP-SHIM(agent-identity-overhaul): the cloud agent registry is mid-rebuild.
@@ -270,14 +240,9 @@ export default function mailProxyRoutes(
       // De-dupe so a roster with repeats can't multiply the upstream calls.
       const agents = [...new Set(requested)];
 
-      const projectId = resolveCurrentProjectId();
       const baseQuery: Record<string, any> = { ...(req.query as Record<string, any>) };
       delete baseQuery.agents;                       // the agent list is ours, not an upstream inbox param
-      if (projectId != null) {
-        baseQuery.project_id = projectId;
-      } else {
-        console.warn('[mailProxy] GET /inboxes: no current_project_id in cache — forwarding without project filter');
-      }
+      baseQuery.project_id = requireStartedProjectId('reading team inboxes');
 
       type InboxEntry = { messages: unknown[]; unread_count: number; error?: { code: string; message: string } };
       const inboxes: Record<string, InboxEntry> = {};
@@ -345,11 +310,8 @@ export default function mailProxyRoutes(
   // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
   router.get('/messages/:message_id', async (req: Request, res: Response) => {
     try {
-      const projectId = resolveCurrentProjectId();
       const query: Record<string, any> = { ...(req.query as Record<string, any>) };
-      if (projectId != null) {
-        query.project_id = projectId;
-      }
+      query.project_id = requireStartedProjectId(`reading message ${req.params.message_id}`);
       const result = await proxyToCloud(cfg, `/messages/${req.params.message_id}`, 'GET', query);
 
       if (isSessionInactiveResult(result.status, result.data)) {
@@ -419,15 +381,8 @@ export default function mailProxyRoutes(
       // outgoing body. Server-derived overrides any client-supplied value
       // because the sidecar is closer to the auth boundary than the renderer.
       // Cloud-side enforcement is the final say (per WO §Cloud API).
-      const projectId = resolveCurrentProjectId();
       const forwardBody: Record<string, unknown> = { ...(req.body ?? {}) };
-      if (projectId != null) {
-        forwardBody.project_id = projectId;
-      } else {
-        console.warn(
-          `[mailProxy] POST /send: no current_project_id in cache — forwarding without it (cloud will enforce). from=${from_agent ?? '?'} to=${Array.isArray(to) ? to.join(',') : '?'}`,
-        );
-      }
+      forwardBody.project_id = requireStartedProjectId(`sending mail from ${from_agent ?? '?'}`);
 
       // Provenance stamp: record the transport-level identity claimed by the
       // caller (X-ACP-Agent header / local-auth agentName). This is separate
@@ -491,9 +446,10 @@ export default function mailProxyRoutes(
   router.post('/inbox/:agent/read-all', async (req: Request, res: Response) => {
     try {
       const agentName = req.params.agent;
-      const projectId = resolveCurrentProjectId();
-      const query: Record<string, any> = {};
-      if (projectId != null) query.project_id = projectId;   // clear ONLY the current project's mail
+      // Clears ONLY the started project's mail — never a blanket wipe.
+      const query: Record<string, any> = {
+        project_id: requireStartedProjectId(`marking ${agentName}'s inbox read`),
+      };
       const result = await proxyToCloud(cfg, `/inbox/${agentName}/read-all`, 'POST', query);
       if (isSessionInactiveResult(result.status, result.data)) {
         rewriteSessionInactive(res, req, 'mail_mark_all_read', `inbox/${agentName}/read-all`);
@@ -508,11 +464,10 @@ export default function mailProxyRoutes(
   // GET /v1/mail/agents -> idealvibe.online/v1/agentmail/agents
   router.get('/agents', async (req: Request, res: Response) => {
     try {
+      // The started project overrides any caller-supplied project_id. A caller
+      // asking for a different roster is asking the wrong rig.
       const query = { ...(req.query as Record<string, any>) };
-      const projectId = resolveCurrentProjectId();
-      if (projectId != null && query.project_id == null) {
-        query.project_id = projectId;
-      }
+      query.project_id = requireStartedProjectId('listing mail agents');
       const result = await proxyToCloud(cfg, '/agents', 'GET', query);
       res.status(result.status).json(result.data);
     } catch (err: any) {

@@ -19,7 +19,7 @@ import { startLifecycleHub, stopLifecycleHub, onLifecycleHubEvent, seedInitialLi
 import { startSpawnOrchestrator, stopSpawnOrchestrator, setSpawnGate } from './spawn-orchestrator';
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
-import { replayStartedProjectOnBoot, declareStartedProject } from './started-project';
+import { declareStartedProject } from './started-project';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
 import { IPC_CHANNELS } from '../shared/types';
 import type {
@@ -495,22 +495,6 @@ app.whenReady().then(async () => {
   // Start ACP API server and wait for health check
   backendAvailable = await startApiServer();
   
-  // REPLAY THE DEV'S START CLICK before anything reads the current project.
-  //
-  // The sidecar boots with no declaration, and `GET /v1/projects/current` would
-  // otherwise fall through to the cloud — a SINGLE PER-USER SLOT SHARED ACROSS
-  // MACHINES. That is how a restart previously came back on another machine's
-  // project, taking mail routing and agent scope with it.
-  //
-  // This must run BEFORE startLifecycleHub / startSpawnOrchestrator below, both
-  // of which read the current project to decide which team to instantiate.
-  //
-  // Nothing declared is NOT an error: a dev who has never clicked Start has no
-  // project engaged, and the picker should say so rather than choose one.
-  if (backendAvailable) {
-    await replayStartedProjectOnBoot();
-  }
-
   // Startup summary (quiet mode - agents can query logs via API)
   console.log(`[ACP] Platform ready on port ${cbPort || '?'}`);
   console.log(`[ACP] API: ${backendAvailable ? '✓' : '✗'} | Logs: GET /v1/platform/logs`);

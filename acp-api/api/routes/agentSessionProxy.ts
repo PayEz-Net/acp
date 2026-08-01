@@ -3,7 +3,7 @@ import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
-import { getStartedProject } from '../projects/startedProject.js';
+import { requireStartedProjectId } from '../projects/startedProject.js';
 
 const AGENTSESSION_BASE = '/v1/sessions';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -22,20 +22,6 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
     'X-Vibe-Via': 'idp-proxy',
     'Content-Type': 'application/json',
   };
-}
-
-function resolveCurrentProjectId(): number | null {
-  const session = getSession();
-  if (!session?.userId) return null;
-  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
-  //
-  // Never the cloud — it cannot know which project a developer wants to work on.
-  // Never a cache, fresh or stale. `/v1/users/me/current-project` is a SINGLE
-  // PER-USER SLOT SHARED ACROSS MACHINES; reading it here is how this rig routed
-  // a sprint's mail into another project and left agents unreachable for a night.
-  //
-  // Nothing declared returns null, and callers must refuse rather than guess.
-  return getStartedProject(session.userId)?.projectId ?? null;
 }
 
 async function proxyToCloud(
@@ -111,10 +97,8 @@ export default function agentSessionProxyRoutes(cfg: Config): Router {
   const router = Router();
 
   // POST /v1/agent-sessions/start -> cloud /v1/sessions/start
-  // The desktop supplies project_id — the machine-local project the agent was
-  // spawned under — and that wins. The cache fallback below is a per-user slot
-  // shared by every machine on the account, so it can carry another machine's
-  // project; it is only used when the caller supplied nothing.
+  // The started project is the project. A caller-supplied project_id is accepted
+  // for wire compatibility and then ignored.
   router.post('/start', async (req: Request, res: Response) => {
     try {
       const { agent_id, project_id } = req.body || {};
@@ -129,16 +113,13 @@ export default function agentSessionProxyRoutes(cfg: Config): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'project_id must be a number or null when provided', 'agent_session_start', (req as any).requestId));
         return;
       }
-      const projectId = typeof project_id === 'number' ? project_id : resolveCurrentProjectId();
-      const forwardBody: Record<string, unknown> = { agent_id };
-      if (projectId != null) {
-        forwardBody.project_id = projectId;
-        if (typeof project_id !== 'number') {
-          console.warn(`[agentSessionProxy] POST /start: caller sent no project_id — falling back to shared current-project slot ${projectId}`);
-        }
-      } else {
-        console.warn('[agentSessionProxy] POST /start: no project_id from caller and no current_project_id in cache — forwarding without it');
-      }
+      // The started project wins over anything the caller sent. A renderer that
+      // believes it is on a different project is stale — spawning a session on
+      // its guess is how an agent ends up working the wrong project.
+      const forwardBody: Record<string, unknown> = {
+        agent_id,
+        project_id: requireStartedProjectId(`starting a session for agent ${agent_id}`),
+      };
       const result = await proxyToCloud(cfg, '/start', 'POST', forwardBody);
       res.status(result.status).json(result.data);
     } catch (err: any) {

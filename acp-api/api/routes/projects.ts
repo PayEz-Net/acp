@@ -53,7 +53,7 @@ import {
   type CurrentProjectState,
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
-import { getStartedProject } from '../projects/startedProject.js';
+import { getStartedProjectId } from '../projects/startedProject.js';
 
 const PROXY_TIMEOUT_MS = 10_000;
 const CLOUD_PROJECTS_PATH = '/v1/projects';
@@ -228,53 +228,28 @@ async function readList(
   }
 }
 
-async function readCurrent(
-  _cfg: Config,
-  userId: string,
-  _forceRefreshFlag: boolean,
-): Promise<CurrentResult> {
-  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
-  //
-  // Not the cloud. Not a cache, fresh or stale. Not the picker's default row.
-  // Not a previous session. There is no other factor to consider.
-  //
-  // The cloud CANNOT know which project a developer wants to work on, and
-  // `/v1/users/me/current-project` is worse than merely uninformed: it is a
-  // SINGLE PER-USER SLOT SHARED ACROSS MACHINES, so a second machine clicking
-  // Start on a different project silently reassigns this one. Measured
-  // 2026-07-31/08-01: two agents unreachable by anyone for a full night (every
-  // send AGENT_NOT_FOUND), a sprint's mail filed into another project's history,
-  // and a cold restart returning on the wrong project entirely.
-  //
-  // `forceRefreshFlag` is ignored on purpose — there is nothing to refresh FROM.
-  // A refresh could only re-read the shared slot, which IS the defect.
-  const started = getStartedProject(userId);
-  if (started) {
-    const known = cache.current.getStale(userId);
-    // The cached row is used ONLY to enrich the response with the project's
-    // display fields, and ONLY when it is the same project the dev started.
-    // It never decides WHICH project this is.
-    const project =
-      known && known.project && known.project.id === started.projectId ? known.project : null;
+async function readCurrent(userId: string): Promise<CurrentResult> {
+  const projectId = getStartedProjectId();
+  if (projectId === null) {
+    // Nothing started. The picker renders for this; do not supply a project.
     return {
-      current_project_id: started.projectId,
-      project,
-      current_project_state: 'stored',
+      current_project_id: null,
+      project: null,
+      current_project_state: 'unset',
       source: 'started',
-      fetchedAt: started.startedAt,
+      fetchedAt: new Date().toISOString(),
     };
   }
 
-  // NOTHING DECLARED = NO PROJECT ENGAGED. This is a complete, correct answer.
-  //
-  // NO FALLBACK. Do not consult the cloud, do not serve a cache, do not guess.
-  // A dev who has not clicked Start has not chosen a project, and the FE renders
-  // the picker for exactly this state. Supplying a value here is how the rig ends
-  // up operating on a project nobody selected.
+  // The cache only fills in display fields for the started project.
+  // It never decides which project this is.
+  const cached = cache.current.getStale(userId);
+  const project = cached?.project?.id === projectId ? cached.project : null;
+
   return {
-    current_project_id: null,
-    project: null,
-    current_project_state: 'unset',
+    current_project_id: projectId,
+    project,
+    current_project_state: 'stored',
     source: 'started',
     fetchedAt: new Date().toISOString(),
   };
@@ -296,7 +271,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
 
       const [listR, currentR] = await Promise.all([
         readList(cfg, userId, req.query as Record<string, unknown>, forceRefreshFlag),
-        readCurrent(cfg, userId, forceRefreshFlag),
+        readCurrent(userId),
       ]);
 
       // Combined source resolution: if either side is cache/defaults,
@@ -359,7 +334,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       if (!session) throw new NotAuthenticatedError();
       const userId = session.userId || '0';
       const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
-      const result = await readCurrent(cfg, userId, forceRefreshFlag);
+      const result = await readCurrent(userId);
       res.json(success(
         {
           project: result.project,

@@ -3,7 +3,7 @@ import { success, error } from '../response.js';
 import { config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
-import { getStartedProject } from '../projects/startedProject.js';
+import { requireStartedProjectId, ProjectNotEngagedError } from '../projects/startedProject.js';
 
 import { fileURLToPath } from 'url';
 import * as path from 'path';
@@ -113,20 +113,6 @@ async function proxyAgentCloud(
   res.status(result.status).json(result.body);
 }
 
-function resolveCurrentProjectId(): number | null {
-  const session = getSession();
-  if (!session?.userId) return null;
-  // THE ONLY SOURCE OF TRUTH IS THE DEV'S START CLICK.
-  //
-  // Never the cloud — it cannot know which project a developer wants to work on.
-  // Never a cache, fresh or stale. `/v1/users/me/current-project` is a SINGLE
-  // PER-USER SLOT SHARED ACROSS MACHINES; reading it here is how this rig routed
-  // a sprint's mail into another project and left agents unreachable for a night.
-  //
-  // Nothing declared returns null, and callers must refuse rather than guess.
-  return getStartedProject(session.userId)?.projectId ?? null;
-}
-
 async function resolveAgentNameToId(name: string): Promise<number | null> {
   const normalizedName = name.toLowerCase();
   const cached = nameToIdCache.get(normalizedName);
@@ -134,12 +120,10 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
     return cached;
   }
 
-  // Project-scope the roster when possible so name resolution matches the
-  // project-scoped sidebar/mail view. Falls back to the full tenant roster
-  // when no current project is cached.
-  const projectId = resolveCurrentProjectId();
-  const query = projectId != null ? `?project_id=${projectId}` : '';
-  const result = await cloudFetch(`/v1/agentmail/agents${query}`);
+  // Resolve names against the started project's roster only. The full-tenant
+  // roster would resolve a name that belongs to another project's team.
+  const projectId = requireStartedProjectId('resolving an agent name');
+  const result = await cloudFetch(`/v1/agentmail/agents?project_id=${projectId}`);
   if ('error' in result) return null;
   if (result.status < 200 || result.status >= 300) return null;
   const agents = result.body?.data?.agents;
@@ -648,6 +632,10 @@ export default function agentRoutes(_storage: any): Router {
 
       res.json(success(profile, 'agent_profile', (req as any).requestId));
     } catch (err: any) {
+      if (err instanceof ProjectNotEngagedError) {
+        res.status(err.status).json(error(err.code, err.message, 'agent_profile', (req as any).requestId));
+        return;
+      }
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_profile', (req as any).requestId));
     }
   });
