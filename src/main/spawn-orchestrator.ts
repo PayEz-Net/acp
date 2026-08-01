@@ -505,6 +505,17 @@ let spawnGateOpen = false;
 
 export function setSpawnGate(open: boolean): void {
   spawnGateOpen = open;
+
+  // Opening the gate IS the user's Start click, so forget what we saw while it
+  // was shut. The hub seeds current state on connect — before any pick — and a
+  // project already RUNNING was recorded then and ignored (gate closed). Left
+  // in place, that memory makes the reseed look like "no change", so nothing
+  // spawns and the shell comes up blank with the project engaged. Clearing it
+  // lets the reseed register as a transition into RUNNING, which is what the
+  // click meant.
+  if (open) {
+    lastSeenState.clear();
+  }
 }
 
 export function startSpawnOrchestrator(): void {
