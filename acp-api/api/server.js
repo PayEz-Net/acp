@@ -8,6 +8,8 @@ import { success, error } from './response.js';
 import { localAuth } from './middleware/localAuth.js';
 import mailProxyRoutes from './routes/mailProxy.js';
 import bootstrapRoutes from './routes/bootstrap.js';
+import { setStartedProject, peekStartedProject } from './projects/startedProject.js';
+import { getSession as getAuthedSession } from './auth/tokenManager.js';
 import modifyRoutes from './routes/modify.js';
 import execRoutes from './routes/exec.js';
 import sessionRoutes from './routes/sessions.js';
@@ -235,6 +237,48 @@ export async function createApp(cfg) {
   // through /v1/lifecycle/agents/:name/spawn. Without this registration,
   // /internal/pty/output cannot resolve project_id/session_id and the local
   // replay cache stays empty.
+  // POST /internal/project/started { project_id, project_name, user_id }
+  //
+  // Electron declares which project the dev clicked START on, ON THIS MACHINE.
+  // Called on every Start/switch and again on every boot from electron-store.
+  //
+  // This is the ONLY way the current project is set. It is never derived, never
+  // hydrated from the cloud, and never inferred from a cache. The cloud holds a
+  // single per-user slot shared across machines — a second machine clicking Start
+  // on a different project silently reassigns this one, which is precisely the bug
+  // that left agents unreachable for a night and misrouted a sprint's mail.
+  app.post('/internal/project/started', (req, res) => {
+    const { project_id, project_name, user_id } = req.body || {};
+    const resolvedId = typeof project_id === 'number' ? project_id : Number(project_id);
+    if (!Number.isFinite(resolvedId) || resolvedId <= 0) {
+      return res.status(400).json(error('INVALID_REQUEST', 'project_id must be a positive number', 'project_started', req.requestId));
+    }
+    // Identity comes from the sidecar's own authenticated session — it already
+    // knows who is signed in. Electron may pass user_id, but the session wins:
+    // one source for identity, so the two can never disagree about whose
+    // declaration this is. NO FALLBACK to a default or anonymous user: without
+    // a known user we cannot say whose project this is, and serving one dev's
+    // project to another is the exact failure being fixed.
+    const sessionUserId = getAuthedSession()?.userId;
+    const resolvedUserId = sessionUserId || (user_id ? String(user_id) : null);
+    if (!resolvedUserId) {
+      return res.status(401).json(error('NOT_AUTHENTICATED', 'no authenticated session; cannot attribute the started project', 'project_started', req.requestId));
+    }
+    const entry = setStartedProject({
+      projectId: resolvedId,
+      projectName: typeof project_name === 'string' ? project_name : null,
+      userId: resolvedUserId,
+      startedAt: new Date().toISOString(),
+    });
+    res.json(success({ started: entry }, 'project_started', req.requestId));
+  });
+
+  // GET /internal/project/started — diagnostics. What does the sidecar think the
+  // dev declared? Answers "is the rig on the right project" without guessing.
+  app.get('/internal/project/started', (req, res) => {
+    res.json(success({ started: peekStartedProject() }, 'project_started_get', req.requestId));
+  });
+
   app.post('/internal/pty/register', async (req, res) => {
     const { agentName, terminalId, projectId, provider } = req.body || {};
     if (!agentName || !terminalId || projectId === undefined || projectId === null) {

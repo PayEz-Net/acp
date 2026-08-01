@@ -24,6 +24,7 @@
 import { app, ipcMain, BrowserWindow } from 'electron';
 import { IPC_CHANNELS } from '../shared/types';
 import { setNextBootOverlay } from './store';
+import { declareStartedProject } from './started-project';
 import { getLocalSecret } from './api-server';
 
 const ACP_API_BASE = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -110,6 +111,30 @@ export function setupProjectSwitchHandler(mainWindow: BrowserWindow | null): voi
         errorMessage: result.errorMessage,
       });
       return result;
+    }
+
+    // DECLARE THE START CLICK — machine-local, and the authority from here on.
+    //
+    // The cloud PUT above writes a SINGLE PER-USER SLOT SHARED ACROSS MACHINES.
+    // A second machine clicking Start on a different project overwrites it, which
+    // is how this rig previously drifted onto another project's scope: agents on
+    // this project became unreachable, mail filed into the wrong project, and a
+    // cold restart came back somewhere else entirely.
+    //
+    // This declaration is what `GET /v1/projects/current` serves from now on. It
+    // is persisted machine-locally and replayed on every boot, so the answer to
+    // "what project is this rig on" is always "the one the dev clicked Start on,
+    // here" — never whatever another machine wrote last.
+    //
+    // Failure is logged loudly and does NOT abort the switch: the value is already
+    // persisted, so the next boot replays it. Better a late declaration than a
+    // half-completed switch.
+    const declared = await declareStartedProject(targetProjectId, targetProjectName);
+    if (!declared.success) {
+      console.error(
+        `[ProjectSwitch] started-project declaration failed for project=${targetProjectId}:` +
+          ` ${declared.errorMessage} — persisted locally, will replay on next boot`,
+      );
     }
 
     console.log(`[ProjectSwitch] cloud PUT succeeded for project=${targetProjectId} — relaunching ACP`);

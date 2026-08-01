@@ -53,6 +53,7 @@ import {
   type CurrentProjectState,
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
+import { getStartedProject } from '../projects/startedProject.js';
 
 const PROXY_TIMEOUT_MS = 10_000;
 const CLOUD_PROJECTS_PATH = '/v1/projects';
@@ -162,7 +163,8 @@ interface CurrentResult {
   current_project_id: number | null;
   project: MappedProject | null;
   current_project_state: CurrentProjectState;
-  source: 'cloud' | 'cache' | 'defaults';
+  /** 'started' = the dev's Start click on this machine. It outranks every other source. */
+  source: 'started' | 'cloud' | 'cache' | 'defaults';
   fetchedAt: string;
   warning?: string;
 }
@@ -231,6 +233,31 @@ async function readCurrent(
   userId: string,
   forceRefreshFlag: boolean,
 ): Promise<CurrentResult> {
+  // MACHINE-LOCAL DECLARATION WINS — ALWAYS, and before anything else.
+  //
+  // The current project is what the dev clicked START on, on this machine
+  // (Jon, 2026-08-01). It is never hydrated from the cloud: the cloud holds a
+  // single per-user slot shared across machines, so a second machine clicking
+  // Start on a different project silently reassigns this one. That is the exact
+  // bug that left two agents unreachable for a night and misrouted a sprint's
+  // mail into another project.
+  //
+  // Note this ignores forceRefreshFlag on purpose: there is nothing to refresh
+  // FROM. A refresh can only re-read the shared slot, which is the defect.
+  const started = getStartedProject(userId);
+  if (started) {
+    const known = cache.current.getStale(userId);
+    const project =
+      known && known.project && known.project.id === started.projectId ? known.project : null;
+    return {
+      current_project_id: started.projectId,
+      project,
+      current_project_state: 'stored',
+      source: 'started',
+      fetchedAt: started.startedAt,
+    };
+  }
+
   if (!forceRefreshFlag) {
     const fresh = cache.current.getFresh(userId);
     if (fresh) {

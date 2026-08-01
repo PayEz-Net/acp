@@ -221,3 +221,61 @@ export function setNextBootOverlay(o: NextBootOverlay): void {
 export function clearNextBootOverlay(): void {
   overlayStore.delete('nextBootOverlay');
 }
+
+// ---------------------------------------------------------------------------
+// STARTED PROJECT — the dev's declared current project, MACHINE-LOCAL.
+//
+// THE RULE (Jon, 2026-08-01):
+//   The current project is the project the dev clicked START on, ON THIS MACHINE.
+//   That is the only evidence. There is no other factor.
+//
+// This store is the durable source of truth for that declaration. It is written
+// on every Start/switch and replayed to the acp-api sidecar on every boot, so a
+// restart comes back on the project the dev chose rather than on whatever a
+// shared cloud slot happened to say.
+//
+// WHY NOT THE CLOUD
+// `/v1/users/me/current-project` is a SINGLE PER-USER SLOT SHARED ACROSS MACHINES.
+// `agentSessionLifecycle.ts` already documents this and refuses to use it. On
+// 2026-07-31/08-01 one account driving two projects on two machines produced:
+// two agents unreachable by anyone for a full night (every send AGENT_NOT_FOUND),
+// a sprint's mail filed into another project, and a cold restart landing on the
+// wrong project. The cloud cannot know which project a dev wants to work on.
+//
+// Keyed by user so one machine shared by two devs cannot serve the wrong
+// declaration. No fallback: absent means "no project engaged", which callers
+// must surface rather than guess around.
+
+export interface StartedProject {
+  project_id: number;
+  project_name: string | null;
+  user_id: string;
+  started_at: string;
+}
+
+const startedProjectStore = new Store<{ startedProject: StartedProject | null }>({
+  name: 'started-project',
+  defaults: { startedProject: null },
+});
+
+/** The project this dev declared on this machine, or null if none. */
+export function getStartedProject(): StartedProject | null {
+  return startedProjectStore.get('startedProject') ?? null;
+}
+
+/**
+ * Record a Start click. Clicking Start on a different project is the ONLY way
+ * this value changes.
+ */
+export function setStartedProject(entry: StartedProject): void {
+  startedProjectStore.set('startedProject', entry);
+  console.log(
+    `[Store] started project declared: ${entry.project_id}` +
+      ` (${entry.project_name ?? 'unnamed'}) user=${entry.user_id}`,
+  );
+}
+
+/** Clear on sign-out. Not part of normal operation. */
+export function clearStartedProject(): void {
+  startedProjectStore.delete('startedProject');
+}
