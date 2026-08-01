@@ -4,7 +4,7 @@ import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
-import * as projectsCache from '../projects/cache.js';
+import { getEngagedProjectId, ProjectNotEngagedError } from '../projects/engagement.js';
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
@@ -31,29 +31,22 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
 }
 
 /**
- * Resolve the active session's current project_id from acp-api's projects
- * cache. Server-derived from the same source LifecycleHub on the desktop uses
- * (GET /v1/projects/current → `cache.current`), so the sidecar's view stays
- * lock-step with the renderer's.
+ * Resolve THIS MACHINE's engaged project_id — the project the user explicitly
+ * started via the picker, told to the sidecar through POST /v1/projects/engaged.
+ *
+ * This is the ONLY authority for mail scoping. The cloud current-project
+ * pointer (per-user, shared across machines) is deliberately NOT consulted:
+ * it is picker display state, and on a multi-machine account it can name a
+ * project this machine has never touched. The backend is not the boss of
+ * what this machine's current project is — the user's Start is.
  *
  * Used by all mail proxy routes to stamp `project_id` on every upstream call.
- * The cloud enforces project-scoped isolation (WO-agent-mail-project-isolation
- * §Sidecar + §Cloud). Both read and write paths carry the parameter so the
- * .NET backend can filter inbox, messages, search, and sidebar by project.
- *
- * Prefer fresh (60s TTL); fall back to stale for resilience inside a desktop
- * session. Project switches always relaunch the app (project-switch.ts), so a
- * stale entry within a single session is identical to fresh by construction.
- * Returns null when no session or no cached current — the call site logs and
- * forwards without project_id; the cloud will respond per its enforcement
- * policy (400 if client-supplied is required, 401/403 if server-derived).
+ * Throws ProjectNotEngagedError (→ 409) until Start; never forwards unscoped.
  */
-function resolveCurrentProjectId(): number | null {
-  const session = getSession();
-  if (!session?.userId) return null;
-  const entry = projectsCache.current.getFresh(session.userId)
-    ?? projectsCache.current.getStale(session.userId);
-  return entry?.current_project_id ?? null;
+function resolveCurrentProjectId(): number {
+  const engaged = getEngagedProjectId();
+  if (engaged == null) throw new ProjectNotEngagedError();
+  return engaged;
 }
 
 /**
@@ -179,6 +172,12 @@ function rewriteSessionInactive(
 }
 
 function sendProxyError(res: Response, req: Request, err: any, operation: string): void {
+  if (err instanceof ProjectNotEngagedError) {
+    res.status(409).json(
+      error('PROJECT_NOT_ENGAGED', err.message, operation, (req as any).requestId)
+    );
+    return;
+  }
   if (err instanceof NotAuthenticatedError) {
     res.status(401).json(
       error('NOT_AUTHENTICATED', err.message, operation, (req as any).requestId)

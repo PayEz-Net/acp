@@ -250,8 +250,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Re-read current-project + lifecycle and feed the orchestrator. Used
   // by the picker Start button (project already RUNNING cloud-side).
-  reseedLifecycle: (): Promise<void> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED);
+  reseedLifecycle: (projectId?: number): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED, projectId);
   },
 
   // Pre-flight working-dir check (SPEC-workdir-invalid §3.5). Returns whether
@@ -566,7 +566,7 @@ declare global {
       onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
-      reseedLifecycle: () => Promise<void>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<boolean>;
       minimizeWindow: () => void;

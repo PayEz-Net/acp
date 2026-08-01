@@ -569,7 +569,7 @@ export default function App() {
             // Re-run the spawn fan-out: reseedLifecycle re-seeds the orchestrator
             // with the corrected path. Serves BOTH entry paths — the pre-flight
             // gate's first spawn AND the orchestrator path's re-spawn after fail.
-            await window.electronAPI.reseedLifecycle();
+            await window.electronAPI.reseedLifecycle(workdirInvalid.projectId ?? undefined);
             const store = useProjectStore.getState();
             store.clearWorkdirInvalid();
             store.markPickerStarted();

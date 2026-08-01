@@ -28,9 +28,13 @@ const POLL_MS = 60_000;
 export function useTeamPoll(): void {
   const isAuthed = useAuthStore((s) => s.authFlowState === AuthFlowState.AUTHENTICATED);
   const activeProjectId = useProjectStore((s) => s.activeProject?.id);
+  // Start-gate: the roster poll is an ACT on a project, not picker display.
+  // activeProject hydrates at boot from the stored pointer; without this
+  // gate the 60s tick syncs a team the user never started.
+  const pickerHasStarted = useProjectStore((s) => s.pickerHasStarted);
 
   useEffect(() => {
-    if (!isAuthed || !activeProjectId) return;
+    if (!isAuthed || !activeProjectId || !pickerHasStarted) return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -70,7 +74,7 @@ export function useTeamPoll(): void {
           ps.clearNoTeamEngaged();
           await ps.fetchCurrentProjectTeam(activeProjectId, { force: true });
           applyCloudRosterToAgents();
-          await window.electronAPI.reseedLifecycle();
+          await window.electronAPI.reseedLifecycle(activeProjectId);
         }
       } catch (err) {
         // Soft-fail: warning surfaces via teamStore.syncError if relevant.
@@ -99,5 +103,5 @@ export function useTeamPoll(): void {
       if (timer) clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [isAuthed, activeProjectId]);
+  }, [isAuthed, activeProjectId, pickerHasStarted]);
 }

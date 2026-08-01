@@ -61,6 +61,45 @@ function renderMailSurfaceLine(agentName: string, text: string): boolean {
 // across page reloads so an HMR reload doesn't re-deliver everything (WO 11473).
 const markMailEventSeen = createMailEventDeduper(200, 'acp.mail.seen');
 
+// Turn-stack defense (Jon 2026-08-01): the SSE catch-up replays recent mail
+// events 1:1 into every fresh session, burying agents under history they
+// already processed (50-turn boot holes, measured twice in one day). Message
+// ids are chronological, so ONE cheap watermark kills the replay: on first
+// contact per agent, read the newest message id exactly once; only mail
+// ABOVE that id is allowed to inject. Historical events never fire a turn.
+const mailWatermark = new Map<string, number>();
+const watermarkPending = new Set<string>();
+
+// Boot grace (Jon 2026-08-01): mail injected into an agent that has not
+// finished booting is the same turn-stack disease at a different stage —
+// the notice queues ahead of the agent's own settling. Mail is durable;
+// it can wait. Suppress injection for GRACE_MS after an agent first
+// appears; after that, live mail flows normally.
+const BOOT_GRACE_MS = 60_000;
+let sseConnectedAt: number | null = null;
+function inBootGrace(): boolean {
+  return sseConnectedAt != null && Date.now() - sseConnectedAt < BOOT_GRACE_MS;
+}
+async function initMailWatermark(agentName: string): Promise<void> {
+  try {
+    const headers: Record<string, string> = { 'X-ACP-Agent': agentName };
+    const secret = await getSecret();
+    if (secret) headers['Authorization'] = `Bearer ${secret}`;
+    const res = await fetch(`http://127.0.0.1:3001/v1/mail/inbox/${agentName}?sort=newest&limit=1`, { headers });
+    if (!res.ok) return;
+    const json = (await res.json()) as { data?: { messages?: Array<{ message_id?: number }> } };
+    const msgs = json?.data?.messages ?? [];
+    const maxId = msgs.reduce((m, x) => Math.max(m, x?.message_id ?? 0), 0);
+    mailWatermark.set(agentName, maxId);
+    console.log(`[AcpSse] mail watermark ${agentName}: ${maxId} — older is history, suppressed`);
+  } catch {
+    // Leave unset — the next event retries. Better to suppress a live mail
+    // for a second than to open the historical flood.
+  } finally {
+    watermarkPending.delete(agentName);
+  }
+}
+
 /**
  * Fetch a mail message's body so the notice can carry the CONTENT, not just a
  * "go read it" pointer (Jon: agents see alerts but don't go read them — bring
@@ -421,6 +460,32 @@ export function useAcpSse() {
                 const from = mail.from_agent ?? mail.from ?? 'unknown';
                 const subject = mail.subject ?? '(no subject)';
 
+                // Boot grace: a fresh agent finishes settling before the
+                // world talks at it. Its mail waits in the inbox, durable.
+                if (inBootGrace(agentName)) {
+                  console.log(`[AcpSse] boot grace: holding mail for ${agentName} (fresh spawn, <60s)`);
+                  continue;
+                }
+
+                // Turn-stack gate: only mail NEWER than the agent's watermark
+                // may inject. Everything else is catch-up replay — suppressed
+                // without firing a turn. Watermark advances on live mail.
+                if (typeof id === 'number') {
+                  if (!mailWatermark.has(agentName)) {
+                    if (!watermarkPending.has(agentName)) {
+                      watermarkPending.add(agentName);
+                      void initMailWatermark(agentName);
+                    }
+                    continue;
+                  }
+                  const wm = mailWatermark.get(agentName)!;
+                  if (id <= wm) {
+                    console.log(`[AcpSse] suppressed historical mail for ${agentName} id=${id} (<= watermark ${wm})`);
+                    continue;
+                  }
+                  mailWatermark.set(agentName, id);
+                }
+
                 // Skip replayed/duplicate deliveries of the same message.
                 // Id-less events dedupe on a content key so a later id'd
                 // catch-up of the same mail doesn't double-notify (WO 11491).
@@ -430,13 +495,16 @@ export function useAcpSse() {
                 }
 
                 console.log(`[AcpSse] Mail for ${agentName}: ${from} — ${subject} (id=${id})`);
-                void routeMailNotice(agentName, from, subject, id);
 
                 const projectId = useProjectStore.getState().activeProject?.id;
                 // Gate on confirmation (WO 1560 R3 / AC5): no inbox GETs before
                 // [Start], even if a mail push lands while the boot confirm
                 // picker is still open. pickerHasStarted flips true on [Start].
+                // routeMailNotice joins the gate: it fires a body GET that
+                // stamps read_at cloud-side — a pre-Start side effect on a
+                // project the user has not engaged.
                 if (useProjectStore.getState().pickerHasStarted) {
+                  void routeMailNotice(agentName, from, subject, id);
                   useMailStore.getState().fetchInbox(agentName, projectId);
                 }
               } catch (err) {

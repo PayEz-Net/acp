@@ -34,7 +34,7 @@ declare global {
       // Settings
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string; envName: string; isPackaged: boolean; isInternalDevBuild: boolean }>;
-      reseedLifecycle: () => Promise<void>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5).
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<void>;
