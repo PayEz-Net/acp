@@ -169,13 +169,16 @@ export class AcpRuntimeManager extends EventEmitter {
   // Kimi's ACP runtime does not handle concurrent session/prompt requests on
   // the same session; overlapping calls produce -32603 internal errors and can
   // cause the in-flight turn to return an empty end_turn. Queue prompts so only
-  // one is ever in flight at a time.
-  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void }> = [];
+  // one is ever in flight at a time. Entries are tagged by lane: 'human'
+  // prompts are the ones the reply-turn nudge may fold into itself (see
+  // takeQueuedHumanTexts); 'system' prompts (nudges, kickoffs) always dispatch
+  // as their own turn.
+  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' }> = [];
   // Prompts sent THROUGH into the active turn (slice B steer passthrough).
   // Tracked (with their prompt) so kill()/dropQueuedPrompts can settle their
   // waiters exactly like queued prompts — and so a resumed restart can
   // re-dispatch them (the turn they rode died with the old process).
-  private pendingSteers = new Set<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void }>();
+  private pendingSteers = new Set<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' }>();
   private promptInFlight = false;
   // Human-reply backstop (NGTMI: "the team lead ignores me"). A human prompt
   // mid-turn STEERS in to influence the live task — but text only posts at
@@ -190,6 +193,17 @@ export class AcpRuntimeManager extends EventEmitter {
   //      answering.
   private humanWaitWarnTimer: ReturnType<typeof setTimeout> | null = null;
   private humanWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  // Learned runtime capability. The kimi TUI has two distinct primitives for
+  // input during a busy turn — Esc interrupts (cancel), Ctrl+S steers (pushes
+  // up into the live turn) — but the ACP wire only has session/prompt, and
+  // kimi's adapter (≤0.31.x) busy-rejects it mid-turn (turn.agent_busy): the
+  // Ctrl+S equivalent does not exist on ACP. The FIRST busy-rejected steer
+  // flips this flag; afterwards human prompts queue directly instead of
+  // attempting a doomed steer, the stage-1 warning steer is skipped (it could
+  // only ever be rejected), and the grace-cancel nudge carries the queued
+  // human text — otherwise the agent is told to answer a message it never
+  // received, and the backlog drains one stale message per turn.
+  private steerUnsupported = false;
 
   // Crash-recovery state. We track whether a kill was intentional so an
   // unexpected process exit can auto-restart, and we back off so a repeatedly
@@ -718,7 +732,7 @@ export class AcpRuntimeManager extends EventEmitter {
     if (this.promptInFlight) {
       this.armHumanWaitBackstop();
     }
-    await this.sendPrompt(prompt);
+    await this.sendPrompt(prompt, 'human');
   }
 
   private async systemPrompt(text: string): Promise<void> {
@@ -726,7 +740,7 @@ export class AcpRuntimeManager extends EventEmitter {
       throw new Error('ACP runtime not initialized');
     }
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
-    await this.sendPrompt(prompt);
+    await this.sendPrompt(prompt, 'system');
   }
 
   private recordUserPrompt(text: string): void {
@@ -773,7 +787,7 @@ export class AcpRuntimeManager extends EventEmitter {
    * by dropQueuedPrompts). Callers that only care about delivery events can
    * keep ignoring the result; injectMail depends on it (WO 11462).
    */
-  private sendPrompt(prompt: AcpSendContentBlock[]): Promise<boolean> {
+  private sendPrompt(prompt: AcpSendContentBlock[], kind: 'human' | 'system'): Promise<boolean> {
     if (!this.process?.isRunning() || !this.sessionId) {
       const message = 'ACP runtime not initialized';
       console.error(`[ACP ${this.options.agentName}] ${message}`);
@@ -790,11 +804,41 @@ export class AcpRuntimeManager extends EventEmitter {
       // WITHOUT touching promptInFlight. Older runtimes that still
       // busy-reject fall back to the classic queue + drain path — and the
       // renderer's queued indicator now means ONLY that backstop state.
-      return this.steerThrough(prompt);
+      if (this.steerUnsupported) {
+        // Learned no-steer runtime: skip the doomed steer (a guaranteed
+        // turn.agent_busy round-trip plus adapter stderr spam) and take the
+        // queue backstop directly.
+        return this.enqueueBehindActiveTurn(prompt, kind);
+      }
+      return this.steerThrough(prompt, kind);
     }
 
-    this.executePrompt(prompt);
+    this.executePrompt(prompt, undefined, false, kind);
     return Promise.resolve(true);
+  }
+
+  /**
+   * Queue a prompt behind the active turn without attempting a steer — the
+   * path taken once the runtime has taught us it busy-rejects mid-turn
+   * prompts. Identical settlement to the steer busy-fallback: the waiter
+   * resolves when the entry drains (or false on drop), and prompt_queued is
+   * the renderer's only queued-indicator signal.
+   */
+  private enqueueBehindActiveTurn(
+    prompt: AcpSendContentBlock[],
+    kind: 'human' | 'system',
+  ): Promise<boolean> {
+    const sessionId = this.sessionId ?? '';
+    console.log(`[ACP ${this.options.agentName}] no-steer runtime — queuing ${kind} prompt behind active turn (session=${sessionId})`);
+    const promise = new Promise<boolean>((resolve) => {
+      this.promptQueue.push({ prompt, resolve, kind });
+    });
+    this.emitAcpEvent({
+      sessionUpdate: 'prompt_queued',
+      sessionId,
+      queueDepth: this.promptQueue.length,
+    });
+    return promise;
   }
 
   /**
@@ -808,13 +852,15 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   private steerThrough(
     prompt: AcpSendContentBlock[],
+    kind: 'human' | 'system',
     opts?: { queueOnBusy?: boolean },
   ): Promise<boolean> {
     const sessionId = this.sessionId ?? '';
     const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);
     console.log(`[ACP ${this.options.agentName}] >>> session/prompt (steer into active turn, session=${sessionId}): ${preview}`);
-    const entry: { prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void } = {
+    const entry: { prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' } = {
       prompt,
+      kind,
       resolve: () => {},
     };
     const promise = new Promise<boolean>((resolve) => {
@@ -834,6 +880,10 @@ export class AcpRuntimeManager extends EventEmitter {
       .then(() => done(true))
       .catch((err: unknown) => {
         if (isAgentBusyError(err)) {
+          // The first busy rejection teaches the manager this runtime cannot
+          // steer (kimi ACP ≤0.31.x): later prompts queue directly and the
+          // human-reply backstop switches to its no-steer shape.
+          this.steerUnsupported = true;
           if (opts?.queueOnBusy === false) {
             // Deferral path (mail never stacks turns, WO 11622): no queue, no
             // prompt_queued — the mail waits in the inbox and the catch-up
@@ -844,7 +894,7 @@ export class AcpRuntimeManager extends EventEmitter {
           }
           console.log(`[ACP ${this.options.agentName}] steer unsupported (turn.agent_busy) — queued behind active turn`);
           this.pendingSteers.delete(entry);
-          this.promptQueue.push({ prompt: entry.prompt, resolve: entry.resolve });
+          this.promptQueue.push({ prompt: entry.prompt, resolve: entry.resolve, kind: entry.kind });
           this.emitAcpEvent({
             sessionUpdate: 'prompt_queued',
             sessionId,
@@ -866,11 +916,15 @@ export class AcpRuntimeManager extends EventEmitter {
    * steers deliberately do NOT extend it: a chatty human messaging every few
    * seconds would otherwise push the boundary out forever and the backstop
    * would never fire (observed: 16 rapid human steers, zero cancels). On
-   * expiry the turn is cancelled: the steered messages are already in the
-   * session's context, ending the turn flushes any pending text, and the
-   * front-of-queue nudge then drains as a dedicated reply turn. Mail
-   * (injectMail) deliberately never arms this — mail is background work, the
-   * human is not.
+   * expiry the turn is cancelled and a front-of-queue nudge drains as a
+   * dedicated reply turn. Mail (injectMail) deliberately never arms this —
+   * mail is background work, the human is not.
+   *
+   * The nudge's shape depends on the learned steer capability: on a
+   * steer-capable runtime the human's messages are already in the session's
+   * context (ending the turn flushes any pending text); on a no-steer runtime
+   * they sit in promptQueue, so their text is folded INTO the nudge — see
+   * takeQueuedHumanTexts.
    */
   private armHumanWaitBackstop(): void {
     if (this.humanWaitTimer) return;
@@ -879,10 +933,17 @@ export class AcpRuntimeManager extends EventEmitter {
     this.humanWaitWarnTimer = setTimeout(() => {
       this.humanWaitWarnTimer = null;
       if (!this.promptInFlight || !this.process?.isRunning()) return;
+      if (this.steerUnsupported) {
+        // The warning can only reach the agent as a steer, and this runtime
+        // busy-rejects steers — skip the doomed request (guaranteed rejection
+        // plus adapter stderr spam for zero effect). The grace cancel below
+        // still bounds the human's wait.
+        return;
+      }
       console.warn(
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_WARN_MS}ms inside a busy turn — sending wrap-up warning steer`,
       );
-      void this.steerThrough([{ type: 'text', text: HUMAN_WAIT_WARNING }], { queueOnBusy: false });
+      void this.steerThrough([{ type: 'text', text: HUMAN_WAIT_WARNING }], 'system', { queueOnBusy: false });
     }, HUMAN_REPLY_WARN_MS);
     // Stage 2 (60s): last resort. Cancel, and the nudge tells the agent it was
     // cut off so it can resume after answering.
@@ -895,9 +956,15 @@ export class AcpRuntimeManager extends EventEmitter {
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_GRACE_MS}ms inside a busy turn — cancelling so the human gets a dedicated reply turn`,
       );
       this.process.notify('session/cancel', { sessionId });
+      // On a no-steer runtime the human's messages never reached the agent —
+      // they are waiting in promptQueue. Fold their text into the reply-turn
+      // nudge so the reply turn answers what was actually said, and so the
+      // backlog does not drain one stale message per turn afterwards.
+      const missedTexts = this.takeQueuedHumanTexts();
       this.promptQueue.unshift({
-        prompt: [{ type: 'text', text: HUMAN_WAITING_NUDGE }],
+        prompt: [{ type: 'text', text: buildHumanWaitingNudge(missedTexts) }],
         resolve: () => {},
+        kind: 'system',
       });
     }, HUMAN_REPLY_GRACE_MS);
   }
@@ -913,10 +980,42 @@ export class AcpRuntimeManager extends EventEmitter {
     }
   }
 
+  /**
+   * Remove the text-only human prompts waiting in the queue and return their
+   * text in arrival order, settling their waiters as dispatched — the content
+   * rides inside the reply-turn nudge instead of a turn of its own.
+   * Image-bearing prompts stay queued: an image cannot ride a text nudge, and
+   * a late delivery beats a silently dropped attachment.
+   */
+  private takeQueuedHumanTexts(): string[] {
+    const texts: string[] = [];
+    const kept: typeof this.promptQueue = [];
+    for (const entry of this.promptQueue) {
+      if (entry.kind === 'human' && entry.prompt.every((b) => b.type === 'text')) {
+        const text = entry.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('\n').trim();
+        if (text) texts.push(text.length > 1000 ? `${text.slice(0, 1000)}…` : text);
+        entry.resolve(true);
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length !== this.promptQueue.length) {
+      this.promptQueue = kept;
+      // Keep the renderer's queued indicator honest about the new depth.
+      this.emitAcpEvent({
+        sessionUpdate: 'prompt_dequeued',
+        sessionId: this.sessionId ?? '',
+        queueDepth: this.promptQueue.length,
+      });
+    }
+    return texts;
+  }
+
   private executePrompt(
     prompt: AcpSendContentBlock[],
     resolveDispatched?: (dispatched: boolean) => void,
     isAgentBusyRetry = false,
+    kind: 'human' | 'system' = 'system',
   ): void {
     if (!this.process?.isRunning() || !this.sessionId) {
       const message = 'ACP runtime not initialized';
@@ -1009,7 +1108,7 @@ export class AcpRuntimeManager extends EventEmitter {
             console.warn(
               `[ACP ${this.options.agentName}] turn.agent_busy — re-queueing prompt and re-syncing (session=${sessionId}, rejection ${this.agentBusyRejectionCount}/${MAX_AGENT_BUSY_REJECTIONS})`,
             );
-            this.promptQueue.unshift({ prompt, resolve: resolveDispatched ?? (() => {}) });
+            this.promptQueue.unshift({ prompt, resolve: resolveDispatched ?? (() => {}), kind });
             this.promptInFlight = true;
             // The watchdog consults promptSettledRef each tick and stops when
             // it is set — hand it a live ref or the re-sync ends on the next
@@ -1168,7 +1267,7 @@ export class AcpRuntimeManager extends EventEmitter {
       sessionId: this.sessionId ?? '',
       queueDepth: this.promptQueue.length,
     });
-    this.executePrompt(next.prompt, next.resolve, true);
+    this.executePrompt(next.prompt, next.resolve, true, next.kind);
   }
 
   private drainPromptQueue(): void {
@@ -1187,7 +1286,7 @@ export class AcpRuntimeManager extends EventEmitter {
         sessionId: this.sessionId ?? '',
         queueDepth: this.promptQueue.length,
       });
-      this.executePrompt(next.prompt, next.resolve);
+      this.executePrompt(next.prompt, next.resolve, false, next.kind);
     }
   }
 
@@ -1263,7 +1362,7 @@ export class AcpRuntimeManager extends EventEmitter {
           // and steered prompts must be re-dispatched: the turn they were
           // steered into died with the old process.
           for (const steer of this.pendingSteers) {
-            this.promptQueue.push({ prompt: steer.prompt, resolve: steer.resolve });
+            this.promptQueue.push({ prompt: steer.prompt, resolve: steer.resolve, kind: steer.kind });
           }
           this.pendingSteers.clear();
           console.log(`[ACP ${this.options.agentName}] session resumed; draining ${this.promptQueue.length} queued prompt(s)`);
@@ -1646,13 +1745,33 @@ const HUMAN_WAIT_WARNING =
 
 /**
  * Front-of-queue nudge dispatched after the human-reply backstop cancels a
- * busy turn. The human's steered message is already in the session's context;
- * this opens the dedicated reply turn, TELLS the agent it was cut off (Jon's
- * rule: never let an agent wonder why its turn died), and pins the resume.
+ * busy turn. This opens the dedicated reply turn, TELLS the agent it was cut
+ * off (Jon's rule: never let an agent wonder why its turn died), and pins the
+ * resume.
  */
 const HUMAN_WAITING_NUDGE =
   '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
   'Answer the human’s message now — briefly, in text, no tools — then resume the task from where you were cut off.';
+
+/**
+ * Build the reply-turn nudge. Steer-capable runtime: the human's steered
+ * messages are already in the session's context, the plain nudge suffices.
+ * No-steer runtime (kimi ACP ≤0.31.x): the messages sat in the manager's
+ * queue, so their text must ride inside the nudge — otherwise the agent is
+ * told to answer a message it never received.
+ */
+function buildHumanWaitingNudge(missedTexts: string[]): string {
+  if (missedTexts.length === 0) return HUMAN_WAITING_NUDGE;
+  const single = missedTexts.length === 1;
+  const list = missedTexts.map((t, i) => `${i + 1}. "${t}"`).join('\n');
+  return (
+    '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
+    `While you were busy the human sent ${single ? 'this message' : `these ${missedTexts.length} messages`}; ` +
+    `the runtime could not deliver ${single ? 'it' : 'them'} mid-turn, so here ${single ? 'it is' : 'they are'}:\n` +
+    `${list}\n` +
+    'Answer the human now — briefly, in text, no tools — then resume the task from where you were cut off.'
+  );
+}
 
 /**
  * Detect a turn.agent_busy rejection. AcpProcess flattens JSON-RPC errors to

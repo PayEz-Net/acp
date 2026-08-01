@@ -398,7 +398,7 @@ describe('AcpRuntimeManager', () => {
     );
   });
 
-  it('defers a mail inject instead of queueing when the runtime busy-rejects (mail never stacks, WO 11622)', async () => {
+  it('defers a mail inject mid-turn without ever attempting a steer (mail never interrupts, WO 11622)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-mail-defer' });
     await manager.start();
@@ -411,20 +411,16 @@ describe('AcpRuntimeManager', () => {
     const userPrompt = manager.prompt('hello');
     await Promise.resolve();
 
-    // The runtime busy-rejects the steer: mail DEFERS (no queue, no stacked
-    // turn) — it will be picked up by the catch-up synthesis at idle.
-    mockState.setResponse(
-      'session/prompt',
-      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
-    );
+    // Mail mid-turn defers immediately — no steer attempt, no queue, no
+    // stacked turn (the steer path beheaded the in-flight step, Jon
+    // 2026-08-01). The idle catch-up synthesis re-notifies when the turn
+    // completes.
     const mailPromise = manager.injectMail('you have mail');
-    await Promise.resolve();
-    await Promise.resolve();
-
     await expect(mailPromise).resolves.toBe(false);
+
     const process = getProcess();
-    // Boot + user + the rejected steer attempt — and nothing more, ever.
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    // Boot + user prompt — and nothing more, ever.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
     // After the turn ends, the deferred mail is NOT re-dispatched.
@@ -432,7 +428,7 @@ describe('AcpRuntimeManager', () => {
     deferredResolve({ stopReason: 'end_turn' });
     await userPrompt;
     await new Promise((r) => setImmediate(r));
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
 
     manager.kill();
   });
@@ -443,59 +439,30 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('session/new', { sessionId: 'sess-steer-new' });
     await manager.start();
 
-    // In-flight user turn (never settles) → mail steers through and pends.
+    // In-flight user turn (never settles) → a human prompt steers through and
+    // pends (only human prompts still attempt steers — mail defers upfront).
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('you have mail');
+    const humanPromise = manager.prompt('steered message');
     await Promise.resolve();
 
     // Restart: the resume succeeds, so the pending steer migrates into the
     // queue and drains — it must resolve TRUE via dispatch, never false-settle
-    // from the old process's rejected steer request.
+    // from the old process's orphaned steer request.
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     await manager.restart();
 
-    await expect(mailPromise).resolves.toBe(true);
-    const mailDispatches = getProcess().requests.filter(
+    // Resolves once the migrated entry drains (void — prompt() erases the
+    // dispatched flag); the dispatch assertion below is the real check.
+    await humanPromise;
+    const dispatches = getProcess().requests.filter(
       (r) =>
         r.method === 'session/prompt' &&
-        (r.params as { prompt: Array<{ text: string }> }).prompt[0].text === 'you have mail',
+        (r.params as { prompt: Array<{ text: string }> }).prompt[0].text === 'steered message',
     );
-    expect(mailDispatches.length).toBeGreaterThan(0);
+    expect(dispatches.length).toBeGreaterThan(0);
 
     manager.kill();
-  });
-
-  it('steers mail notices through while a prompt is in flight (slice B)', async () => {
-    mockState.setResponse('initialize', {});
-    mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
-    await manager.start();
-
-    // Hold the first user prompt open so mail arrives mid-turn.
-    let deferredResolve: (value: unknown) => void = () => {};
-    const deferredPromise = new Promise<unknown>((resolve) => {
-      deferredResolve = resolve;
-    });
-    mockState.setResponse('session/prompt', deferredPromise);
-    const userPrompt = manager.prompt('hello');
-    await Promise.resolve();
-
-    // Mail that arrives while the prompt is in flight is STEERED through
-    // immediately — never manager-queued.
-    const mailPromise = manager.injectMail('you have mail');
-    await Promise.resolve();
-
-    const process = getProcess();
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
-
-    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
-    deferredResolve({ stopReason: 'end_turn' });
-    await userPrompt;
-    await expect(mailPromise).resolves.toBe(true);
-
-    const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
-    expect((promptRequests[2].params as any).prompt[0].text).toBe('you have mail');
   });
 
   it('forces a turn boundary when a steered human prompt goes unanswered (human-reply backstop)', async () => {
@@ -643,6 +610,180 @@ describe('AcpRuntimeManager', () => {
 
     const completes = events.filter((e) => e.update.sessionUpdate === 'turn_complete');
     expect(completes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('learns the runtime cannot steer and queues later human prompts directly', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-no-steer' });
+    await manager.start();
+
+    let settleTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+    const first = manager.prompt('first');
+    await Promise.resolve();
+
+    const process = getProcess();
+    // Boot + first user prompt have both been dispatched.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // The runtime busy-rejects the steer (kimi ACP ≤0.31.x): the prompt queues
+    // and the manager LEARNS the runtime cannot steer.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const second = manager.prompt('second');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+    // The next human prompt skips the doomed steer entirely — queued with NO
+    // new session/prompt request (no guaranteed-rejection round-trip, no
+    // adapter stderr spam).
+    const third = manager.prompt('third');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(2);
+
+    // The turn ends: both queued prompts drain in order as their own turns.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    settleTurn({ stopReason: 'end_turn' });
+    await first;
+    await second;
+    await third;
+    const texts = process.requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+    expect(texts).toContain('second');
+    expect(texts).toContain('third');
+
+    manager.kill();
+  });
+
+  it('folds queued human messages into the reply-turn nudge on grace cancel (no-steer runtime)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-fold' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Both human prompts busy-reject / queue directly — they never reach the
+      // agent's context.
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+      );
+      const second = manager.prompt('what we have is a disaster');
+      await vi.advanceTimersByTimeAsync(0);
+      const third = manager.prompt('total shit');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      // Stage 1 at 45s: NO warning steer on a no-steer runtime — it could only
+      // ever be rejected. Requests stay at boot + task + the one rejected steer.
+      await vi.advanceTimersByTimeAsync(45_000);
+      const texts45 = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts45.some((t) => t.includes('Wrap up your current step'))).toBe(false);
+      expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+      // Stage 2 at 60s: cancel, and the queued human text folds INTO the
+      // reply-turn nudge — the agent must see what was actually said.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(process.notifications).toContainEqual({
+        method: 'session/cancel',
+        params: { sessionId: 'sess-fold' },
+      });
+      // Folded messages settle here — their content rides the nudge (prompt()
+      // returns void; the nudge content assertions below are the real check).
+      await second;
+      await third;
+
+      // The cancelled turn settles; the nudge drains carrying both messages.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      const nudge = texts.find((t) => t.includes('MID-TASK'));
+      expect(nudge).toBeDefined();
+      expect(nudge).toContain('what we have is a disaster');
+      expect(nudge).toContain('total shit');
+      expect(nudge).toContain('resume the task from where you were cut off');
+      // ...and the folded messages never drain as stale turns of their own —
+      // the first appears only as its rejected steer attempt, the second
+      // (queued directly) never hits the wire standalone at all.
+      expect(texts.filter((t) => t === 'what we have is a disaster')).toHaveLength(1);
+      expect(texts.filter((t) => t === 'total shit')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
+  it('keeps image-bearing human prompts queued instead of folding them into the nudge', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-fold-img' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+      );
+      const textMsg = manager.prompt('look at this');
+      await vi.advanceTimersByTimeAsync(0);
+      const imgMsg = manager.prompt('what do you see', [{ data: 'aW1n', mimeType: 'image/png' }]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Grace cancel: the text-only message folds; the image prompt cannot ride
+      // a text nudge and stays queued.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await textMsg;
+
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await imgMsg;
+
+      const process = getProcess();
+      const reqs = process.requests.filter((r) => r.method === 'session/prompt');
+      const texts = reqs.map(
+        (r) => (r.params as { prompt: Array<{ type: string; text?: string }> }).prompt[0].text ?? '',
+      );
+      const nudge = texts.find((t) => t.includes('MID-TASK'));
+      expect(nudge).toBeDefined();
+      expect(nudge).toContain('look at this');
+      expect(nudge).not.toContain('what do you see');
+      // The image prompt drains as its own turn afterwards, image block intact.
+      const imgReq = reqs.find(
+        (r) => (r.params as { prompt: Array<{ type: string; text?: string }> }).prompt[0].text === 'what do you see',
+      );
+      expect(imgReq).toBeDefined();
+      expect(
+        (imgReq!.params as { prompt: Array<{ type: string }> }).prompt.some((b) => b.type === 'image'),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
   });
 
   it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
@@ -1493,12 +1634,13 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('in-flight');
     const mailPromise = manager.injectMail('you have mail');
     await vi.advanceTimersByTimeAsync(0);
-    // The mail inject steers through (pendingSteer), not the queue.
+    // The mail inject defers upfront (mail never interrupts) — nothing queued
+    // or pended.
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The steered
-    // mail inject must settle false (not hang) so the renderer's retry /
-    // delivery-failed path can fire.
+    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The deferred
+    // mail inject stays settled false (it must not hang or resurrect) so the
+    // renderer's retry / delivery-failed path can fire.
     await vi.advanceTimersByTimeAsync(320_000);
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -1508,23 +1650,29 @@ describe('AcpRuntimeManager', () => {
     vi.useRealTimers();
   });
 
-  it('settles a queued injectMail as false on intentional kill (WO 11483)', async () => {
+  it('settles a queued human prompt as false on intentional kill (WO 11483)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-mail-kill' });
     await manager.start();
 
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('you have mail');
+    // Busy-reject steers so the human prompt lands in the queue.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const msgPromise = manager.prompt('queued message');
     await Promise.resolve();
-    // Steered through as a pendingSteer, not queued.
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
+    await Promise.resolve();
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
 
-    // An intentional kill has no later drain path — the steered notice must
-    // settle false immediately, not hang.
+    // An intentional kill has no later drain path — the queued prompt must
+    // settle immediately, not hang (prompt() returns void; resolving at all
+    // is the check).
     manager.kill();
 
-    await expect(mailPromise).resolves.toBe(false);
+    await msgPromise;
   });
 
   it('purgeQueue settles every queued prompt as false and returns the count (WO 11572)', async () => {
@@ -1534,19 +1682,28 @@ describe('AcpRuntimeManager', () => {
 
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('mail one');
-    const mailPromise2 = manager.injectMail('mail two');
+    // Human prompts mid-turn: the first busy-rejects into the queue, the
+    // second queues directly (no-steer learned from the first rejection).
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const msgPromise = manager.prompt('msg one');
     await Promise.resolve();
-    // Both steer through as pendingSteers — no prompt_queued events.
-    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(0);
+    await Promise.resolve();
+    const msgPromise2 = manager.prompt('msg two');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(2);
 
     // The human's interrupt purges the backlog: both settle false, the count
     // comes back for the UI flash, and queue_cleared fires for the renderer.
     const dropped = manager.purgeQueue();
 
     expect(dropped).toBe(2);
-    await expect(mailPromise).resolves.toBe(false);
-    await expect(mailPromise2).resolves.toBe(false);
+    // prompt() returns void — resolving at all (not hanging) is the settle check.
+    await msgPromise;
+    await msgPromise2;
     expect(events.some((e) => e.update.sessionUpdate === 'queue_cleared')).toBe(true);
 
     manager.kill();
@@ -1565,7 +1722,7 @@ describe('AcpRuntimeManager', () => {
       await manager.prompt('in-flight');
       const mailPromise = manager.injectMail('you have mail');
       await vi.advanceTimersByTimeAsync(0);
-      // Steered through as a pendingSteer, not queued.
+      // Deferred upfront (mail never interrupts a live turn) — nothing queued.
       expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
       // Every subsequent start attempt fails → each restart re-schedules until

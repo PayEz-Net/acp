@@ -15,7 +15,6 @@ import { resolveAgentProvider, shouldInjectMailToPty } from '../lib/agentProvide
 import {
   buildMailDeliveryFailedText,
   buildMailNoticeText,
-  collectUnreadNotices,
   createMailEventDeduper,
   decideMailDeliveryRoute,
   deliverAcpMailNotice,
@@ -162,10 +161,12 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
       onDelivered: () => renderMailSurfaceLine(agentName, noticeText),
       onFailed: () => {
         console.warn(`[AcpSse] Mail notice delivery failed for ${agentName} after all retries`);
-        // WO 11629: unsee the id so the catch-up synthesis RE-FIRES this
-        // notice at the next reconnect — a deferred mail (old runtime,
-        // busy-reject) must not be lost between 'already seen' and the next
-        // natural delivery window. Both key forms, mirroring synthesis.
+        // WO 11629: unsee the id so a future re-delivery path may RE-FIRE
+        // this notice — a deferred mail (old runtime, busy-reject) must not
+        // get stuck between 'already seen' and a delivery that never landed.
+        // (The catch-up synthesis that used to re-fire these was removed
+        // 2026-08-01; live SSE events remain the only notice source.)
+        // Both key forms, mirroring the live event path.
         markMailEventSeen.unsee(agentName, mailDedupeKey(id, from, subject));
         markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
         // The pane may still be repopulating post-restart — retry briefly so
@@ -188,33 +189,6 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
   renderMailLineWithRetry({
     render: () => renderMailSurfaceLine(agentName, noticeText),
   });
-}
-
-/**
- * WO 11473: recover mail events lost in SSE disconnect/page-reload windows.
- * After a (re)connect's inbox refetch, synthesize delivery notices for every
- * unread the deduper has not seen yet — same routing as a live SSE event, so
- * a notice that would have vanished is delivered. The persisted dedupe set
- * keeps this from re-firing on every reload.
- */
-function synthesizeNoticesForUnreads(): void {
-  if (!useProjectStore.getState().pickerHasStarted) return;
-  // Scoped to the ACTIVE project — mailboxes are composite-keyed pid:agent and
-  // never cleared on switch, so an unscoped sweep would route stale-project
-  // unreads against the current roster (WO 11491 P2).
-  const activeProjectId = useProjectStore.getState().activeProject?.id ?? null;
-  const unreads = collectUnreadNotices(useMailStore.getState().mailboxes, activeProjectId);
-  for (const unread of unreads) {
-    // Mark BOTH key forms before deciding: an id-less live notice for the same
-    // mail was marked `noid:<from>:<subject>`, so checking only the raw id
-    // would double-fire here (WO 11517 minor). Marking both regardless keeps
-    // the two channels' dedupe sets consistent.
-    const idSeen = !markMailEventSeen(unread.agentName, mailDedupeKey(unread.id, unread.from, unread.subject));
-    const noidSeen = !markMailEventSeen(unread.agentName, mailDedupeKey(null, unread.from, unread.subject));
-    if (idSeen || noidSeen) continue;
-    console.log(`[AcpSse] Catch-up notice for ${unread.agentName}: unread id=${unread.id}`);
-    void routeMailNotice(unread.agentName, unread.from, unread.subject, unread.id);
-  }
 }
 
 /**
@@ -302,13 +276,12 @@ export function useAcpSse() {
     };
 
     // #225: full catch-up on reconnect — fetch every configured agent's inbox
-    // so messages missed while disconnected appear immediately, not only on the
-    // next per-event push. Scoped to active project + gated on boot confirm,
-    // same as the per-event path. Returns the store's promise so notice
-    // synthesis (WO 11473) can run once the unread data has actually landed.
-    // Promise.resolve().then wraps it so a non-promise short-return from the
-    // store (cooldown/429-backoff bare `return;` paths) can never throw a
-    // TypeError into the SSE error path (WO 11491 P1).
+    // so messages missed while disconnected appear immediately in the sidebar,
+    // not only on the next per-event push. Scoped to active project + gated on
+    // boot confirm, same as the per-event path. Promise.resolve().then wraps
+    // it so a non-promise short-return from the store (cooldown/429-backoff
+    // bare `return;` paths) can never throw a TypeError into the SSE error
+    // path (WO 11491 P1).
     const catchUp = (): Promise<void> =>
       Promise.resolve().then(() => {
         if (!useProjectStore.getState().pickerHasStarted) return;
@@ -412,17 +385,12 @@ export function useAcpSse() {
 
         console.log('[AcpSse] Connected');
         setConn('connected');
-        // #225 + WO 11473: catch up on anything missed while down — on
-        // RE-connects and on FIRST connect alike (a vite-HMR page reload is a
-        // first connect with a fresh module state, indistinguishable from a
-        // cold load; mail that landed during the reload would otherwise
-        // vanish). The refetch is gated/coalesced store-side; notice synthesis
-        // runs only after unread data landed and is deduped across reloads.
-        void catchUp()
-          .catch(() => {})
-          .then(() => {
-            if (!disposed) synthesizeNoticesForUnreads();
-          });
+        // #225: catch up on anything missed while down — the inbox refetch
+        // feeds the MailSidebar only. The unread→notice synthesis that used to
+        // run here (WO 11473) was removed 2026-08-01 (Jon): it replayed the
+        // backlog as mail turns and buried fresh sessions before they finished
+        // booting; session resume already carries the agent's context.
+        void catchUp().catch(() => {});
         retryCount = 0;
         lastPingRef.current = Date.now(); // treat connect as implicit ping
 
@@ -693,15 +661,12 @@ export function useAcpSse() {
     }
 
     // WO 11473: inbox GETs are gated on the boot picker ([Start]); when it
-    // flips, run the same catch-up + notice synthesis so reload-window mail is
-    // recovered promptly instead of waiting for the next SSE reconnect.
+    // flips, run the catch-up so the sidebar reflects reload-window mail
+    // promptly instead of waiting for the next SSE reconnect. (The notice
+    // synthesis that also ran here was removed — see the Connected site.)
     const unsubPicker = useProjectStore.subscribe((state, prev) => {
       if (state.pickerHasStarted && !prev.pickerHasStarted) {
-        void catchUp()
-          .catch(() => {})
-          .then(() => {
-            if (!disposed) synthesizeNoticesForUnreads();
-          });
+        void catchUp().catch(() => {});
       }
     });
 
