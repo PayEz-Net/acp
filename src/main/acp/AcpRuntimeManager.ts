@@ -173,7 +173,7 @@ export class AcpRuntimeManager extends EventEmitter {
   // prompts are the ones the reply-turn nudge may fold into itself (see
   // takeQueuedHumanTexts); 'system' prompts (nudges, kickoffs) always dispatch
   // as their own turn.
-  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' }> = [];
+  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system'; replyNudge?: boolean }> = [];
   // Prompts sent THROUGH into the active turn (slice B steer passthrough).
   // Tracked (with their prompt) so kill()/dropQueuedPrompts can settle their
   // waiters exactly like queued prompts — and so a resumed restart can
@@ -193,6 +193,10 @@ export class AcpRuntimeManager extends EventEmitter {
   //      answering.
   private humanWaitWarnTimer: ReturnType<typeof setTimeout> | null = null;
   private humanWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  // True while the backstop's own reply-turn nudge is the active turn. The
+  // grace cancel must never fire against it — that turn IS the reply the
+  // human is waiting for (see armHumanWaitBackstop).
+  private replyTurnActive = false;
   // Learned runtime capability. The kimi TUI has two distinct primitives for
   // input during a busy turn — Esc interrupts (cancel), Ctrl+S steers (pushes
   // up into the live turn) — but the ACP wire only has session/prompt, and
@@ -951,6 +955,18 @@ export class AcpRuntimeManager extends EventEmitter {
       this.humanWaitTimer = null;
       // Turn ended in the meantime — the natural turn flow owned the reply.
       if (!this.promptInFlight || !this.process?.isRunning() || !this.sessionId) return;
+      if (this.replyTurnActive) {
+        // The in-flight turn IS the dedicated reply turn carrying the human's
+        // folded messages. Cancelling it only beheads the reply the human is
+        // waiting for and re-arms the same nudge — the chatty-episode loop
+        // (BAPert 2026-08-01: five reply turns cancelled mid-composition in
+        // one episode, zero answers delivered). Newer human messages queue
+        // and drain after this reply; the 300s idle watchdog owns real wedges.
+        console.log(
+          `[ACP ${this.options.agentName}] reply turn already in flight — leaving it alone; newer human prompts drain after it`,
+        );
+        return;
+      }
       const sessionId = this.sessionId;
       console.warn(
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_GRACE_MS}ms inside a busy turn — cancelling so the human gets a dedicated reply turn`,
@@ -965,6 +981,7 @@ export class AcpRuntimeManager extends EventEmitter {
         prompt: [{ type: 'text', text: buildHumanWaitingNudge(missedTexts) }],
         resolve: () => {},
         kind: 'system',
+        replyNudge: true,
       });
     }, HUMAN_REPLY_GRACE_MS);
   }
@@ -1087,6 +1104,7 @@ export class AcpRuntimeManager extends EventEmitter {
         // actually returned when the transcript appears empty.
         console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result ?? null).slice(0, 2000));
         this.promptInFlight = false;
+        this.replyTurnActive = false;
         this.clearHumanWaitBackstop();
         this.drainPromptQueue();
       })
@@ -1277,6 +1295,7 @@ export class AcpRuntimeManager extends EventEmitter {
       sessionId: this.sessionId ?? '',
       queueDepth: this.promptQueue.length,
     });
+    if (next.replyNudge) this.replyTurnActive = true;
     this.executePrompt(next.prompt, next.resolve, true, next.kind);
   }
 
@@ -1296,6 +1315,7 @@ export class AcpRuntimeManager extends EventEmitter {
         sessionId: this.sessionId ?? '',
         queueDepth: this.promptQueue.length,
       });
+      if (next.replyNudge) this.replyTurnActive = true;
       this.executePrompt(next.prompt, next.resolve, false, next.kind);
     }
   }
@@ -1324,6 +1344,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.intentionalKill = true;
     this.stopPromptWatchdog();
     this.clearHumanWaitBackstop();
+    this.replyTurnActive = false;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;

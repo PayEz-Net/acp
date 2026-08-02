@@ -840,6 +840,74 @@ describe('AcpRuntimeManager', () => {
     manager.kill();
   });
 
+  it('never cancels the reply-turn nudge itself — newer messages drain after the reply (BAPert 2026-08-01)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-nosteer-loop' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      // Agent's long turn in flight (settles only when we say so).
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Two human messages busy-reject / queue — backstop armed.
+      mockState.setResponse('session/prompt', new Error('Cannot launch a new turn while another turn (ID 1) is active'));
+      const second = manager.prompt('what we have is a disaster');
+      await vi.advanceTimersByTimeAsync(0);
+      const third = manager.prompt('total shit');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      // Stage 2 at 60s: the FIRST grace cancel fires (designed — it batches
+      // the queued human messages into the reply-turn nudge).
+      await vi.advanceTimersByTimeAsync(60_000);
+      const cancels = () => process.notifications.filter((n) => n.method === 'session/cancel');
+      expect(cancels().length).toBe(1);
+
+      // The cancelled turn settles; the nudge (carrying both messages)
+      // dispatches and becomes the active turn — it stays in flight.
+      let endNudgeTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { endNudgeTurn = resolve; }));
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await second;
+      await third;
+      const texts = () =>
+        process.requests
+          .filter((r) => r.method === 'session/prompt')
+          .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      const nudges = () => texts().filter((t) => t.includes('MID-TASK'));
+      expect(nudges().length).toBe(1);
+
+      // The human speaks again mid-reply: queued, backstop re-armed. The
+      // reply turn runs long (composition + tools), past the 60s deadline.
+      mockState.setResponse('session/prompt', new Error('Cannot launch a new turn while another turn (ID 2) is active'));
+      const fourth = manager.prompt('keep going');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // The grace cancel must NOT fire against the reply turn — that turn IS
+      // the answer the human is waiting for. No second cancel, no second nudge.
+      expect(cancels().length).toBe(1);
+      expect(nudges().length).toBe(1);
+
+      // Natural reply-turn end: the newer message drains as its own turn.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      endNudgeTurn({ stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(0);
+      await fourth;
+      expect(texts().some((t) => t === 'keep going')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-no-stop' });
