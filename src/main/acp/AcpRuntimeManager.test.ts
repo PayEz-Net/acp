@@ -386,7 +386,7 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     const injected = await manager.injectMail('you have mail');
 
-    expect(injected).toBe(true);
+    expect(injected).toBe('delivered');
     expect(getProcess().requests).toContainEqual(
       expect.objectContaining({
         method: 'session/prompt',
@@ -416,7 +416,7 @@ describe('AcpRuntimeManager', () => {
     // 2026-08-01). The idle catch-up synthesis re-notifies when the turn
     // completes.
     const mailPromise = manager.injectMail('you have mail');
-    await expect(mailPromise).resolves.toBe(false);
+    await expect(mailPromise).resolves.toBe('deferred');
 
     const process = getProcess();
     // Boot + user prompt — and nothing more, ever.
@@ -1766,7 +1766,7 @@ describe('AcpRuntimeManager', () => {
     await vi.advanceTimersByTimeAsync(320_000);
     await vi.advanceTimersByTimeAsync(1_000);
 
-    await expect(mailPromise).resolves.toBe(false);
+    await expect(mailPromise).resolves.toBe('deferred');
 
     manager.kill();
     vi.useRealTimers();
@@ -1863,7 +1863,7 @@ describe('AcpRuntimeManager', () => {
         typeof e.update.error === 'string' &&
         e.update.error.includes('keeps failing'),
       )).toBe(true);
-      await expect(mailPromise).resolves.toBe(false);
+      await expect(mailPromise).resolves.toBe('deferred');
     } finally {
       manager.kill();
       vi.useRealTimers();

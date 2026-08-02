@@ -5,6 +5,7 @@ import {
   type AcpAgentInfo,
   type AcpContentBlock,
   type AcpEventPayload,
+  type AcpMailInjectResult,
   type AcpPermissionOption,
   type AcpPromptImage,
   type AcpSendContentBlock,
@@ -760,13 +761,15 @@ export class AcpRuntimeManager extends EventEmitter {
    * context); if the runtime can't steer (old adapter, busy-reject), the mail
    * DEFERS — it waits in the inbox and the renderer's catch-up synthesis
    * re-notifies at the next idle/connect. It is never queued behind the turn.
-   * Resolves true on delivery, false on defer/failure (the renderer's
-   * retry/failure path settles either way, WO 11462).
+   * Returns a tri-state (Jon 2026-08-01): 'delivered' / 'deferred' (parked by
+   * design — NOT a failure) / 'failed' (runtime genuinely unreachable), so
+   * the renderer can say the true thing in the pane instead of crying
+   * "Delivery failed" for a routine defer.
    */
-  async injectMail(text: string): Promise<boolean> {
+  async injectMail(text: string): Promise<AcpMailInjectResult> {
     if (!this.process?.isRunning() || !this.sessionId) {
       console.warn(`[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized`);
-      return false;
+      return 'failed';
     }
 
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
@@ -779,10 +782,10 @@ export class AcpRuntimeManager extends EventEmitter {
       // durable in the inbox; defer it. The idle catch-up synthesis
       // re-notifies when the turn completes.
       console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; idle catch-up will deliver`);
-      return false;
+      return 'deferred';
     }
     this.executePrompt(prompt);
-    return true;
+    return 'delivered';
   }
 
   /**

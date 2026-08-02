@@ -1457,7 +1457,7 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
     const runtime = getAcpRuntimeByAgent(payload.agent);
     if (!runtime) {
       console.warn(`[ACP] inject-mail for unknown agent: ${payload.agent}`);
-      return false;
+      return 'failed';
     }
     console.log(`[ACP main] mail notice received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
     return runtime.injectMail(payload.text);

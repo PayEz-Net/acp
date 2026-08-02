@@ -107,6 +107,7 @@ type AgentSessionStartFailedPayload = { agentName: string; terminalId: string; s
 // ACP transport type aliases (mirrors ../shared/acpTypes).
 type AcpPromptPayload = { agent: string; sessionId: string; text: string; images?: { data: string; mimeType: string; name?: string }[] };
 type AcpInjectMailPayload = { agent: string; sessionId: string; text: string };
+type AcpMailInjectResult = 'delivered' | 'deferred' | 'failed';
 type AcpCancelPayload = { agent: string; sessionId: string };
 type AcpPurgeQueuePayload = { agent: string };
 type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
@@ -369,7 +370,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_PROMPT, payload);
   },
 
-  injectAcpMail: (payload: AcpInjectMailPayload): Promise<boolean> => {
+  injectAcpMail: (payload: AcpInjectMailPayload): Promise<AcpMailInjectResult> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_INJECT_MAIL, payload);
   },
 
@@ -598,7 +599,7 @@ declare global {
       triggerPaste: () => Promise<void>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
-      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
+      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<AcpMailInjectResult>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       purgeAcpQueue: (payload: AcpPurgeQueuePayload) => Promise<number>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;

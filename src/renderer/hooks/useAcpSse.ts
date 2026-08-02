@@ -14,6 +14,7 @@ import { useAcpSessionStore } from '../stores/acpSessionStore';
 import { resolveAgentProvider, shouldInjectMailToPty } from '../lib/agentProviders';
 import {
   buildMailDeliveryFailedText,
+  buildMailDeliveryDeferredText,
   buildMailNoticeText,
   createMailEventDeduper,
   decideMailDeliveryRoute,
@@ -159,6 +160,18 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
       inject: (sessionId, text) =>
         window.electronAPI.injectAcpMail({ agent: agentName, sessionId, text }),
       onDelivered: () => renderMailSurfaceLine(agentName, noticeText),
+      onDeferred: () => {
+        // Mid-turn defer (WO 11622): the push was skipped BY DESIGN — the
+        // pane line must say that, not cry failure. Unsee the id so a future
+        // re-delivery path may re-fire the notice (WO 11629).
+        console.log(`[AcpSse] Mail notice deferred for ${agentName} (mid-turn; mail waits in inbox)`);
+        markMailEventSeen.unsee(agentName, mailDedupeKey(id, from, subject));
+        markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
+        const deferredText = buildMailDeliveryDeferredText(agentName, id, from, subject);
+        renderMailLineWithRetry({
+          render: () => renderMailSurfaceLine(agentName, deferredText),
+        });
+      },
       onFailed: () => {
         console.warn(`[AcpSse] Mail notice delivery failed for ${agentName} after all retries`);
         // WO 11629: unsee the id so a future re-delivery path may RE-FIRE
@@ -171,7 +184,7 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
         markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
         // The pane may still be repopulating post-restart — retry briefly so
         // the failure is visible there, not just in the console (WO 11462 #3).
-        const failureText = buildMailDeliveryFailedText(agentName);
+        const failureText = buildMailDeliveryFailedText(agentName, id, from, subject);
         renderMailLineWithRetry({
           render: () => renderMailSurfaceLine(agentName, failureText),
         });

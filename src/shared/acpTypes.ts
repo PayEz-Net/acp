@@ -143,6 +143,17 @@ export interface AcpInjectMailPayload {
   text: string;
 }
 
+/**
+ * Tri-state result of a mail notice inject (WO 11622 follow-up, Jon
+ * 2026-08-01): 'delivered' — the runtime accepted the notice; 'deferred' —
+ * the agent is mid-turn and the push was deliberately skipped (mail parks
+ * in the inbox, NOT a failure); 'failed' — the notice genuinely could not
+ * be delivered (runtime down/unknown agent). The renderer must be able to
+ * tell defer from failure: a boolean false collapsed both and printed
+ * "Delivery failed" for routine mid-turn defers.
+ */
+export type AcpMailInjectResult = 'delivered' | 'deferred' | 'failed';
+
 export interface AcpCancelPayload {
   agent: string;
   sessionId: string;

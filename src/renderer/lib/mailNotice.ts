@@ -9,6 +9,7 @@
  *    not actually receive. Delivery is retried across the post-restart window
  *    when the agent store is still repopulating.
  */
+import type { AcpMailInjectResult } from '@shared/acpTypes';
 
 /** API base the renderer talks to (matches the SSE stream URL in useAcpSse). */
 const ACP_API_BASE = 'http://127.0.0.1:3001';
@@ -42,10 +43,41 @@ export function buildMailNoticeText(
   );
 }
 
-export function buildMailDeliveryFailedText(agentName: string): string {
+/**
+ * Genuine failure: the agent's runtime is down/unreachable. The mail itself
+ * is NOT lost — it sits in the inbox — so say exactly that, with the id so a
+ * human can point at it (Jon 2026-08-01: "Delivery failed" that doesn't name
+ * the mail and then admits it's waiting in the inbox is just bad communication).
+ */
+export function buildMailDeliveryFailedText(
+  agentName: string,
+  id: string | number,
+  from: string,
+  subject: string,
+): string {
   return (
-    `[ACP Mail] Delivery failed — agent not reachable. The mail is waiting in ` +
-    `${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true — check it manually or resend once the agent is back.`
+    `[ACP Mail] Delivery failed — agent not reachable. Message ${id} from ${from} ` +
+    `("${subject}") is safe in ${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true ` +
+    `— resend or check it once the agent is back.`
+  );
+}
+
+/**
+ * Intentional defer (WO 11622): the agent is mid-turn and the push was
+ * skipped BY DESIGN so the live step is never interrupted. Not a failure —
+ * the pane line must say the true thing: skipped for now, where it waits,
+ * and that it re-surfaces at the next idle catch-up.
+ */
+export function buildMailDeliveryDeferredText(
+  agentName: string,
+  id: string | number,
+  from: string,
+  subject: string,
+): string {
+  return (
+    `[ACP Mail] Delivery deferred — agent is mid-turn, push skipped to avoid interrupting it. ` +
+    `Message ${id} from ${from} ("${subject}") is waiting in ` +
+    `${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true and re-surfaces at the next idle catch-up.`
   );
 }
 
@@ -60,9 +92,11 @@ export interface AcpMailSurface {
 export interface DeliverAcpMailNoticeDeps {
   /** Re-resolved before every attempt so post-restart repopulation is picked up. */
   getSurface: () => AcpMailSurface;
-  /** The actual ACP inject-mail call; resolves true when the runtime accepted the notice. */
-  inject: (sessionId: string, text: string) => Promise<boolean>;
+  /** The actual ACP inject-mail call; resolves the tri-state outcome. */
+  inject: (sessionId: string, text: string) => Promise<AcpMailInjectResult>;
   onDelivered: () => void;
+  /** The agent is mid-turn — the push was skipped BY DESIGN (not a failure). */
+  onDeferred: () => void;
   onFailed: () => void;
   /** Injectable for tests. */
   delaysMs?: number[];
@@ -245,8 +279,11 @@ export function renderMailLineWithRetry({
  * Deliver a mail notice to an ACP agent with bounded retry. A one-shot skip
  * loses mail that arrives in the first seconds after an app restart (no
  * terminalId/sessionId yet); retries bridge that window. onDelivered fires
- * only when the runtime accepted the notice; onFailed fires after the last
- * attempt so the pane can show a visible failure instead of a fake notice.
+ * only when the runtime accepted the notice; onDeferred fires as soon as the
+ * runtime reports a deliberate mid-turn defer (no retry — the turn will not
+ * end inside the retry budget, and the defer is a final, designed outcome);
+ * onFailed fires after the last attempt so the pane can show a visible
+ * failure instead of a fake notice.
  */
 export async function deliverAcpMailNotice(
   text: string,
@@ -258,14 +295,18 @@ export async function deliverAcpMailNotice(
     await sleep(delayMs);
     const surface = deps.getSurface();
     if (!surface.terminalId || !surface.sessionId) continue;
-    let injected = false;
+    let result: AcpMailInjectResult = 'failed';
     try {
-      injected = await deps.inject(surface.sessionId, text);
+      result = await deps.inject(surface.sessionId, text);
     } catch {
-      injected = false;
+      result = 'failed';
     }
-    if (injected) {
+    if (result === 'delivered') {
       deps.onDelivered();
+      return;
+    }
+    if (result === 'deferred') {
+      deps.onDeferred();
       return;
     }
   }
