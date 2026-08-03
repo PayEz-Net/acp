@@ -92,7 +92,11 @@ describe('ClaudeStreamJsonProcess', () => {
     const proc = makeProc();
     await expect(proc.request('initialize', { protocolVersion: 1 })).resolves.toEqual({
       agentCapabilities: {
-        loadSession: true,
+        // false on purpose: claude session RESTORE is not supported yet, so the
+        // adapter must not advertise it (see the fresh-session-only change in
+        // ClaudeStreamJsonProcess + AcpRuntimeManager). Flip this back to true
+        // in the same commit that re-enables resume, never on its own.
+        loadSession: false,
         promptCapabilities: { image: true, embeddedContext: true },
       },
       agentInfo: { name: 'Claude Code' },
