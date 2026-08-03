@@ -550,9 +550,14 @@ export class AcpRuntimeManager extends EventEmitter {
       // (KIMI_MODEL_THINKING_EFFORT / effort_override, below) — claude
       // settings are not translated into kimi settings.
       const effort = this.options.effort;
-      // Per-agent claude model override rides Claude Code's own `--model`
-      // (validated loud in claudeModelArgs); kimi's -m alias path is separate.
-      const modelArgs = claudeModelArgs(this.options.modelOverride);
+      // Per-agent claude model override rides Claude Code's own `--model`. A
+      // stale/cross-runtime id (e.g. a kimi 'k3' on a now-claude placement) is
+      // ignored → default model, matching the retired TUI path; only a real
+      // claude model is passed. kimi's -m alias path is separate.
+      const modelArgs = claudeModelArgs(
+        this.options.modelOverride,
+        (m) => console.warn(`[ACP ${this.options.agentName}] ${m}`),
+      );
       args = [...args, ...(effort ? ['--effort', effort] : []), ...modelArgs, '--session-id', randomUUID()];
     }
     const spawnEnv: Record<string, string> = {

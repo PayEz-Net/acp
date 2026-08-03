@@ -23,25 +23,23 @@ describe('claudeModelArgs', () => {
     expect(claudeModelArgs('haiku')).toEqual(['--model', 'haiku']);
   });
 
-  it('throws loud on an unknown/typo model rather than spawning a fallback', () => {
-    expect(() => claudeModelArgs('haiku-typo')).toThrow(ModelNotRecognizedError);
-    expect(() => claudeModelArgs('opus-4-8')).toThrow(ModelNotRecognizedError);
+  it('ignores an unrecognized/typo model (spawns default) instead of failing the spawn', () => {
+    expect(claudeModelArgs('haiku-typo')).toEqual([]);
+    expect(claudeModelArgs('opus-4-8')).toEqual([]);
   });
 
-  it('rejects a kimi model on the claude path (cross-runtime mismatch)', () => {
-    // A leftover kimi id must not silently pass through to claude.
-    expect(() => claudeModelArgs('k3')).toThrow(ModelNotRecognizedError);
+  it('ignores a stale kimi id on the claude path (cross-runtime mismatch), matching the TUI path', () => {
+    // A kimi placement flipped to claude keeps its old model_override; base
+    // IGNORES it and spawns default rather than taking the agent down.
+    expect(claudeModelArgs('k3')).toEqual([]);
+    expect(claudeModelArgs('kimi-for-coding-highspeed')).toEqual([]);
   });
 
-  it('names the claude provider and the known set in the error', () => {
-    try {
-      claudeModelArgs('nope');
-      throw new Error('expected claudeModelArgs to throw');
-    } catch (e) {
-      expect(e).toBeInstanceOf(ModelNotRecognizedError);
-      expect((e as Error).message).toContain('claude');
-      expect((e as Error).message).toContain('haiku');
-    }
+  it('warns (does not throw) when it ignores a non-claude model', () => {
+    let warned = '';
+    expect(claudeModelArgs('k3', (m) => { warned = m; })).toEqual([]);
+    expect(warned).toContain('k3');
+    expect(warned).toContain('haiku');
   });
 });
 

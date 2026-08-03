@@ -72,15 +72,25 @@ export function kimiSpawnArgs(baseArgs: string[], modelOverride?: string | null)
 export const CLAUDE_MODELS: ReadonlySet<string> = new Set(['haiku', 'sonnet', 'opus', 'fable']);
 
 /**
- * Model-aware claude spawn args. No override → [] (default model). With an
- * override → `--model <alias>`, validated loud exactly like kimi's `-m`: an
- * unknown id stops the spawn (ModelNotRecognizedError) rather than silently
- * launching the wrong model.
+ * Model-aware claude spawn args. No override → [] (default model). A recognized
+ * claude model → `--model <alias>`. Anything else — a stale/cross-runtime id
+ * like a kimi 'k3' left on a placement that now resolves to claude — is IGNORED
+ * and the agent spawns the default model, matching the retired TUI path (which
+ * logged "IGNORING model_override … that is a kimi model id"). A mismatched
+ * override is stale data, NOT a reason to fail the spawn. (kimi's own -m path
+ * still fails loud on unknown kimi ids — there it is a real config error.)
  */
-export function claudeModelArgs(modelOverride?: string | null): string[] {
+export function claudeModelArgs(
+  modelOverride: string | null | undefined,
+  onWarn?: (message: string) => void,
+): string[] {
   if (!modelOverride) return [];
   if (!CLAUDE_MODELS.has(modelOverride)) {
-    throw new ModelNotRecognizedError(modelOverride, [...CLAUDE_MODELS], 'claude');
+    onWarn?.(
+      `ignoring model_override '${modelOverride}' — not a claude model ` +
+      `(${[...CLAUDE_MODELS].join(', ')}); spawning the default model`,
+    );
+    return [];
   }
   return ['--model', modelOverride];
 }
