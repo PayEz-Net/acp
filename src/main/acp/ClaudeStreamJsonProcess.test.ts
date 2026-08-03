@@ -96,7 +96,7 @@ describe('ClaudeStreamJsonProcess', () => {
         // adapter must not advertise it (see the fresh-session-only change in
         // ClaudeStreamJsonProcess + AcpRuntimeManager). Flip this back to true
         // in the same commit that re-enables resume, never on its own.
-        loadSession: false,
+        loadSession: true,
         promptCapabilities: { image: true, embeddedContext: true },
       },
       agentInfo: { name: 'Claude Code' },

@@ -190,7 +190,9 @@ export class ClaudeStreamJsonProcess extends EventEmitter {
           // together, only once restore actually works.
           resolve({
             agentCapabilities: {
-              loadSession: false,
+              // EXPERIMENT 2026-08-03 (uncommitted): true again, paired with
+              // --resume injection in the manager. See the rationale there.
+              loadSession: true,
               promptCapabilities: { image: true, embeddedContext: true },
             },
             agentInfo: { name: 'Claude Code' },

@@ -423,12 +423,70 @@ describe('AcpRuntimeManager', () => {
     expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // After the turn ends, the deferred mail is NOT re-dispatched.
+    // After the turn ends the deferred mail IS re-offered — once, as a single
+    // summary (2026-08-03). This assertion previously demanded the opposite
+    // ("NOT re-dispatched"), which is why the drop survived review: the defer
+    // branch has promised "idle catch-up will deliver" since WO 11622, but the
+    // synthesis it pointed at was deleted with the WO 11473 backlog replay on
+    // 2026-08-01 — one implementation, two callers, only one considered. Every
+    // deferral since was a silent permanent drop behind a reassuring log line
+    // (measured: 10 of 30 notices in one standup round, concentrated on the
+    // busiest agents, because being mid-turn is the trigger).
+    //
+    // This is NOT a revival of the backlog replay. That swept the inbox and
+    // injected one turn per unread, on connect and on boot — unbounded, ~50
+    // turns in the hole before an agent finished booting. This is in-memory,
+    // this-process-only, ONE turn of subjects regardless of count, fired only
+    // when the prompt queue is empty. Never on connect, never on boot.
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     deferredResolve({ stopReason: 'end_turn' });
     await userPrompt;
     await new Promise((r) => setImmediate(r));
+
+    const prompts = process.requests.filter((r) => r.method === 'session/prompt');
+    expect(prompts.length).toBe(3);
+    const summary = JSON.stringify(prompts[2]?.params ?? {});
+    expect(summary).toContain('arrived while you were mid-turn');
+    expect(summary).toContain('you have mail');
+
+    manager.kill();
+  });
+
+  it('summarises deferred mail once and then forgets it — no loop, no second offer', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-once' });
+    await manager.start();
+
+    let releaseTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((r) => { releaseTurn = r; }));
+    const userPrompt = manager.prompt('working');
+    await Promise.resolve();
+
+    // Two mails land mid-turn; both defer, neither interrupts.
+    await expect(manager.injectMail('first mail')).resolves.toBe('deferred');
+    await expect(manager.injectMail('second mail')).resolves.toBe('deferred');
+
+    const process = getProcess();
     expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // Turn ends: ONE summary covering BOTH — cost is one turn, not one per message.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    releaseTurn({ stopReason: 'end_turn' });
+    await userPrompt;
+    await new Promise((r) => setImmediate(r));
+
+    const afterFirstIdle = process.requests.filter((r) => r.method === 'session/prompt');
+    expect(afterFirstIdle.length).toBe(3);
+    const summary = JSON.stringify(afterFirstIdle[2]?.params ?? {});
+    expect(summary).toContain('2 message(s)');
+    expect(summary).toContain('first mail');
+    expect(summary).toContain('second mail');
+
+    // The summary is itself a turn; its completion re-enters the drain. The
+    // queue must now be empty and stay empty — clearing before dispatch is what
+    // prevents the offer from re-firing forever.
+    await new Promise((r) => setImmediate(r));
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
 
     manager.kill();
   });

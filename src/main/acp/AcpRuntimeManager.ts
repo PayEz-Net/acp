@@ -196,6 +196,12 @@ export class AcpRuntimeManager extends EventEmitter {
   // re-dispatch them (the turn they rode died with the old process).
   private pendingSteers = new Set<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' }>();
   private promptInFlight = false;
+  // Mail that arrived while a turn was live, awaiting a single summary offer
+  // when this agent next goes idle. See offerDeferredMail() for why this is
+  // NOT the WO 11473 backlog synthesis that was deleted 2026-08-01.
+  private deferredMailHeaders: string[] = [];
+  private deferredMailOverflow = 0;
+  private readonly MAX_DEFERRED_MAIL_LINES = 5;
   // Human-reply backstop (NGTMI: "the team lead ignores me"). A human prompt
   // mid-turn STEERS in to influence the live task — but text only posts at
   // turn end, so a perpetually-busy agent (mail storms, long tool chains)
@@ -558,7 +564,21 @@ export class AcpRuntimeManager extends EventEmitter {
         this.options.modelOverride,
         (m) => console.warn(`[ACP ${this.options.agentName}] ${m}`),
       );
-      args = [...args, ...(effort ? ['--effort', effort] : []), ...modelArgs, '--session-id', randomUUID()];
+      // Resume RE-ENABLED for claude (2026-08-03). Cancel on this path is a
+      // process kill — `-p` has no cancel verb — so under fresh-session-only
+      // every brake was a lobotomy: Esc AND the 60s human-wait backstop each
+      // cost the agent its entire context plus a re-onboarding turn. A
+      // keystroke must never restart a session; that is what the button is
+      // for. Kill+resume means you lose the TURN and keep the AGENT.
+      // Verified live: cancel and full app restart both come back on the same
+      // session id with no new session minted.
+      const willResume = !this.skipResumeOnce && !!this.lastSessionId;
+      args = [
+        ...args,
+        ...(effort ? ['--effort', effort] : []),
+        ...modelArgs,
+        ...(willResume ? ['--resume', this.lastSessionId!] : ['--session-id', randomUUID()]),
+      ];
     }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /
@@ -760,7 +780,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // Claude is EXCLUDED: its restore isn't supported yet, so a persisted id
     // would be dead weight in acpSessionIds (never read — claude always spawns
     // fresh). Persist claude here too once restore works.
-    if (this.sessionId && this.provider.id !== 'claude') this.persistSessionId(this.sessionId);
+    // EXPERIMENT 2026-08-03 (uncommitted): claude re-included — a persisted id
+    // is what --resume reads on the next spawn. Without it every restart is a
+    // fresh session and cancel destroys the agent rather than the turn.
+    if (this.sessionId) this.persistSessionId(this.sessionId);
     this.resumedLastStart = resumed;
     this.initialized = true;
     this.capabilities = agentCaps;
@@ -913,7 +936,11 @@ export class AcpRuntimeManager extends EventEmitter {
       // step died, and restarting the sessions did not cure it). Mail is
       // durable in the inbox; defer it. The idle catch-up synthesis
       // re-notifies when the turn completes.
-      console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; idle catch-up will deliver`);
+      this.rememberDeferredMail(text);
+      console.log(
+        `[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; will be summarised at idle ` +
+          `(${this.deferredMailHeaders.length + this.deferredMailOverflow} waiting)`,
+      );
       return 'deferred';
     }
     this.executePrompt(prompt);
@@ -1468,7 +1495,66 @@ export class AcpRuntimeManager extends EventEmitter {
       });
       if (next.replyNudge) this.replyTurnActive = true;
       this.executePrompt(next.prompt, next.resolve, false, next.kind);
+      return;
     }
+    // Queue empty = the agent is genuinely idle. This is the ONLY moment mail
+    // that deferred mid-turn gets re-offered.
+    this.offerDeferredMail();
+  }
+
+  /** Remember a deferred notice's header line (from/subject/id) for the idle summary. */
+  private rememberDeferredMail(text: string): void {
+    const header = (text.split('\n', 1)[0] ?? text).slice(0, 200).trim();
+    if (this.deferredMailHeaders.length < this.MAX_DEFERRED_MAIL_LINES) {
+      this.deferredMailHeaders.push(header);
+    } else {
+      this.deferredMailOverflow += 1;
+    }
+  }
+
+  /**
+   * Offer mail that deferred during a live turn, ONCE, as a single summary.
+   *
+   * WHY THIS IS NOT THE THING THAT WAS DELETED (WO 11473, removed 2026-08-01):
+   * that synthesis swept the INBOX and injected one turn per unread, on connect
+   * and on boot — unbounded in the backlog, so a busy mailbox put an agent ~50
+   * turns in the hole before it finished booting (and burned the kimi budget
+   * doing it). This is the opposite on every axis that mattered:
+   *
+   *   - source: only what deferred in THIS process, held in memory. Never the
+   *     inbox, never persisted, gone on restart.
+   *   - cost: ONE turn regardless of how many messages — subjects only, no
+   *     bodies. The agent triages and fetches what it actually needs.
+   *   - trigger: agent-idle (prompt queue empty), never connect/reconnect/boot.
+   *   - lifetime: offered once, then forgotten. The inbox remains the record.
+   *
+   * The defer branch has promised "idle catch-up will deliver" since WO 11622,
+   * but the mechanism it pointed at was the one deleted above — the two shared
+   * an implementation and only one caller was considered. Every deferral since
+   * has been a silent permanent drop with a reassuring log line: measured at
+   * 10 of 30 notices (33%) in one standup round, concentrated on the busiest
+   * agents, because being mid-turn is the trigger.
+   */
+  private offerDeferredMail(): void {
+    if (!this.deferredMailHeaders.length) return;
+    const headers = this.deferredMailHeaders;
+    const overflow = this.deferredMailOverflow;
+    const total = headers.length + overflow;
+    // Clear BEFORE dispatching: the summary is itself a turn, whose completion
+    // re-enters drainPromptQueue. Clearing first is what stops it looping.
+    this.deferredMailHeaders = [];
+    this.deferredMailOverflow = 0;
+
+    const lines = headers.map((h) => `  • ${h}`).join('\n');
+    const more = overflow > 0 ? `\n  …and ${overflow} more waiting in your inbox.` : '';
+    const text =
+      `[ACP Mail] ${total} message(s) arrived while you were mid-turn:\n${lines}${more}\n\n` +
+      `These were NOT injected at the time — mail never interrupts a live turn. ` +
+      `Read the ones that matter, do not assume you have seen the full thread: ` +
+      `curl -s "http://127.0.0.1:3001/v1/mail/messages/<id>" -H "X-ACP-Agent: ${this.options.agentName}"`;
+
+    console.log(`[ACP ${this.options.agentName}] offering ${total} deferred mail notice(s) at idle`);
+    this.executePrompt([{ type: 'text', text }], undefined, false, 'system');
   }
 
   cancel(): void {
