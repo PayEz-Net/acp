@@ -19,6 +19,7 @@ import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { ClaudeStreamJsonProcess } from './ClaudeStreamJsonProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import {
+  claudeModelArgs,
   getProviderConfig,
   kimiK3ThinkingEffortEnv,
   kimiSpawnArgs,
@@ -549,7 +550,10 @@ export class AcpRuntimeManager extends EventEmitter {
       // (KIMI_MODEL_THINKING_EFFORT / effort_override, below) — claude
       // settings are not translated into kimi settings.
       const effort = this.options.effort;
-      args = [...args, ...(effort ? ['--effort', effort] : []), '--session-id', randomUUID()];
+      // Per-agent claude model override rides Claude Code's own `--model`
+      // (validated loud in claudeModelArgs); kimi's -m alias path is separate.
+      const modelArgs = claudeModelArgs(this.options.modelOverride);
+      args = [...args, ...(effort ? ['--effort', effort] : []), ...modelArgs, '--session-id', randomUUID()];
     }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /

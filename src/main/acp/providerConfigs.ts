@@ -23,10 +23,14 @@ export const KIMI_MODEL_ALIASES: Readonly<Record<string, string>> = {
  * instead of ever launching the wrong model.
  */
 export class ModelNotRecognizedError extends Error {
-  constructor(public readonly modelId: string) {
+  constructor(
+    public readonly modelId: string,
+    known: string[] = Object.keys(KIMI_MODEL_ALIASES),
+    provider = 'kimi',
+  ) {
     super(
-      `Cannot spawn: '${modelId}' is not a recognized kimi model ` +
-      `(known: ${Object.keys(KIMI_MODEL_ALIASES).join(', ')}). ` +
+      `Cannot spawn: '${modelId}' is not a recognized ${provider} model ` +
+      `(known: ${known.join(', ')}). ` +
       `Refusing to spawn with a silent model fallback.`,
     );
     this.name = 'ModelNotRecognizedError';
@@ -56,6 +60,29 @@ export function kimiSpawnArgs(baseArgs: string[], modelOverride?: string | null)
     args.push('-m', alias);
   }
   return args;
+}
+
+/**
+ * Claude models the per-agent picker offers, passed verbatim to Claude Code's
+ * `--model`. These are Claude Code's tier aliases — it resolves each to the
+ * latest model of that tier — so the set is version-proof (no dated ids to
+ * churn). `haiku` is the fast/cheap tier (a background agent like NextPert),
+ * `opus` the heavyweight; an absent override inherits Claude Code's default.
+ */
+export const CLAUDE_MODELS: ReadonlySet<string> = new Set(['haiku', 'sonnet', 'opus']);
+
+/**
+ * Model-aware claude spawn args. No override → [] (default model). With an
+ * override → `--model <alias>`, validated loud exactly like kimi's `-m`: an
+ * unknown id stops the spawn (ModelNotRecognizedError) rather than silently
+ * launching the wrong model.
+ */
+export function claudeModelArgs(modelOverride?: string | null): string[] {
+  if (!modelOverride) return [];
+  if (!CLAUDE_MODELS.has(modelOverride)) {
+    throw new ModelNotRecognizedError(modelOverride, [...CLAUDE_MODELS], 'claude');
+  }
+  return ['--model', modelOverride];
 }
 
 /** k3 thinking efforts (reasoning_effort low/high/max per the model docs). */
