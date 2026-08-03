@@ -1,5 +1,6 @@
 import type { Config } from '../../config.js';
 import { ensureValidToken } from '../auth/tokenManager.js';
+import { getStartedProjectId } from '../projects/startedProject.js';
 import * as signalR from '@microsoft/signalr';
 
 export type AgentSseState = 'connected' | 'reconnecting' | 'failed' | 'stopped';
@@ -217,6 +218,31 @@ export class UpstreamSignalRManager {
 
   private handleNotification(notification: Record<string, unknown>): void {
     const data = notification.data as Record<string, unknown> | undefined;
+
+    // PROJECT GATE — the same authority every mail READ is stamped with.
+    //
+    // The hub routes on agent_{clientId}_{agentId} and agents are global /
+    // cross-tenant, so a name match alone delivers this rig every project's
+    // mail for an agent it happens to share a name with. Reads are scoped
+    // (requireStartedProjectId), so those notices then 404 on read:
+    // "Message not found for the specified project". The agent is told it has
+    // mail that does not exist for it — and once that content is in its
+    // context it cannot be taken back out.
+    //
+    // `project_id` is absent on servers older than the 2026-08-03 payload fix,
+    // so an undefined id is passed through rather than dropped: filtering on a
+    // field the server never sends would silence mail entirely. Once every
+    // deployed hub stamps it, this guard can require the field instead.
+    const notifiedProject = data?.project_id as number | undefined;
+    const startedProject = getStartedProjectId();
+    if (notifiedProject != null && startedProject != null && notifiedProject !== startedProject) {
+      console.warn(
+        `[SignalR] Dropping notification for project ${notifiedProject}: this rig is engaged on ${startedProject}.`,
+        { event_type: notification.event_type, message_id: data?.message_id, to_agent: data?.to_agent },
+      );
+      return;
+    }
+
     const toAgent = data?.to_agent as string | undefined;
     const fromAgent = data?.from_agent as string | undefined;
 
