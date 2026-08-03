@@ -182,13 +182,15 @@ export class ClaudeStreamJsonProcess extends EventEmitter {
       switch (method) {
         case 'initialize': {
           // Claude's own capabilities, stated up front rather than negotiated:
-          // the wire has no initialize handshake. `loadSession: true` tells the
-          // manager resume is available — the RESUME ITSELF happens at spawn
-          // time via `--resume`, so the manager must spawn with the args that
-          // match the session it intends to resume (see session/resume below).
+          // the wire has no initialize handshake. `loadSession: false` — Claude
+          // session RESTORE is not supported yet, so the manager must NEVER
+          // attempt session/resume on the claude path. Every boot is a fresh
+          // session (the manager injects a fresh --session-id, never --resume).
+          // Re-enable (loadSession:true here + --resume injection in the manager)
+          // together, only once restore actually works.
           resolve({
             agentCapabilities: {
-              loadSession: true,
+              loadSession: false,
               promptCapabilities: { image: true, embeddedContext: true },
             },
             agentInfo: { name: 'Claude Code' },

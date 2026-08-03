@@ -528,13 +528,16 @@ export class AcpRuntimeManager extends EventEmitter {
     // always advertises loadSession, so the agentCaps half of that test is
     // constant-true for claude.
     if (this.provider.id === 'claude') {
-      const willResume = !this.skipResumeOnce && !!this.lastSessionId;
-      // Per-agent effort. The retired TUI path applied this via resolveClaudeEffort;
-      // precedence here is per-agent override -> 'high'. The global
-      // settings.claudeEffort middle tier is NOT threaded into the manager — add it
-      // here (through the spawn options) if that tier is ever needed.
+      // Claude session RESTORE is not supported yet, so every claude boot is a
+      // FRESH session by construction: always --session-id, NEVER --resume (even
+      // on a watchdog restart where lastSessionId is in memory). Paired with
+      // loadSession:false in the adapter; re-enable resume in both places
+      // together once restore works.
+      // Per-agent effort (the retired TUI path applied this via resolveClaudeEffort);
+      // precedence override -> 'high'. Global settings.claudeEffort middle tier is
+      // not threaded into the manager — add it via the spawn options if needed.
       const effort = this.options.effort ?? 'high';
-      args = [...args, '--effort', effort, ...(willResume ? ['--resume', this.lastSessionId!] : ['--session-id', randomUUID()])];
+      args = [...args, '--effort', effort, '--session-id', randomUUID()];
     }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /
@@ -723,7 +726,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // Persist so an app-level crash/restart (not just a runtime restart) can
     // resume this session on next launch. When resume just succeeded this is
     // a no-op (id unchanged); a fresh session/new self-heals the entry.
-    if (this.sessionId) this.persistSessionId(this.sessionId);
+    // Claude is EXCLUDED: its restore isn't supported yet, so a persisted id
+    // would be dead weight in acpSessionIds (never read — claude always spawns
+    // fresh). Persist claude here too once restore works.
+    if (this.sessionId && this.provider.id !== 'claude') this.persistSessionId(this.sessionId);
     this.resumedLastStart = resumed;
     this.initialized = true;
     this.capabilities = agentCaps;
