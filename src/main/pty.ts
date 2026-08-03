@@ -27,8 +27,6 @@ import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
-import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnCommand';
-import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 import { TerminalScreen } from './terminalScreen';
@@ -150,11 +148,11 @@ interface ManagedPty {
   // longer wrestle PTY bytes for mail push (that's handled by the MCP
   // Channels path in acp-mail-channel.js).
   bracketedPasteEnabled: boolean;
-  // Handle for the Kimi/Codex inbox poller. Claude agents use the MCP
-  // channel server (acp-mail-channel.js) instead and leave this null.
+  // Handle for the inbox poller on the PTY fallback path (Codex). ACP
+  // providers deliver mail through the runtime manager and leave this null.
   mailPollTimer: NodeJS.Timeout | null;
-  // Path to the boot-prompt tmp file passed via --system-prompt-file (Claude)
-  // or kept for reference when PTY-injected (Kimi/Codex). Cleaned up on
+  // Path to the boot-prompt tmp file, kept for reference when PTY-injected
+  // (Kimi/Codex). Cleaned up on
   // PTY exit. Null when no boot-prompt was provided (legacy 4-pane mode
   // or the orchestrator passed bootPrompt:null).
   bootPromptTmpPath: string | null;
@@ -407,9 +405,9 @@ function getAcpBinDir(): string {
   return path.join(app.getAppPath(), 'resources', 'bin');
 }
 
-// --- Kimi/Codex mail poller ---------------------------------------------
-// Claude Code has MCP channels for out-of-band push (acp-mail-channel.js).
-// Kimi and Codex have MCP server support but no channels, so we poll the
+// --- PTY-fallback mail poller -------------------------------------------
+// ACP providers get mail through the runtime manager. Providers still on the
+// PTY fallback (Codex) have no such path, so we poll the
 // inbox HTTP endpoint and inject a one-line user message into the PTY
 // stdin when new unread mail arrives. The first poll's backlog is
 // recorded without firing so a session starting into N old unread mails
@@ -895,8 +893,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     ? opts.bootPrompt.trim()
     : buildAgentBootPrompt(agentName);
 
-  // ACP path (structured JSON-RPC). Kimi is the Phase 1 ACP provider;
-  // Claude/Codex continue to use the PTY fallback below.
+  // ACP path (structured JSON-RPC). Claude and Kimi run here; Codex is the
+  // only provider left on the PTY fallback below.
   const providerConfig = getProviderConfig(provider);
   if (providerConfig.supportsAcp) {
     const id = crypto.randomUUID();
@@ -937,7 +935,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     return id;
   }
 
-  // PTY fallback path for providers that don't support ACP (Claude, Codex).
+  // PTY fallback path for providers that don't support ACP (Codex).
   const id = crypto.randomUUID();
 
   // Kimi PTY-fallback model (this branch is unreachable while kimi is
@@ -1085,78 +1083,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       ptyProcess.write(`kimi --yolo --model ${kimiPtyModel}\r`);
       console.log(`[PTY] Starting Kimi (yolo mode) for ${agentName} — attempt ${kimiAttempts}/${KIMI_MAX_ATTEMPTS}`);
     };
-    if (provider === 'claude') {
-      // Effort precedence (Aurum 1405, single authority — no second 'high'):
-      //   per-agent override (opts.effort) -> global default (settings.claudeEffort) -> 'high'.
-      // opts.effort comes from leg (a): the orchestrator plumbs
-      // team_agent_instances.effort_override (engaged team's per-placement
-      // override) through the spawn payload; undefined = global default.
-      const effort = resolveClaudeEffort(opts?.effort, settings.claudeEffort);
-      // Boot-prompt path:
-      //   - Wave C orchestrator / data-driven onboarding → the system
-      //     prompt file contains the full onboarding instructions. The
-      //     positional arg is just a minimal kickoff so Claude reads the
-      //     system prompt first, then takes the user message.
-      //   - Legacy path (no bootPrompt) no longer exists; we always
-      //     synthesize a code-generated boot prompt.
-      // `--system-prompt-file`, NOT `--system-prompt`. This is the LIVE spawn
-      // string — providerConfigs.ptyCommand looks like it does this job but has
-      // ZERO callers and is dead in all three providers. Fixing it there does
-      // nothing; it has now misled two work orders in one day.
-      //
-      // `--system-prompt` takes literal prompt TEXT. Passing a path meant every
-      // Claude pane booted with the literal string
-      // "C:\...\boot-prompt-<Agent>-<ts>.txt" as its ENTIRE system prompt — no
-      // persona, no role, no mail discipline, no project instructions. Not
-      // degraded: absent. Agents only appeared to work because they are
-      // competent generalists who open a path when handed one.
-      //
-      // Proven A/B on the wire (claude 2.1.220), same file both arms:
-      //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
-      //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."  (the file's instruction)
-      // Found by QAPert 2026-07-29. Do not "simplify" this back.
-      // NOTE — claude has NO mail delivery path (Gate B, wire-verified
-      // 2026-07-29), and this spawn no longer pretends otherwise.
-      //
-      // It used to register the `acp-mail` MCP server via `--mcp-config` so
-      // that `--dangerously-load-development-channels server:acp-mail` would
-      // resolve. That never worked: the shipped channel validator builds its
-      // valid-name set ONLY from the enterprise|user|project|local config
-      // scopes, and `--mcp-config` is ephemeral and enters none of them, so
-      // the entry was rejected with "no MCP server configured with that
-      // name" on every spawn. Both flags are now gone — the channels flag
-      // because its only observable effect was a consent gate costing one
-      // human keystroke per agent per boot, and the mcp-config because
-      // acp-mail-channel.js exposes zero tools (it answers tools/list,
-      // resources/list and prompts/list empty; it is a pure notification
-      // emitter). With the notification path dead it was 8 orphan node
-      // processes per boot polling acp-api to no effect.
-      //
-      // Claude also has no inbox poller (see the provider check below), so
-      // there is no delivery path at all until the stream-json adapter (G4)
-      // lands. Do NOT read a rendered "[ACP Mail]" line in a claude pane as
-      // delivery — that line is the renderer's unconditional visual echo
-      // (SEV-1 #114823), not proof the agent received anything.
-      // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
-      // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
-      // module load — so the composition lives in a module with no electron dep.
-      // Session continuity: derive a stable per-placement id, then RESUME if a
-      // transcript already exists on disk and CREATE if not. The existence check
-      // is deliberate rather than a try//catch — handing `--resume` a missing id
-      // kills the pane, and `--session-id` errors on an id already in use, so
-      // neither flag is safe to guess with. See claudeSession.ts.
-      const claudeSessionId = deriveClaudeSessionId(agentName, opts?.projectId);
-      const resumeSession = claudeSessionExists(resolvedWorkDir, claudeSessionId);
-      const cmd = buildClaudeSpawnCommand({
-        effort,
-        modelOverride: opts?.modelOverride,
-        bootPromptTmpPath,
-        sessionId: claudeSessionId,
-        resume: resumeSession,
-      });
-      ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
-    } else if (provider === 'codex') {
+    if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
       console.log(`[PTY] Starting Codex (model: ${model}) for ${agentName}`);
@@ -1168,25 +1095,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       kimiLaunch();
     }
 
-    // Kimi and Codex poll the inbox and inject new-mail lines directly into
-    // their PTY stdin.
-    //
-    // Claude WAS excluded — historically because it was believed to get push
-    // via acp-mail-channel.js (MCP channels). It never did: the channel name
-    // never resolved (Gate B), so claude had BOTH no push and no poll, i.e.
-    // no mail delivery whatsoever.
-    //
-    // INCLUDED 2026-07-29. The prior note said enabling this was "a capability
-    // change and not this interim's scope", and preferred waiting for G4's
-    // injectMail because that is the only variant where delivery is
-    // ACKNOWLEDGED rather than assumed. That reasoning is right and still
-    // stands as the destination — but it was weighing assumed-delivery against
-    // acknowledged-delivery, when the live situation is assumed-delivery
-    // against NONE. Measured cost of "none": Jon hand-relayed every message
-    // between five agents for a full session and was told "you have new mail"
-    // three times for mail that had provably never been delivered (QAPert,
-    // msg 1548). A working path we cannot confirm beats a confirmable path
-    // that does not exist yet.
+    // Codex (and kimi, were it ever to fall back here) polls the inbox and
+    // injects new-mail lines directly into its PTY stdin.
     //
     // ⚠️ WHAT THIS DOES **NOT** BUY: this injects mail lines into the pane's
     // stdin, so delivery is ASSUMED. A rendered mail line here proves we wrote
@@ -1195,7 +1105,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     // the injected mail carries a nonce and the AGENT'S OWN OUTPUT must
     // demonstrate it acted on the nonce.
     //
-    // Remove this once G4 lands injectMail on the runtime manager.
+    // Remove this once the runtime manager's injectMail covers every provider.
     startInboxPoller(managed);
 
     let reportSent = false;
@@ -1203,16 +1113,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     const dataListener = ptyProcess.onData((data) => {
       buffer += data;
 
-      if (provider === 'claude') {
-        // Claude receives the initial prompt via positional CLI argv
-        // — no PTY-side injection needed. Dispose the listener after
-        // the first byte of output so we don't sit here forever.
-        if (!reportSent) {
-          reportSent = true;
-          console.log(`[PTY] Claude booted for ${agentName} with initial prompt in argv`);
-          dataListener.dispose();
-        }
-      } else if (provider === 'codex') {
+      if (provider === 'codex') {
         // Codex uses ">" as prompt after startup
         if (!reportSent && (buffer.includes('Codex') || buffer.includes('>')) && buffer.length > 200) {
           reportSent = true;
@@ -1253,47 +1154,45 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       }
     });
 
-    // Staggered fallback only needed for codex/kimi — claude gets
-    // its initial prompt from argv, no PTY fallback required.
-    if (provider !== 'claude') {
-      const fallbackDelay = 5000 + (agentName.length * 500);
-      setTimeout(() => {
-        if (reportSent) return;
-        if (provider === 'kimi') {
-          // NEVER blind-inject `report as` for kimi — if it crashed, that
-          // lands in a raw PowerShell prompt (the BAPert-lead "report not
-          // recognized" bug). No banner in-window → retry the launch if
-          // attempts remain (the data listener catches the retry's banner).
-          // If exhausted, surface the failure (kanban #12), don't bury it.
-          // Guard first: if the welcome box IS in the buffer, kimi is already
-          // up (the data listener should have caught it — but a marker drift
-          // must never re-type `kimi --yolo` into a live TUI input). Inject
-          // the boot prompt instead of relaunching.
-          if (buffer.includes('Welcome to Kimi Code!')) {
-            reportSent = true;
-            console.warn(`[PTY] Kimi welcome box seen but readiness check missed for ${agentName}; injecting boot prompt via fallback`);
-            injectBootPrompt(managed, bootPrompt);
-            dataListener.dispose();
-            return;
-          }
-          if (kimiAttempts < KIMI_MAX_ATTEMPTS && !kimiRetrying) {
-            kimiRetrying = true;
-            console.warn(`[PTY] Kimi no-banner for ${agentName} after ${fallbackDelay}ms; retrying launch`);
-            setTimeout(() => { buffer = ''; kimiRetrying = false; kimiLaunch(); }, 500);
-            return;
-          }
-          console.error(`[PTY] Kimi FAILED to start for ${agentName} after ${KIMI_MAX_ATTEMPTS} attempts — surfacing, not injecting report-as into a dead shell`);
-          safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data: `\r\n\x1b[31m[ACP] ${agentName} failed to start (kimi cold-init race). Restart the pane, or run: kimi --yolo\x1b[0m\r\n` });
+    // Staggered fallback for the PTY providers — every agent that reaches
+    // this path needs its boot prompt typed in, so there is no exemption.
+    const fallbackDelay = 5000 + (agentName.length * 500);
+    setTimeout(() => {
+      if (reportSent) return;
+      if (provider === 'kimi') {
+        // NEVER blind-inject `report as` for kimi — if it crashed, that
+        // lands in a raw PowerShell prompt (the BAPert-lead "report not
+        // recognized" bug). No banner in-window → retry the launch if
+        // attempts remain (the data listener catches the retry's banner).
+        // If exhausted, surface the failure (kanban #12), don't bury it.
+        // Guard first: if the welcome box IS in the buffer, kimi is already
+        // up (the data listener should have caught it — but a marker drift
+        // must never re-type `kimi --yolo` into a live TUI input). Inject
+        // the boot prompt instead of relaunching.
+        if (buffer.includes('Welcome to Kimi Code!')) {
+          reportSent = true;
+          console.warn(`[PTY] Kimi welcome box seen but readiness check missed for ${agentName}; injecting boot prompt via fallback`);
+          injectBootPrompt(managed, bootPrompt);
           dataListener.dispose();
           return;
         }
-        // codex — inject boot prompt as a last resort
-        reportSent = true;
-        console.log(`[PTY] Fallback: injecting boot prompt for ${agentName}`);
-        injectBootPrompt(managed, bootPrompt);
+        if (kimiAttempts < KIMI_MAX_ATTEMPTS && !kimiRetrying) {
+          kimiRetrying = true;
+          console.warn(`[PTY] Kimi no-banner for ${agentName} after ${fallbackDelay}ms; retrying launch`);
+          setTimeout(() => { buffer = ''; kimiRetrying = false; kimiLaunch(); }, 500);
+          return;
+        }
+        console.error(`[PTY] Kimi FAILED to start for ${agentName} after ${KIMI_MAX_ATTEMPTS} attempts — surfacing, not injecting report-as into a dead shell`);
+        safeSend(IPC_CHANNELS.PTY_DATA, { terminalId: id, data: `\r\n\x1b[31m[ACP] ${agentName} failed to start (kimi cold-init race). Restart the pane, or run: kimi --yolo\x1b[0m\r\n` });
         dataListener.dispose();
-      }, fallbackDelay);
-    }
+        return;
+      }
+      // codex — inject boot prompt as a last resort
+      reportSent = true;
+      console.log(`[PTY] Fallback: injecting boot prompt for ${agentName}`);
+      injectBootPrompt(managed, bootPrompt);
+      dataListener.dispose();
+    }, fallbackDelay);
   }, 500);
 
   return id;

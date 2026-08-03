@@ -123,17 +123,17 @@ export const PROVIDER_CONFIGS: Record<TerminalProvider, ProviderConfig> = {
   claude: {
     id: 'claude',
     displayName: 'Claude Code',
-    // WO-G4: stays false until the acceptance bar is met. The PTY path below
-    // remains the live path; this is additive, not a cutover.
-    supportsAcp: false,
-    // Verified against claude 2.1.220 on the wire (2026-07-29). The previous
-    // literal here could not have run: `--input-format`/`--output-format`
-    // require `--print`, and token-level streaming requires
-    // `--include-partial-messages`. See claudeStreamJson.ts.
-    acpCommand: ['claude', ...CLAUDE_STREAM_JSON_ARGS],
-    // PTY invocation: see buildClaudeSpawnCommand() in claudeSpawnCommand.ts.
-    // It carries the --system-prompt-file / --effort / --model composition and
-    // is unit-tested; the dead builder that used to sit here was not.
+    // WO-G4 cutover: claude runs through the ACP runtime via
+    // ClaudeStreamJsonProcess, which maps its stream-json output into the same
+    // AcpSessionUpdate vocabulary kimi emits. The old PTY/TUI path
+    // (claudeSpawnCommand.ts) is retired.
+    supportsAcp: true,
+    // `-p` structured mode (CLAUDE_STREAM_JSON_ARGS, verified against claude
+    // 2.1.220) + skip the interactive permission prompt: the stream-json
+    // adapter deliberately does not answer permission control-requests, so
+    // tools would block without this. The session id is injected at spawn
+    // (--resume / --session-id) by AcpRuntimeManager.
+    acpCommand: ['claude', ...CLAUDE_STREAM_JSON_ARGS, '--dangerously-skip-permissions'],
     defaultCapabilities: MINIMAL_CAPABILITIES,
   },
   kimi: {

@@ -2,7 +2,7 @@
  * B-3 — `xhigh` must survive the spawn boundaries.
  *
  * WHY THIS FILE EXISTS (must-fail-first, B-6):
- * `buildClaudeSpawnCommand` already emitted `--effort xhigh` correctly, and
+ * The spawn-command builder already emitted `--effort xhigh` correctly, and
  * `CLAUDE_EFFORTS` already listed it — so every existing test passed. But the
  * value never got that far. Both spawn boundaries re-listed the levels by hand:
  *

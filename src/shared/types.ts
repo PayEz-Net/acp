@@ -313,7 +313,8 @@ export const CLAUDE_EFFORT_LABELS: Record<ClaudeEffort, string> = {
  * invisible to any test that only asserted the builder's output.
  *
  * `undefined` is deliberate — NOT a substituted literal. Returning e.g. 'high'
- * here would install a second authority on the default (see resolveClaudeEffort).
+ * here would install a second authority on the default, which belongs to
+ * `settings.claudeEffort` (store.ts) alone.
  */
 export function isClaudeEffort(value: unknown): value is ClaudeEffort {
   return typeof value === 'string' && (CLAUDE_EFFORTS as readonly string[]).includes(value);

@@ -67,7 +67,7 @@ export interface ProjectTeamMember {
   role: string | null;
   runtime_override: 'claude' | 'kimi' | 'codex' | null;
   /** Per-PLACEMENT effort override. NULL = inherit the global default at spawn
-   *  (resolveClaudeEffort). Typed from CLAUDE_EFFORTS — the hand-written union
+   *  (settings.claudeEffort). Typed from CLAUDE_EFFORTS — the hand-written union
    *  that used to sit here was missing 'xhigh'. The column is varchar(32) with
    *  no CHECK constraint, so validity is enforced client-side. */
   effort_override: ClaudeEffort | null;

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
 import { BrowserWindow } from 'electron';
 import {
   type AcpAgentCapabilities,
@@ -15,6 +16,7 @@ import {
 } from '../../shared/acpTypes';
 import { IPC_CHANNELS, type AgentSessionStartFailedPayload, type TerminalProvider } from '../../shared/types';
 import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
+import { ClaudeStreamJsonProcess } from './ClaudeStreamJsonProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import {
   getProviderConfig,
@@ -130,7 +132,7 @@ async function acquireInitLock(): Promise<() => void> {
 }
 
 export class AcpRuntimeManager extends EventEmitter {
-  private process: AcpProcess | null = null;
+  private process: AcpProcess | ClaudeStreamJsonProcess | null = null;
   private sessionId: string | null = null;
   // Preserve the session id across runtime restarts so a watchdog/crash
   // restart can resume the prior session via session/resume instead of
@@ -514,10 +516,21 @@ export class AcpRuntimeManager extends EventEmitter {
     // Per-agent kimi model selection (WO-KIMI-MODEL-OVERRIDE): a set
     // model_override appends `-m <alias>` — validated loud here, before any
     // process exists. Absent override keeps the legacy spawn byte-identical.
-    const args =
+    let args =
       this.provider.id === 'kimi'
         ? kimiSpawnArgs(baseArgs, this.options.modelOverride ?? null)
         : baseArgs;
+    // Claude pins its session at SPAWN time (`--resume <id>` / `--session-id
+    // <uuid>`) — there is no session/new or session/resume verb on the wire, so
+    // the decision has to be made here, before the child exists. Mirror the
+    // resume-vs-fresh decision the handshake makes below: PEEK skipResumeOnce
+    // (that flow consumes it) so both land on the same session. The adapter
+    // always advertises loadSession, so the agentCaps half of that test is
+    // constant-true for claude.
+    if (this.provider.id === 'claude') {
+      const willResume = !this.skipResumeOnce && !!this.lastSessionId;
+      args = [...args, ...(willResume ? ['--resume', this.lastSessionId!] : ['--session-id', randomUUID()])];
+    }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /
       // FORCE_COLOR strip ANSI escapes; TERM=dumb + CI=true prevent the CLI
@@ -534,12 +547,22 @@ export class AcpRuntimeManager extends EventEmitter {
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
     if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
-    this.process = new AcpProcess({
-      command,
-      args,
-      cwd: this.options.workDir,
-      env: spawnEnv,
-    });
+    // Claude speaks stream-json, not ACP JSON-RPC; ClaudeStreamJsonProcess is
+    // the shim that presents the AcpProcess surface over that wire.
+    this.process =
+      this.provider.id === 'claude'
+        ? new ClaudeStreamJsonProcess({
+            command,
+            args,
+            cwd: this.options.workDir,
+            env: spawnEnv,
+          })
+        : new AcpProcess({
+            command,
+            args,
+            cwd: this.options.workDir,
+            env: spawnEnv,
+          });
 
     // Developer visibility (Jon's ask): show the exact launch command —
     // overrides included — as a banner line in the pane, the way the old PTY
@@ -557,6 +580,11 @@ export class AcpRuntimeManager extends EventEmitter {
     this.process.on('notification', (method: string, params: unknown, id?: number | string) => {
       this.handleNotification(method, params, id);
     });
+
+    // Claude's adapter emits ALREADY-MAPPED updates on 'sessionUpdate' (kimi
+    // uses 'notification' -> handleNotification). Forward them straight to
+    // emitAcpEvent — re-mapping them would mangle them. Never fires for kimi.
+    this.process.on('sessionUpdate', (update: AcpSessionUpdate) => this.emitAcpEvent(update));
 
     this.process.on('stderr', (text: string) => {
       // Kimi dumps internal diagnostics (including -32603 errors) to stderr.
