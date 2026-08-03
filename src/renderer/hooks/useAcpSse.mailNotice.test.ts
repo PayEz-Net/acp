@@ -12,7 +12,7 @@ import { useProjectStore } from '../stores/projectStore';
 import { useAgentOutputStore } from '../stores/agentOutputStore';
 import { useAcpSessionStore } from '../stores/acpSessionStore';
 
-const mockInjectAcpMail = vi.fn().mockResolvedValue(true);
+const mockInjectAcpMail = vi.fn().mockResolvedValue('delivered');
 
 beforeEach(() => {
   vi.stubGlobal('electronAPI', { injectAcpMail: mockInjectAcpMail });

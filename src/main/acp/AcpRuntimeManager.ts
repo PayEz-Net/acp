@@ -166,6 +166,18 @@ export class AcpRuntimeManager extends EventEmitter {
   private promptIdleTicks = 0;
   private inactivityTimer: ReturnType<typeof setInterval> | null = null;
   private promptSettledRef: { current: boolean } | null = null;
+  // Watchdog ladder state (cancel-first, kill-last + throttle-aware grace).
+  // cancelGraceTicksLeft non-null: a session/cancel is out and the stalled
+  // turn has that many ticks to settle before the restart escalates.
+  // stalledTurnNudgePending arms the post-settle resume nudge (same process,
+  // context intact). lastThrottleAt/throttleExtensions drive the provider-
+  // throttle extension: recent 429/quota evidence on stderr means the silence
+  // is the provider's, not a wedge — restarting into a rate limit spawns a
+  // fresh CLI straight into the same wall (the restart churn IS the bog-down).
+  private cancelGraceTicksLeft: number | null = null;
+  private stalledTurnNudgePending = false;
+  private lastThrottleAt: number | null = null;
+  private throttleExtensions = 0;
 
   // Kimi's ACP runtime does not handle concurrent session/prompt requests on
   // the same session; overlapping calls produce -32603 internal errors and can
@@ -351,26 +363,64 @@ export class AcpRuntimeManager extends EventEmitter {
           this.stopPromptWatchdog();
           return;
         }
-        this.promptSettledRef!.current = true;
-        const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending; restarting runtime`;
-        console.warn(`[ACP ${this.options.agentName}] ${message}`);
-        // Best-effort cancel: a merely-slow runtime may still honor it and
-        // resolve the turn; a truly hung one ignores it and gets killed by the
-        // restart. Either way the turn is declared over here so the queue is
-        // not held hostage by a promise that may never settle.
-        //
-        // A busy re-sync episode that consumed the whole idle budget will not
-        // be fixed by re-resuming the same session: the next start falls back
-        // to session/new exactly once (same one-shot skip as the busy-cap
-        // escalation in executePrompt).
-        if (this.agentBusyRejectionCount > 0) {
-          this.agentBusyRejectionCount = 0;
-          this.agentBusyCancelSent = false;
-          this.skipResumeOnce = true;
+
+        // Stage A grace: the cancel is already out — count down, then escalate
+        // to the kill+restart a genuinely hung runtime needs.
+        if (this.cancelGraceTicksLeft != null) {
+          this.cancelGraceTicksLeft--;
+          if (this.cancelGraceTicksLeft > 0) return;
+          this.cancelGraceTicksLeft = null;
+          this.stalledTurnNudgePending = false;
+          this.promptSettledRef!.current = true;
+          const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s and session/cancel went unanswered; restarting runtime`;
+          console.warn(`[ACP ${this.options.agentName}] ${message}`);
+          // A busy re-sync episode that consumed the whole idle budget will not
+          // be fixed by re-resuming the same session: the next start falls back
+          // to session/new exactly once (same one-shot skip as the busy-cap
+          // escalation in executePrompt).
+          if (this.agentBusyRejectionCount > 0) {
+            this.agentBusyRejectionCount = 0;
+            this.agentBusyCancelSent = false;
+            this.skipResumeOnce = true;
+          }
+          this.process?.notify('session/cancel', { sessionId: this.sessionId });
+          this.failPendingTurn(message);
+          void this.restart();
+          return;
         }
+
+        // Stage C: the silence is the PROVIDER's (recent 429/quota evidence on
+        // stderr), not a wedge. Restarting into a rate limit spawns a fresh
+        // CLI straight into the same wall — bounded full-budget extensions
+        // instead, with the throttle state shown on the pane.
+        const throttleFresh =
+          this.lastThrottleAt != null && Date.now() - this.lastThrottleAt < THROTTLE_EVIDENCE_FRESH_MS;
+        if (throttleFresh && this.throttleExtensions < MAX_THROTTLE_EXTENSIONS) {
+          this.throttleExtensions++;
+          this.promptIdleTicks = 0;
+          const message = `silent ${Math.round(PROMPT_IDLE_MS / 1000)}s but provider is throttling (429/quota on stderr) — extending grace ${this.throttleExtensions}/${MAX_THROTTLE_EXTENSIONS}, no restart`;
+          console.warn(`[ACP ${this.options.agentName}] ${message}`);
+          this.emitAcpEvent({
+            sessionUpdate: 'wait_state',
+            sessionId: this.sessionId ?? '',
+            waitState: {
+              kind: 'provider_retry',
+              errorName: `throttling (429/quota) — grace ${this.throttleExtensions}/${MAX_THROTTLE_EXTENSIONS}`,
+            },
+          });
+          return;
+        }
+
+        // Stage A: cancel-first. A merely-slow runtime honors the cancel and
+        // settles — the settle path then re-orients it with STALLED_TURN_NUDGE
+        // (same process, context intact, NO restart). A truly hung runtime
+        // ignores the cancel and the next ticks escalate above.
+        this.cancelGraceTicksLeft = WATCHDOG_CANCEL_GRACE_TICKS;
+        this.stalledTurnNudgePending = true;
+        console.warn(
+          `[ACP ${this.options.agentName}] no response for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending — sent session/cancel; restarting only if unanswered for ${(WATCHDOG_CANCEL_GRACE_TICKS * WATCHDOG_INTERVAL_MS) / 1000}s`,
+        );
         this.process?.notify('session/cancel', { sessionId: this.sessionId });
-        this.failPendingTurn(message);
-        void this.restart();
       }
     }, WATCHDOG_INTERVAL_MS);
   }
@@ -408,6 +458,9 @@ export class AcpRuntimeManager extends EventEmitter {
   private markPromptActivity(): void {
     if (this.promptPending) {
       this.promptIdleTicks = 0;
+      // Activity means the stall (if any) ended — the throttle-extension
+      // budget is per-stall, not per-process-lifetime.
+      this.throttleExtensions = 0;
     }
   }
 
@@ -512,6 +565,15 @@ export class AcpRuntimeManager extends EventEmitter {
       const trimmed = text.trim();
       if (trimmed) {
         console.error(`[ACP ${this.options.agentName}] stderr: ${trimmed}`);
+      }
+      // Provider-throttle evidence (429/quota/backoff): the watchdog's
+      // throttle extension reads this to wait out provider stalls instead of
+      // restarting into the same wall.
+      if (THROTTLE_STDERR_PATTERN.test(text)) {
+        if (this.lastThrottleAt == null || Date.now() - this.lastThrottleAt >= THROTTLE_EVIDENCE_FRESH_MS) {
+          console.warn(`[ACP ${this.options.agentName}] provider throttle evidence on stderr — watchdog will extend grace instead of restarting`);
+        }
+        this.lastThrottleAt = Date.now();
       }
       this.emitAcpEvent({ sessionUpdate: 'stderr', sessionId: this.sessionId ?? undefined, text });
     });
@@ -1109,11 +1171,27 @@ export class AcpRuntimeManager extends EventEmitter {
         this.promptInFlight = false;
         this.replyTurnActive = false;
         this.clearHumanWaitBackstop();
+        if (this.stalledTurnNudgePending) {
+          this.stalledTurnNudgePending = false;
+          this.cancelGraceTicksLeft = null;
+          // The stall honored the cancel: same process, session and context
+          // intact — NO restart. Tell the agent its turn was cut and to
+          // report + continue (Jon's rule: never let an agent wonder why its
+          // turn died), ahead of anything queued.
+          this.promptQueue.unshift({
+            prompt: [{ type: 'text', text: STALLED_TURN_NUDGE }],
+            resolve: () => {},
+            kind: 'system',
+          });
+        }
         this.drainPromptQueue();
       })
       .catch((err) => {
         if (settledRef.current) return;
         settledRef.current = true;
+        // Any error settle ends the watchdog ladder episode without the nudge.
+        this.cancelGraceTicksLeft = null;
+        this.stalledTurnNudgePending = false;
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[ACP ${this.options.agentName}] session/prompt failed (session=${sessionId}):`, err);
         if (this.process?.isRunning()) {
@@ -1324,6 +1402,10 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   cancel(): void {
+    // A deliberate human cancel supersedes any armed watchdog ladder — the
+    // resume nudge must not fire after a turn the USER chose to end.
+    this.cancelGraceTicksLeft = null;
+    this.stalledTurnNudgePending = false;
     const sessionId = this.sessionId;
     if (this.process && sessionId) {
       this.process.notify('session/cancel', { sessionId });
@@ -1786,6 +1868,31 @@ const HUMAN_WAIT_WARNING =
 const HUMAN_WAITING_NUDGE =
   '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
   'Answer the human’s message now — briefly, in text, no tools — then resume the task from where you were cut off.';
+
+/**
+ * Watchdog ladder (cancel-first, kill-last + throttle-aware grace).
+ */
+/** Ticks (× the 15s watchdog interval) a cancelled stall gets to settle before the kill+restart escalates. */
+const WATCHDOG_CANCEL_GRACE_TICKS = 2;
+/** How long stderr throttle evidence (429/quota/backoff) stays fresh enough to extend grace. */
+const THROTTLE_EVIDENCE_FRESH_MS = 10 * 60_000;
+/**
+ * Consecutive full-budget throttle extensions before the ladder treats the
+ * stall as a wedge anyway (bounds a misclassified wait at ~25 min).
+ */
+const MAX_THROTTLE_EXTENSIONS = 4;
+/** Provider-throttle signatures in adapter stderr. */
+const THROTTLE_STDERR_PATTERN = /\b429\b|rate.?limit|too many requests|quota|balance|overload|retry.?after/i;
+
+/**
+ * Nudge unshifted after a stalled turn HONORS the watchdog's session/cancel:
+ * the runtime proved itself alive, so it keeps its process, session and
+ * context — no restart. It is told why its turn died and to report +
+ * continue (same rule as HUMAN_WAITING_NUDGE).
+ */
+const STALLED_TURN_NUDGE =
+  '[ACP] Your previous turn produced no output for over 5 minutes, so the platform cancelled it — your process, session and context are intact, nothing was restarted. ' +
+  'Briefly tell the human where things stand, then continue your work.';
 
 /**
  * Build the reply-turn nudge. Steer-capable runtime: the human's steered

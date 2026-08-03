@@ -931,26 +931,158 @@ describe('AcpRuntimeManager', () => {
     await manager.start();
 
     vi.useFakeTimers();
-    // Prevent the automatic restart from leaving fake timers behind in this test.
-    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
-    // Simulate a runtime that streams content but never returns a session/prompt result.
-    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
-    manager.prompt('hello');
+    try {
+      // Prevent the automatic restart from leaving fake timers behind in this test.
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      // Simulate a runtime that streams content but never returns a session/prompt result.
+      mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+      manager.prompt('hello');
 
-    await vi.advanceTimersByTimeAsync(300_001);
+      // Ladder stage A at 300s: cancel-first — NO error, NO restart yet.
+      await vi.advanceTimersByTimeAsync(300_001);
+      const process = getProcess();
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+      expect(restartSpy).not.toHaveBeenCalled();
 
-    const error = events.find((e) => e.update.sessionUpdate === 'error');
-    expect(error).toBeDefined();
-    expect(error?.update).toMatchObject({
-      sessionUpdate: 'error',
-      sessionId: 'sess-hang',
-      error: expect.stringContaining('No response'),
-    });
-    expect(restartSpy).toHaveBeenCalled();
+      // The cancel goes unanswered (truly hung) — the grace ticks expire and
+      // the kill+restart escalates.
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = events.find((e) => e.update.sessionUpdate === 'error');
+      expect(error).toBeDefined();
+      expect(error?.update).toMatchObject({
+        sessionUpdate: 'error',
+        sessionId: 'sess-hang',
+        error: expect.stringContaining('No response'),
+      });
+      expect(restartSpy).toHaveBeenCalled();
 
-    restartSpy.mockRestore();
-    manager.kill();
-    vi.useRealTimers();
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancel-first: a stalled turn that honors the cancel is NOT restarted (resume nudge, same session)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-stall' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 300s of silence → stage A: session/cancel, but NO restart.
+      await vi.advanceTimersByTimeAsync(300_001);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(restartSpy).not.toHaveBeenCalled();
+
+      // The runtime honors the cancel inside the grace window: it proved
+      // itself alive, so it keeps process, session and context.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(getProcess()).toBe(process);
+      expect(manager.getSessionId()).toBe('sess-stall');
+      // The resume nudge drains as its own turn, telling the agent why its
+      // turn died — and nothing shows as a [Send failed] error.
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('produced no output for over 5 minutes'))).toBe(true);
+      expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('extends grace instead of restarting when stderr shows provider throttling (429/quota)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-throttle' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never settles
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The adapter reports a 429 on stderr mid-stall.
+      process.emit('stderr', 'HTTP 429 Too Many Requests: rate limit exceeded, retrying in 20s');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 300s of silence: NO cancel, NO restart — throttle extension instead,
+      // surfaced to the pane as a wait_state.
+      await vi.advanceTimersByTimeAsync(300_001);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(events.some((e) => e.update.sessionUpdate === 'wait_state')).toBe(true);
+
+      // Extensions are bounded (4 × 300s, fresh 429 evidence each time); the
+      // NEXT trip falls through to the cancel ladder — a bounded wait, not an
+      // infinite one.
+      for (let i = 0; i < 4; i++) {
+        process.emit('stderr', 'HTTP 429 Too Many Requests: rate limit exceeded, retrying in 40s');
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(restartSpy).not.toHaveBeenCalled(); // grace still running
+      await vi.advanceTimersByTimeAsync(30_000); // grace expiry → restart
+      expect(restartSpy).toHaveBeenCalled();
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fire the stalled-turn nudge when the human cancels during the grace window', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-user-cancel' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Ladder arms at 300s; then the HUMAN cancels (Esc) inside the grace
+      // window — the turn is theirs to end, so no platform nudge follows.
+      await vi.advanceTimersByTimeAsync(300_001);
+      manager.cancel();
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(restartSpy).not.toHaveBeenCalled();
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('produced no output for over 5 minutes'))).toBe(false);
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
   });
 
   it('completes a turn that stays active past 10 minutes with the same session', async () => {
@@ -1309,15 +1441,17 @@ describe('AcpRuntimeManager', () => {
     expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(0);
     expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
 
-    // Past 300s of true silence, the watchdog trips: best-effort cancel +
-    // failPendingTurn + restart, as today.
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Past 300s of true silence, the watchdog ladder arms: session/cancel +
+    // 30s grace. The wedged turn never settles, so the grace expiry escalates
+    // to failPendingTurn + restart.
+    await vi.advanceTimersByTimeAsync(45_000);
     const error = events.find((e) => e.update.sessionUpdate === 'error');
     expect(error?.update).toMatchObject({
       sessionUpdate: 'error',
       error: expect.stringContaining('No response'),
     });
-    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+    // One cancel from the ladder arm, one belt-and-braces at escalation.
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill pause + start
 
     // A busy episode that consumed the whole idle budget is a property of the
@@ -1732,9 +1866,11 @@ describe('AcpRuntimeManager', () => {
     // prompt_queued event on the steer path.
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Trip the 300s idle watchdog: failPendingTurn + restart. The restart
-    // starts a FRESH session (no resume capability), so the queue drops.
-    await vi.advanceTimersByTimeAsync(320_000);
+    // Trip the 300s idle watchdog: the ladder arms (cancel + 30s grace), the
+    // hung turn never settles, so the grace expiry escalates to
+    // failPendingTurn + restart. The restart starts a FRESH session (no
+    // resume capability), so the queue drops.
+    await vi.advanceTimersByTimeAsync(345_000);
     await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill 500ms pause + start
 
     const cleared = events.filter((e) => e.update.sessionUpdate === 'queue_cleared');
