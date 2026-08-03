@@ -533,11 +533,23 @@ export class AcpRuntimeManager extends EventEmitter {
       // on a watchdog restart where lastSessionId is in memory). Paired with
       // loadSession:false in the adapter; re-enable resume in both places
       // together once restore works.
-      // Per-agent effort (the retired TUI path applied this via resolveClaudeEffort);
-      // precedence override -> 'high'. Global settings.claudeEffort middle tier is
-      // not threaded into the manager — add it via the spawn options if needed.
-      const effort = this.options.effort ?? 'high';
-      args = [...args, '--effort', effort, '--session-id', randomUUID()];
+      //
+      // Per-agent effort, threaded ONLY when the agent actually carries one.
+      // `--effort <level>` is real (Claude Code 2.1.220, "Effort level for the
+      // current session") — this is not a revert of that. But the previous
+      // `?? 'high'` invented a level nobody set and so put the flag on EVERY
+      // claude spawn, which turned a stale CLI into a total outage: the Mac
+      // sat on 2.1.19 (~200 releases behind, no such flag), all seven agents
+      // died `error: unknown option '--effort'` exit 1 before emitting a byte,
+      // and the restart ladder relaunched into the same death — while every
+      // agent on the team was effort_override:null and nobody had tuned
+      // anything. Absent an override the flag is absent, so a stale CLI can
+      // only break agents that genuinely carry one. Do not reinstate the
+      // fallback, and do not route claude effort through kimi's channel
+      // (KIMI_MODEL_THINKING_EFFORT / effort_override, below) — claude
+      // settings are not translated into kimi settings.
+      const effort = this.options.effort;
+      args = [...args, ...(effort ? ['--effort', effort] : []), '--session-id', randomUUID()];
     }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /
@@ -1963,6 +1975,15 @@ function isAgentBusyError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
     /turn\.agent_busy/i.test(message) ||
-    /cannot launch a new turn while another turn/i.test(message)
+    /cannot launch a new turn while another turn/i.test(message) ||
+    // ClaudeStreamJsonProcess's single-flight rejection. Same CONDITION as
+    // kimi's turn.agent_busy — a prompt arrived while a turn was live — but a
+    // third phrasing, so it fell through to the hard-failure branch: the human
+    // steer was dropped with "[Send failed] Claude turn already in flight"
+    // instead of being queued behind the active turn and drained after it.
+    // Every busy phrasing on every adapter must land here, or the runtime that
+    // spoke it silently loses the queue-and-drain path (Jon 2026-08-03: agents
+    // unreachable mid-turn ruined a working session).
+    /claude turn already in flight/i.test(message)
   );
 }
