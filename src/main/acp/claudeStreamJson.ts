@@ -157,6 +157,9 @@ export class ClaudeStreamJsonMapper {
               typeof event.claude_code_version === 'string'
                 ? event.claude_code_version
                 : undefined,
+            // The real model id rides on system/init (e.g. 'claude-sonnet-4-6').
+            // The footer prefers it over the 'Claude Code' product name.
+            model: typeof event.model === 'string' ? event.model : undefined,
           },
           imageIn: true,
         },

@@ -604,7 +604,17 @@ export class AcpRuntimeManager extends EventEmitter {
     // Claude's adapter emits ALREADY-MAPPED updates on 'sessionUpdate' (kimi
     // uses 'notification' -> handleNotification). Forward them straight to
     // emitAcpEvent — re-mapping them would mangle them. Never fires for kimi.
-    this.process.on('sessionUpdate', (update: AcpSessionUpdate) => this.emitAcpEvent(update));
+    this.process.on('sessionUpdate', (update: AcpSessionUpdate) => {
+      // Per-agent effort is a spawn arg the manager owns, not something in the
+      // stream — stamp it onto the mapper's 'initialized' agentInfo so the
+      // footer can show it. Claude-only (this path never fires for kimi, and
+      // effort is a claude-only knob). The store MERGES agentInfo, so this
+      // survives the synthetic handshake's barer 'initialized'.
+      if (update.sessionUpdate === 'initialized' && update.agentInfo && this.options.effort) {
+        update = { ...update, agentInfo: { ...update.agentInfo, effort: this.options.effort } };
+      }
+      this.emitAcpEvent(update);
+    });
 
     this.process.on('stderr', (text: string) => {
       // Kimi dumps internal diagnostics (including -32603 errors) to stderr.

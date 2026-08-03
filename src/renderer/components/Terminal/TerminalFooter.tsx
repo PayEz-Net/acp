@@ -71,10 +71,14 @@ export function TerminalFooter({
   // store override it — that creates dueling provider badges.
   const effectiveProvider = provider;
   const effectiveModel = isAcpMode
-    ? acpSession?.agentInfo?.version
-      ? `${acpSession.agentInfo.name} ${acpSession.agentInfo.version}`
-      : acpSession?.agentInfo?.name
+    ? acpSession?.agentInfo?.model ??
+      (acpSession?.agentInfo?.version
+        ? `${acpSession.agentInfo.name} ${acpSession.agentInfo.version}`
+        : acpSession?.agentInfo?.name)
     : status?.model;
+  // Per-agent effort (claude only — the manager leaves it unset for kimi/codex,
+  // which ignore effort). It's the one override that now varies per agent.
+  const effectiveEffort = isAcpMode ? acpSession?.agentInfo?.effort : undefined;
   const effectiveCwd = status?.cwd ?? repoPath;
   const effectiveContext = status?.contextUsage ?? contextUsage;
   const effectiveTokenUsed = status?.tokenUsed;
@@ -101,6 +105,11 @@ export function TerminalFooter({
         {effectiveModel && effectiveProvider !== effectiveModel && (
           <span className="text-acp-text-secondary truncate max-w-[6rem]" title={effectiveModel}>
             {effectiveModel}
+          </span>
+        )}
+        {effectiveEffort && (
+          <span className="uppercase tracking-wide text-acp-text-muted" title={`Effort: ${effectiveEffort}`}>
+            {effectiveEffort}
           </span>
         )}
         <span className="truncate max-w-[12rem]" title={effectiveCwd || 'No project path'}>

@@ -258,7 +258,14 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
         ...session,
         sessionId: update.sessionId,
         capabilities: update.capabilities,
-        agentInfo: update.agentInfo,
+        // Claude emits TWO 'initialized' updates — the synthetic handshake
+        // (name only) and the mapper's real one (name+version+model+effort) —
+        // and they can arrive in either order. Merge so a later barer update
+        // never erases the richer fields an earlier one already set; on a real
+        // restart the fresh update's present fields still win.
+        agentInfo: update.agentInfo
+          ? { ...session.agentInfo, ...update.agentInfo }
+          : session.agentInfo,
         imageIn: update.imageIn,
         waitState: undefined,
       };

@@ -67,6 +67,13 @@ export interface AcpAgentCapabilities {
 export interface AcpAgentInfo {
   name: string;
   version?: string;
+  /** Active model id from the runtime's init (claude stream-json system/init.model). */
+  model?: string;
+  /**
+   * Per-agent effort level the manager spawned this agent with. Claude only —
+   * kimi/codex ignore effort, so the manager leaves it unset for them.
+   */
+  effort?: string;
 }
 
 export interface AcpAvailableCommand {

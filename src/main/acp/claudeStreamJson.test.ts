@@ -78,7 +78,7 @@ describe('session lifecycle', () => {
     expect(out[0]).toMatchObject({
       sessionUpdate: 'initialized',
       sessionId: SESSION,
-      agentInfo: { name: 'Claude Code', version: '2.1.220' },
+      agentInfo: { name: 'Claude Code', version: '2.1.220', model: 'claude-sonnet-4-6' },
     });
     expect(out[1]).toMatchObject({ sessionUpdate: 'available_commands_update' });
   });
