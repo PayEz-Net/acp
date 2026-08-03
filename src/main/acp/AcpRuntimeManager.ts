@@ -529,7 +529,12 @@ export class AcpRuntimeManager extends EventEmitter {
     // constant-true for claude.
     if (this.provider.id === 'claude') {
       const willResume = !this.skipResumeOnce && !!this.lastSessionId;
-      args = [...args, ...(willResume ? ['--resume', this.lastSessionId!] : ['--session-id', randomUUID()])];
+      // Per-agent effort. The retired TUI path applied this via resolveClaudeEffort;
+      // precedence here is per-agent override -> 'high'. The global
+      // settings.claudeEffort middle tier is NOT threaded into the manager — add it
+      // here (through the spawn options) if that tier is ever needed.
+      const effort = this.options.effort ?? 'high';
+      args = [...args, '--effort', effort, ...(willResume ? ['--resume', this.lastSessionId!] : ['--session-id', randomUUID()])];
     }
     const spawnEnv: Record<string, string> = {
       // Force a non-interactive, colorless stdio environment. NO_COLOR /
