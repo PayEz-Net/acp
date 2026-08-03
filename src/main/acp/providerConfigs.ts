@@ -69,7 +69,7 @@ export function kimiSpawnArgs(baseArgs: string[], modelOverride?: string | null)
  * churn). `haiku` is the fast/cheap tier (a background agent like NextPert),
  * `opus` the heavyweight; an absent override inherits Claude Code's default.
  */
-export const CLAUDE_MODELS: ReadonlySet<string> = new Set(['haiku', 'sonnet', 'opus']);
+export const CLAUDE_MODELS: ReadonlySet<string> = new Set(['haiku', 'sonnet', 'opus', 'fable']);
 
 /**
  * Model-aware claude spawn args. No override → [] (default model). With an
