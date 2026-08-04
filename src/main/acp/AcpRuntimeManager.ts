@@ -1877,8 +1877,15 @@ export class AcpRuntimeManager extends EventEmitter {
       const kind = update.sessionUpdate;
       if (NOISY_SESSION_UPDATES.has(kind) && level !== 'all') return;
       const u = update as unknown as Record<string, unknown>;
-      // Pull whichever identifying field this update type carries.
+      // tool_call / tool_call_update carry their identity NESTED under
+      // `toolCall`, which is precisely the case worth logging — a stall's last
+      // event is almost always a tool. Look there first, then top level.
+      const tc = (u.toolCall ?? {}) as Record<string, unknown>;
+      const toolDetail = tc.title
+        ? `${String(tc.title)}${tc.status ? ` [${String(tc.status)}]` : ''}`
+        : undefined;
       const detail =
+        toolDetail ??
         (u.title as string | undefined) ??
         (u.toolName as string | undefined) ??
         (u.status as string | undefined) ??
