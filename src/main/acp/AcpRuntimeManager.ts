@@ -235,6 +235,12 @@ export class AcpRuntimeManager extends EventEmitter {
   // unexpected process exit can auto-restart, and we back off so a repeatedly
   // crashing runtime (e.g., Kimi cold-init race on Windows) doesn't spin forever.
   private intentionalKill = false;
+  // A cancel was delivered to a live runtime, so the child is on its way down
+  // and a restart is expected. Distinct from restartTimer, which is only set
+  // once the exit has actually been processed — the queue drain runs BEFORE
+  // that, which is how queued prompts were being dropped for a restart that
+  // was already inevitable.
+  private cancelExpectingRestart = false;
   private restarting = false;
   private restartCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1479,8 +1485,20 @@ export class AcpRuntimeManager extends EventEmitter {
 
   private drainPromptQueue(): void {
     if (!this.process?.isRunning() || !this.sessionId) {
-      // Runtime is down (likely restarting after an error). Fail any queued
-      // prompts so the user sees feedback rather than an eternal spinner.
+      // A restart is genuinely coming: hold the prompts for it. They are still
+      // valid work, and the post-restart path already decides their fate —
+      // drained on a resumed session, dropped on a fresh one, dropped again if
+      // the restart budget runs out. Dropping them HERE threw away the human's
+      // message on every Esc and every watchdog kill, because this drain runs
+      // before the exit is processed and therefore before restartTimer is set.
+      if (this.restartTimer || this.cancelExpectingRestart) {
+        console.log(
+          `[ACP ${this.options.agentName}] holding ${this.promptQueue.length} queued prompt(s) across the pending restart`,
+        );
+        return;
+      }
+      // Nothing is bringing the runtime back — fail them so the user sees
+      // feedback rather than an eternal spinner.
       this.dropQueuedPrompts('runtime not initialized');
       return;
     }
@@ -1563,8 +1581,28 @@ export class AcpRuntimeManager extends EventEmitter {
     this.cancelGraceTicksLeft = null;
     this.stalledTurnNudgePending = false;
     const sessionId = this.sessionId;
-    if (this.process && sessionId) {
+    // isRunning(), not just a non-null reference: the manager keeps its handle
+    // after the child dies, so `this.process &&` was true for a corpse and the
+    // wedge branch below could never be reached.
+    if (this.process?.isRunning() && sessionId) {
+      // On claude this notify IS a process kill (`-p` has no cancel verb), so
+      // a restart is coming and the queue must survive it — see drainPromptQueue.
+      this.cancelExpectingRestart = true;
       this.process.notify('session/cancel', { sessionId });
+    } else if (!this.restartTimer && !this.intentionalKill) {
+      // THE WEDGE. A cancel that arrives when the runtime is already down — a
+      // second Esc, or one racing the previous exit — finds no process to
+      // signal. By then the exit handler's `wasHealthy` guard has already gone
+      // false (initialized was cleared by the first exit), so it scheduled no
+      // restart either. Nothing is coming: the pane stays dead until a human
+      // restarts it, every prompt fails "ACP runtime not initialized", and
+      // incoming mail is failed outright rather than deferred.
+      // Observed twice on 2026-08-03. A cancel must never be the thing that
+      // ends an agent — that is what the Stop button is for.
+      console.warn(
+        `[ACP ${this.options.agentName}] cancel with no live runtime — scheduling a restart so the pane does not stay dead`,
+      );
+      this.scheduleRestart('cancel arrived with no live runtime');
     }
     // Always emit turn_complete so the renderer clears the activity spinner,
     // even if the runtime process has already crashed and the cancel notify
@@ -1583,6 +1621,10 @@ export class AcpRuntimeManager extends EventEmitter {
 
   kill(opts?: { preserveQueue?: boolean }): void {
     this.intentionalKill = true;
+    // A deliberate kill ends any restart a cancel was expecting, so the held
+    // queue must not outlive it — dropQueuedPrompts below settles it unless
+    // the caller is restart(), which preserves it on purpose.
+    this.cancelExpectingRestart = false;
     this.stopPromptWatchdog();
     this.clearHumanWaitBackstop();
     this.replyTurnActive = false;
@@ -1627,6 +1669,11 @@ export class AcpRuntimeManager extends EventEmitter {
     try {
       await this.start();
       this.markHealthy();
+      // The restart a cancel was expecting has happened. Cleared HERE and not
+      // in markHealthy(), which also runs on every successful turn settle —
+      // i.e. immediately before the queue drain, wiping the flag at exactly
+      // the moment it is needed.
+      this.cancelExpectingRestart = false;
       console.log(`[ACP ${this.options.agentName}] Runtime restarted`);
       if (this.promptQueue.length > 0 || this.pendingSteers.size > 0) {
         if (this.resumedLastStart) {

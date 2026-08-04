@@ -2439,4 +2439,59 @@ describe('AcpRuntimeManager', () => {
 
     expect(endAgentSession).toHaveBeenCalledWith('rt-vibe-end', 'normal');
   });
+
+  it('a cancel with no live runtime schedules a restart instead of wedging the pane', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-wedge' });
+    await manager.start();
+
+    // The runtime is already down — a second Esc, or one racing the previous
+    // exit. Before this fix nothing was coming: the exit handler's wasHealthy
+    // guard had already gone false, so no restart was scheduled and the pane
+    // stayed dead, failing every prompt with "runtime not initialized" and
+    // failing incoming mail outright rather than deferring it.
+    getProcess().kill();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    manager.cancel();
+
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('cancel with no live runtime'))).toBe(true);
+    warn.mockRestore();
+
+    manager.kill();
+  });
+
+  it('holds queued prompts across a cancel-triggered restart instead of dropping them', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-hold' });
+    await manager.start();
+
+    // A turn is live and the human queues behind it.
+    let releaseTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((r) => { releaseTurn = r; }));
+    const firstTurn = manager.prompt('working');
+    await Promise.resolve();
+    void manager.prompt('queued behind it');
+    await Promise.resolve();
+
+    // Esc. On claude this notify IS a process kill, so the child goes down and
+    // the queue drain runs BEFORE the exit is processed — which is exactly when
+    // the queued prompt used to be discarded, for a restart that was already
+    // inevitable.
+    manager.cancel();
+    getProcess().kill();
+    releaseTurn({ stopReason: 'cancelled' });
+    await firstTurn.catch(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // Not dropped: no queue_cleared, and no "runtime not initialized" error.
+    expect(events.some((e) => e.update.sessionUpdate === 'queue_cleared')).toBe(false);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'error' && String((e.update as { error?: string }).error ?? '').includes('runtime not initialized'),
+      ),
+    ).toBe(false);
+
+    manager.kill();
+  });
 });
