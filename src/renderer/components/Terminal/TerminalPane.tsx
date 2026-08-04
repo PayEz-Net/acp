@@ -28,6 +28,14 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
   const backendAvailable = useAppStore((s) => s.backendAvailable);
   const teamRuntime = useProjectStore((s) => s.activeProject?.runtime_choice) ?? null;
   const [isThinkingLive, setIsThinkingLive] = useState(false);
+  // Busy/Ready comes from the ACP session's live turn, NOT from agent.status.
+  // agent.status was fed by terminalStream's STATUS_EXTRACTORS, which regex-
+  // scrape the rendered TUI frame — a surface the stream-json migration
+  // retired. Nothing writes 'busy' on the ACP path any more, so the pill was
+  // reporting a screen that no longer exists: idle while an agent worked, and
+  // flickering off whatever incidental text still matched.
+  const acpActiveTurnId = useAcpSessionStore((s) => s.sessions.get(agent.name)?.activeTurnId ?? null);
+  const acpRuntimeMode = useAcpSessionStore((s) => s.sessions.get(agent.name)?.runtimeMode);
   // Guard against duplicate spawn calls from React StrictMode double-invoke or
   // rapid prop changes before the first async spawn resolves.
   const spawnPendingRef = useRef(false);
@@ -220,9 +228,18 @@ export function TerminalPane({ agent, isFocused, onFocus, compact }: TerminalPan
     }
   }, [agent.autoStart, agent.status, agent.terminalId, startAgent]);
 
+  // In ACP mode an open turn IS busy — authoritative, not inferred from pixels.
+  // A stale scraped 'busy' with no live turn is downgraded to 'ready' rather
+  // than shown, so the pill can never be stuck busy on a finished agent.
+  const isAcpMode = acpRuntimeMode === 'acp';
+  const acpBusy = isAcpMode && !!acpActiveTurnId;
+  const baseStatus =
+    isAcpMode && agent.status === 'busy' && !acpActiveTurnId ? 'ready' : agent.status;
   const statusPill = isThinkingLive
     ? { label: 'Thinking…', color: 'bg-acp-status-busy', animate: true }
-    : getStatusPill(agent.status);
+    : acpBusy
+    ? { label: 'Busy', color: 'bg-acp-status-busy', animate: true }
+    : getStatusPill(baseStatus);
 
   const providerBadgeColor =
     effectiveProvider === 'claude'
