@@ -1851,7 +1851,48 @@ export class AcpRuntimeManager extends EventEmitter {
       sessionId: this.sessionId ?? '',
       update,
     };
+    this.logStreamDebug(update);
     this.emit('event', payload);
+  }
+
+  /**
+   * OFF BY DEFAULT. Mirror session updates to stdout for out-of-app observers.
+   *
+   * Session updates go to the renderer over IPC and never touch stdout, so
+   * from a log tail a hung turn and a long tool call are indistinguishable —
+   * both are simply silence until the 300s watchdog trips. That silence is
+   * exactly when you most want to know what the agent was doing (2026-08-03:
+   * two agents stalled 300s on a mail-triggered turn with no way to tell a
+   * blocked network probe from real thinking).
+   *
+   *   ACP_STREAM_DEBUG=1    turn boundaries, tool calls, plans, errors
+   *   ACP_STREAM_DEBUG=all  the above plus thought/message chunks (very loud)
+   *
+   * Never throws: a logging fault must not take down a runtime.
+   */
+  private logStreamDebug(update: AcpSessionUpdate): void {
+    const level = process.env.ACP_STREAM_DEBUG;
+    if (!level) return;
+    try {
+      const kind = update.sessionUpdate;
+      if (NOISY_SESSION_UPDATES.has(kind) && level !== 'all') return;
+      const u = update as unknown as Record<string, unknown>;
+      // Pull whichever identifying field this update type carries.
+      const detail =
+        (u.title as string | undefined) ??
+        (u.toolName as string | undefined) ??
+        (u.status as string | undefined) ??
+        (u.stopReason as string | undefined) ??
+        (typeof u.text === 'string' ? u.text : undefined) ??
+        (typeof u.content === 'string' ? u.content : undefined) ??
+        '';
+      const trimmed = String(detail).replace(/\s+/g, ' ').slice(0, 160);
+      console.log(
+        `[stream ${this.options.agentName}] ${kind}${trimmed ? ` — ${trimmed}` : ''}`,
+      );
+    } catch {
+      // Diagnostics are best-effort by definition.
+    }
   }
 }
 
