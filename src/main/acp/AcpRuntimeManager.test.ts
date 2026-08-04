@@ -2494,4 +2494,71 @@ describe('AcpRuntimeManager', () => {
 
     manager.kill();
   });
+
+  it('a human prompt at a dead runtime restarts it and holds the message, never throws', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-dead' });
+    await manager.start();
+
+    // The process is gone but the manager still holds the pane's registry slot
+    // — i.e. an unwanted death, not a user Stop (Stop deletes the runtime).
+    // The human types anyway. This used to throw "ACP runtime not initialized"
+    // across acp:prompt into the composer, schedule nothing, and lose the text.
+    getProcess().kill();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(manager.prompt('are you there')).resolves.toBeUndefined();
+
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('scheduling restart'))).toBe(true);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('holding human prompt'))).toBe(true);
+    warn.mockRestore();
+
+    // Held, not failed: queued for the restart, with no error surfaced.
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'error' && String((e.update as { error?: string }).error ?? '').includes('runtime not initialized'),
+      ),
+    ).toBe(false);
+
+    manager.kill();
+  });
+
+  it('mail arriving at a restarting runtime defers instead of reporting delivery failure', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-down' });
+    await manager.start();
+
+    // Kill the process and let the exit handler schedule the restart.
+    getProcess().emit('exit', 1, null);
+    await Promise.resolve();
+
+    await expect(manager.injectMail('[ACP Mail] from BAPert: standup')).resolves.toBe('deferred');
+
+    manager.kill();
+  });
+
+  it('still fails a prompt outright once the restart budget is exhausted', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-budget' });
+    await manager.start();
+
+    getProcess().kill();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Burn the restart budget without letting any restart timer run.
+    (manager as unknown as { restartCount: number }).restartCount = 99;
+
+    await manager.prompt('anyone home');
+
+    // Nothing is coming back, so parking the message would be a lie.
+    expect(
+      events.some(
+        (e) => e.update.sessionUpdate === 'error' && String((e.update as { error?: string }).error ?? '').includes('runtime not initialized'),
+      ),
+    ).toBe(true);
+    vi.restoreAllMocks();
+
+    manager.kill();
+  });
 });

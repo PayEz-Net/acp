@@ -890,9 +890,17 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   async prompt(text: string, images?: AcpPromptImage[]): Promise<void> {
-    if (!this.process?.isRunning() || !this.sessionId) {
-      throw new Error('ACP runtime not initialized');
-    }
+    // NO throw on a down runtime. This was the last prompt path that ended a
+    // human's message with "ACP runtime not initialized" — thrown across IPC
+    // into the composer, scheduling NO restart (every other prompt site did)
+    // and dropping the text. The pane then stayed dead until someone restarted
+    // it by hand. sendPrompt owns the dead-runtime case now: it gets a restart
+    // coming and holds the prompt for it. Reported 2026-08-04, again.
+    //
+    // This cannot revive a pane the user deliberately Stopped: killTerminal
+    // removes the manager from acpRuntimes, so a Stopped agent has no runtime
+    // to prompt at all. A dead process still holding a registry slot is an
+    // unwanted death by definition.
     this.recordUserPrompt(text);
     // Image blocks ride the same session/prompt after the text block. No
     // client-side format/size validation happens here — kimi's server-side
@@ -903,17 +911,20 @@ export class AcpRuntimeManager extends EventEmitter {
     }
     // A human prompt that will STEER into a busy turn still influences the
     // live task (good), but the turn may never end — arm the backstop that
-    // guarantees the human a dedicated reply turn.
-    if (this.promptInFlight) {
+    // guarantees the human a dedicated reply turn. Only against a LIVE turn:
+    // promptInFlight can be stale-true on a runtime that died mid-turn, and
+    // the backstop's job (cancel the turn that owes a reply) is meaningless
+    // there — it would only fire a cancel at a corpse.
+    if (this.promptInFlight && this.process?.isRunning()) {
       this.armHumanWaitBackstop();
     }
     await this.sendPrompt(prompt, 'human');
   }
 
   private async systemPrompt(text: string): Promise<void> {
-    if (!this.process?.isRunning() || !this.sessionId) {
-      throw new Error('ACP runtime not initialized');
-    }
+    // Same as prompt(): no throw. Callers only .catch()-and-log, so throwing
+    // here silently abandoned the kickoff/nudge with nothing scheduled to
+    // bring the runtime back.
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
     await this.sendPrompt(prompt, 'system');
   }
@@ -938,6 +949,16 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   async injectMail(text: string): Promise<AcpMailInjectResult> {
     if (!this.process?.isRunning() || !this.sessionId) {
+      // A restart already coming means this is a defer, not a failure: the
+      // resume path offers held mail (see offerDeferredMail's call in
+      // restart()). Only a runtime nothing will revive is a real 'failed'.
+      if (this.restartTimer || this.restarting || this.cancelExpectingRestart) {
+        this.rememberDeferredMail(text);
+        console.log(
+          `[ACP ${this.options.agentName}] mail deferred (runtime restarting) — will be summarised after the resume`,
+        );
+        return 'deferred';
+      }
       console.warn(`[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized`);
       return 'failed';
     }
@@ -970,10 +991,22 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   private sendPrompt(prompt: AcpSendContentBlock[], kind: 'human' | 'system'): Promise<boolean> {
     if (!this.process?.isRunning() || !this.sessionId) {
+      // Get a restart coming FIRST, then decide the prompt's fate from whether
+      // one actually is. A dead runtime is not a reason to throw the message
+      // away: hold it exactly like a prompt queued behind a live turn, and the
+      // existing restart machinery settles it (drained on a resumed session,
+      // dropped visibly on a fresh one, dropped again if the restart budget is
+      // gone). This branch used to be terminal for the message.
+      this.scheduleRestart('runtime not running when prompt sent');
+      if (this.restartTimer || this.restarting || this.cancelExpectingRestart) {
+        return this.holdForRestart(prompt, kind);
+      }
+      // Nothing is coming — the restart budget is exhausted (scheduleRestart
+      // has already said so, and settled the rest of the queue). Fail visibly
+      // rather than park the message on a runtime that will never return.
       const message = 'ACP runtime not initialized';
       console.error(`[ACP ${this.options.agentName}] ${message}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
-      this.scheduleRestart('runtime not running when prompt sent');
       return Promise.resolve(false);
     }
 
@@ -996,6 +1029,30 @@ export class AcpRuntimeManager extends EventEmitter {
 
     this.executePrompt(prompt, undefined, false, kind);
     return Promise.resolve(true);
+  }
+
+  /**
+   * Park a prompt sent at a runtime that is down but coming back. Identical
+   * settlement contract to enqueueBehindActiveTurn — the waiter resolves true
+   * when the entry drains after the resume, false if it is dropped — so the
+   * renderer's queued indicator (prompt_queued) means the same thing in both
+   * cases: "sent, not yet dispatched".
+   */
+  private holdForRestart(prompt: AcpSendContentBlock[], kind: 'human' | 'system'): Promise<boolean> {
+    const sessionId = this.sessionId ?? '';
+    console.warn(
+      `[ACP ${this.options.agentName}] runtime down — holding ${kind} prompt for the pending restart ` +
+        `(depth=${this.promptQueue.length + 1})`,
+    );
+    const promise = new Promise<boolean>((resolve) => {
+      this.promptQueue.push({ prompt, resolve, kind });
+    });
+    this.emitAcpEvent({
+      sessionUpdate: 'prompt_queued',
+      sessionId,
+      queueDepth: this.promptQueue.length,
+    });
+    return promise;
   }
 
   /**
