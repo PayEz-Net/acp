@@ -398,7 +398,7 @@ export class AcpRuntimeManager extends EventEmitter {
             this.agentBusyCancelSent = false;
             this.skipResumeOnce = true;
           }
-          this.process?.notify('session/cancel', { sessionId: this.sessionId });
+          this.sendSessionCancel(this.sessionId);
           this.failPendingTurn(message);
           void this.restart();
           return;
@@ -435,7 +435,7 @@ export class AcpRuntimeManager extends EventEmitter {
         console.warn(
           `[ACP ${this.options.agentName}] no response for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending — sent session/cancel; restarting only if unanswered for ${(WATCHDOG_CANCEL_GRACE_TICKS * WATCHDOG_INTERVAL_MS) / 1000}s`,
         );
-        this.process?.notify('session/cancel', { sessionId: this.sessionId });
+        this.sendSessionCancel(this.sessionId);
       }
     }, WATCHDOG_INTERVAL_MS);
   }
@@ -680,6 +680,9 @@ export class AcpRuntimeManager extends EventEmitter {
     this.process.on('exit', (code: number | null, signal: string | null) => {
       const wasIntentional = this.intentionalKill;
       const wasHealthy = this.initialized;
+      // A cancel we sent is a kill we asked for — recoverable by definition,
+      // whatever `initialized` says by the time the exit lands.
+      const wasCancelled = this.cancelExpectingRestart;
       this.intentionalKill = false;
       console.warn(`[ACP ${this.options.agentName}] process exited (code=${code}, signal=${signal})`);
       this.stopPromptWatchdog();
@@ -695,7 +698,13 @@ export class AcpRuntimeManager extends EventEmitter {
       // If the runtime died unexpectedly while it was healthy, try to bring it
       // back. Intentional kills (manual restart/quit) and startup-time crashes
       // are handled by the caller.
-      if (!wasIntentional && wasHealthy) {
+      // `wasHealthy` reads `initialized`, which an earlier exit may already
+      // have cleared — that is how a cancelled runtime ended up with nothing
+      // scheduled to bring it back, dead until a human restarted the pane.
+      // An exit that FOLLOWS a cancel is always recoverable: the cancel was a
+      // kill we asked for, not a failure, so it must be restarted regardless
+      // of what `initialized` currently says.
+      if (!wasIntentional && (wasHealthy || wasCancelled)) {
         this.scheduleRestart(`process exited (code=${code}, signal=${signal})`);
       }
     });
@@ -1139,7 +1148,7 @@ export class AcpRuntimeManager extends EventEmitter {
       console.warn(
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_GRACE_MS}ms inside a busy turn — cancelling so the human gets a dedicated reply turn`,
       );
-      this.process.notify('session/cancel', { sessionId });
+      this.sendSessionCancel(sessionId);
       // On a no-steer runtime the human's messages never reached the agent —
       // they are waiting in promptQueue. Fold their text into the reply-turn
       // nudge so the reply turn answers what was actually said, and so the
@@ -1339,7 +1348,7 @@ export class AcpRuntimeManager extends EventEmitter {
               console.warn(
                 `[ACP ${this.options.agentName}] busy turn survived ${AGENT_BUSY_CANCEL_AFTER} probes — sending session/cancel to free the session`,
               );
-              this.process?.notify('session/cancel', { sessionId });
+              this.sendSessionCancel(sessionId);
               this.agentBusyCancelSent = true;
             }
             if (this.agentBusyRejectionCount >= MAX_AGENT_BUSY_REJECTIONS) {
@@ -1356,7 +1365,7 @@ export class AcpRuntimeManager extends EventEmitter {
               this.agentBusyRejectionCount = 0;
               this.agentBusyCancelSent = false;
               this.skipResumeOnce = true;
-              if (cancelNeeded) this.process?.notify('session/cancel', { sessionId });
+              if (cancelNeeded) this.sendSessionCancel(sessionId);
               this.failPendingTurn(busyMessage);
               void this.restart();
               return;
@@ -1377,7 +1386,7 @@ export class AcpRuntimeManager extends EventEmitter {
           // Answered non-busy: any busy re-sync episode is over.
           this.agentBusyRejectionCount = 0;
           this.agentBusyCancelSent = false;
-          this.process.notify('session/cancel', { sessionId });
+          this.sendSessionCancel(sessionId);
           this.failPendingTurn(message);
           this.drainPromptQueue();
           return;
@@ -1588,7 +1597,7 @@ export class AcpRuntimeManager extends EventEmitter {
       // On claude this notify IS a process kill (`-p` has no cancel verb), so
       // a restart is coming and the queue must survive it — see drainPromptQueue.
       this.cancelExpectingRestart = true;
-      this.process.notify('session/cancel', { sessionId });
+      this.sendSessionCancel(sessionId);
     } else if (!this.restartTimer && !this.intentionalKill) {
       // THE WEDGE. A cancel that arrives when the runtime is already down — a
       // second Esc, or one racing the previous exit — finds no process to
@@ -1734,6 +1743,28 @@ export class AcpRuntimeManager extends EventEmitter {
       this.restartTimer = null;
       void this.restart();
     }, delay);
+  }
+
+  /**
+   * The ONLY way to send session/cancel. Every cancel site must route through
+   * here — there are seven (watchdog ladder x2, human-wait backstop,
+   * agent-busy probes x3, and the human cancel), and on claude EVERY one of
+   * them is a process kill, because `-p` has no cancel verb.
+   *
+   * Recording the expectation before the notify is the whole point: the prompt
+   * queue drains on turn-settle, which happens BEFORE the exit is processed
+   * and therefore before restartTimer exists. Without this flag the drain
+   * cannot tell "the runtime is gone for good" from "the runtime is coming
+   * right back", and discards the human's queued messages either way.
+   *
+   * Learned the hard way (2026-08-03): the fix was first applied to cancel()
+   * alone, and the very next wedge came in through the human-wait backstop —
+   * a different site, same kill, none of the protection.
+   */
+  private sendSessionCancel(sessionId: string | null): void {
+    if (!sessionId) return;
+    this.cancelExpectingRestart = true;
+    this.process?.notify('session/cancel', { sessionId });
   }
 
   private markHealthy(): void {

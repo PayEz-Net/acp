@@ -51,6 +51,7 @@ import {
   mapCloudProject,
   type MappedProject,
   type CurrentProjectState,
+  type CloudProjectDto,
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
 import { getStartedProjectId } from '../projects/startedProject.js';
@@ -384,33 +385,70 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       }
       const idForCloud = project_id === null ? null : parseInt(String(project_id), 10);
 
-      // POST → PUT bridge to cloud.
-      const { status, payload } = await callCloud(cfg, 'PUT', CLOUD_CURRENT_PROJECT_PATH, undefined, { project_id: idForCloud });
+      // THE LAST WRITE TO THE SHARED SLOT — removed 2026-08-03.
+      //
+      // This used to PUT /v1/users/me/current-project, which is a SINGLE
+      // PER-USER SLOT SHARED BY EVERY MACHINE ON THE ACCOUNT. Two rigs, one
+      // slot: whichever dev clicked Start last owned it, and the other machine's
+      // picker showed a project nobody had selected there.
+      //
+      // The read side was already localized — readCurrent() answers from
+      // getStartedProjectId(), the machine-local Start click, and consults the
+      // cloud only for display fields by EXPLICIT id. This was the remaining
+      // writer, so the slot was being polluted for a value nothing on this rig
+      // reads any more.
+      //
+      // Nothing else depends on it: mail send now REQUIRES an explicit
+      // project_id and refuses to guess, and every read is stamped with
+      // requireStartedProjectId(). The switch's real work — the machine-local
+      // declaration, the boot overlay, the relaunch — is in main/project-switch.ts
+      // and never needed the cloud's agreement.
+      //
+      // Trade-off, stated plainly: the cloud's per-user pointer now goes stale
+      // for this account. That is intended. It is picker display state, never an
+      // authority (see acp-api/api/projects/engagement.ts), and a value two
+      // machines fight over is worse than one nobody writes. If a cloud surface
+      // ever needs "what is this user on", it needs a per-MACHINE pointer, not
+      // this one.
+      // The cloud error passthrough that stood here (PROJECT_ARCHIVED 400,
+      // PROJECT_FORBIDDEN 403, PROJECT_NOT_FOUND 404, 502 on writeback failure)
+      // went with the PUT: there is no longer a remote call that can fail, so
+      // there are no remote errors to relay. This also removes a cloud
+      // dependency from a purely local decision — a project switch can no
+      // longer be blocked by the network, which is the correct posture for
+      // something whose authority is a click on THIS machine.
+      //
+      // Membership/archive validation still happens where it belongs: the
+      // picker lists only projects the user has, and every project-scoped read
+      // and write is stamped with requireStartedProjectId() downstream.
 
-      // Pass cloud error codes through with their original HTTP status so
-      // FE switches on the real archive guard / forbidden / not-found
-      // distinctions.
-      if (status === 400 || status === 403 || status === 404) {
-        const upstreamError = (payload as any)?.error ?? {};
-        const code = upstreamError.code || (status === 400 ? 'BAD_REQUEST' : status === 403 ? 'PROJECT_FORBIDDEN' : 'PROJECT_NOT_FOUND');
-        const message = upstreamError.message || `Cloud returned HTTP ${status}`;
-        res.status(status).json(error(code, message, 'project_set_current', (req as any).requestId));
-        return;
-      }
-      if (status < 200 || status >= 300 || !(payload as any)?.success) {
-        const upstreamMsg = (payload as any)?.error?.message || `Cloud writeback returned HTTP ${status}`;
-        res.status(502).json(error('PROXY_ERROR', upstreamMsg, 'project_set_current', (req as any).requestId));
-        return;
-      }
-
-      // Invalidate current-pointer cache so the next sync sees the change
-      // immediately. List cache stays — switching focus doesn't change
+      // Invalidate the display-cache entry so the next sync repaints from the
+      // new selection. List cache stays — switching focus doesn't change
       // membership.
       cache.current.clear(userId);
 
-      const data = (payload as any).data ?? {};
-      const cloudProject = data.project ?? null;
-      const current_project_id = typeof data.current_project_id === 'number' ? data.current_project_id : (idForCloud ?? null);
+      const current_project_id = idForCloud;
+
+      // Display fields for the response and the SSE project_name. Fetched by
+      // EXPLICIT id — a plain project read, never the shared per-user slot.
+      // Same pattern readCurrent() uses: the id is already settled, this only
+      // decorates it. A failure here costs a name in the payload, not the
+      // switch, so it is warned and swallowed.
+      let cloudProject: CloudProjectDto | null = null;
+      if (current_project_id !== null) {
+        {
+          try {
+            const detail = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${current_project_id}`);
+            if (detail.status >= 200 && detail.status < 300) {
+              cloudProject = (detail.payload as any)?.data?.project ?? (detail.payload as any)?.data ?? null;
+            } else {
+              console.warn(`[projects] set-current ${current_project_id} details: cloud HTTP ${detail.status}`);
+            }
+          } catch (err: any) {
+            console.warn(`[projects] set-current ${current_project_id} details unavailable: ${err.message}`);
+          }
+        }
+      }
 
       // SSE emit — preserves existing FE listeners (useAcpSse →
       // projectStore.handleProjectSwitched → syncTeam force-refresh).
