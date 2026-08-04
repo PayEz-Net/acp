@@ -2440,6 +2440,135 @@ describe('AcpRuntimeManager', () => {
     expect(endAgentSession).toHaveBeenCalledWith('rt-vibe-end', 'normal');
   });
 
+  it('does not carry a kill intent into the next process — one auto-restart used to poison a runtime forever', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-poison' });
+    await manager.start();
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // First death, unexpected. The exit handler nulls `process` and schedules
+    // the restart.
+    getProcess().emit('exit', 1, null);
+    await Promise.resolve();
+
+    // The restart runs, and kill() finds `process` ALREADY null — so it killed
+    // nothing, no exit event followed, and the intentionalKill it set up front
+    // was never reset. Every auto-restart went through this.
+    await manager.restart();
+    expect(manager.isInitialized()).toBe(true);
+
+    // Second death on the FRESH process, equally unexpected. Before the fix the
+    // stale flag made this read as a deliberate app kill: willRestart=false,
+    // nothing scheduled, agent dead until a human noticed.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    getProcess().emit('exit', 1, null);
+    await Promise.resolve();
+
+    const decision = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes('exit decision'));
+    expect(decision).toContain('intentional=false');
+    expect(decision).toContain('willRestart=true');
+
+    manager.kill();
+  });
+
+  it('a cancelled exit outranks the intentional-kill flag instead of being vetoed by it', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-veto' });
+    await manager.start();
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // The exact state observed on DotNetPert and BAPert (2026-08-04): a watchdog
+    // cancel killed the child while a stale intentional flag was still set. The
+    // old `!wasIntentional && (...)` let the stale flag veto the cancel's
+    // always-recoverable guarantee, and the pane wedged.
+    (manager as unknown as { intentionalKill: boolean }).intentionalKill = true;
+    (manager as unknown as { cancelExpectingRestart: boolean }).cancelExpectingRestart = true;
+
+    getProcess().emit('exit', 143, null);
+    await Promise.resolve();
+
+    const decision = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes('exit decision'));
+    expect(decision).toContain('willRestart=true');
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('scheduling restart'))).toBe(true);
+
+    manager.kill();
+  });
+
+  it('raises a wedge alarm when an exit leaves work waiting with nothing scheduled to recover', async () => {
+    vi.useFakeTimers();
+    try {
+      mockState.setResponse('initialize', {});
+      mockState.setResponse('session/new', { sessionId: 'sess-wedge-alarm' });
+      await manager.start();
+
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      // A human message is waiting on this runtime.
+      (manager as unknown as { promptQueue: unknown[] }).promptQueue.push({
+        prompt: [{ type: 'text', text: 'are you there' }],
+        resolve: () => {},
+        kind: 'human',
+      });
+      // The second exit of a pair: `initialized` was already cleared by the
+      // first, so wasHealthy is false and no restart is owed by the rules —
+      // the shape that has wedged panes repeatedly.
+      (manager as unknown as { initialized: boolean }).initialized = false;
+
+      getProcess().emit('exit', 1, null);
+      await Promise.resolve();
+
+      // Nothing came back, and nothing is coming.
+      vi.advanceTimersByTime(6_000);
+
+      const alarm = error.mock.calls.map((c) => String(c[0])).find((l) => l.includes('WEDGED'));
+      expect(alarm).toBeDefined();
+      expect(alarm).toContain('1 item(s) waiting');
+      expect(events.some((e) => String((e.update as { error?: string }).error ?? '').includes('WEDGED'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stays silent when the runtime recovers — the wedge alarm must not cry wolf', async () => {
+    vi.useFakeTimers();
+    try {
+      mockState.setResponse('initialize', {});
+      mockState.setResponse('session/new', { sessionId: 'sess-no-wolf' });
+      await manager.start();
+
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      (manager as unknown as { promptQueue: unknown[] }).promptQueue.push({
+        prompt: [{ type: 'text', text: 'are you there' }],
+        resolve: () => {},
+        kind: 'human',
+      });
+      (manager as unknown as { initialized: boolean }).initialized = false;
+
+      getProcess().emit('exit', 1, null);
+      await Promise.resolve();
+
+      // A restart gets armed a beat later — by a prompt reviving the runtime, or
+      // the cancel-with-no-live-runtime branch. The alarm must see that and hold
+      // its tongue, or it becomes noise and gets muted.
+      (manager as unknown as { restartTimer: unknown }).restartTimer = setTimeout(() => {}, 60_000);
+
+      vi.advanceTimersByTime(6_000);
+
+      expect(error.mock.calls.map((c) => String(c[0])).some((l) => l.includes('WEDGED'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a cancel with no live runtime schedules a restart instead of wedging the pane', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-wedge' });

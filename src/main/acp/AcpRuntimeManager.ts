@@ -300,6 +300,9 @@ export class AcpRuntimeManager extends EventEmitter {
   private restarting = false;
   private restartCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  // Armed by an exit that scheduled no restart; fires once to check whether the
+  // runtime actually came back. See armWedgeDetector().
+  private wedgeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly MAX_RESTARTS = 5;
   // Cause of death of the LAST runtime process, recorded at every site that
   // takes one down (exit, process error, start failure, kill). "ACP runtime
@@ -668,6 +671,12 @@ export class AcpRuntimeManager extends EventEmitter {
     if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
     // Claude speaks stream-json, not ACP JSON-RPC; ClaudeStreamJsonProcess is
     // the shim that presents the AcpProcess surface over that wire.
+    // A NEW CHILD INHERITS NO KILL INTENT. `intentionalKill` describes one
+    // specific process's death; carrying a previous process's flag across a
+    // respawn is what made an auto-restarted runtime refuse to ever restart
+    // again. Belt and braces with the kill() fix: whatever leaves the flag set,
+    // a fresh spawn starts from a clean slate.
+    this.intentionalKill = false;
     this.process =
       this.provider.id === 'claude'
         ? new ClaudeStreamJsonProcess({
@@ -782,7 +791,14 @@ export class AcpRuntimeManager extends EventEmitter {
       // Named, not inferred. A wedge (exit with nothing scheduled to bring the
       // runtime back) has been diagnosed three times by reading tea leaves and
       // twice wrongly. This line makes the next one state its own cause.
-      const willRestart = !wasIntentional && (wasHealthy || wasCancelled);
+      // A cancel OUTRANKS the intentional-kill flag rather than being vetoed by
+      // it. The old form — `!wasIntentional && (wasHealthy || wasCancelled)` —
+      // said the opposite of the paragraph above it: any stale/incorrect
+      // `intentionalKill` silently cancelled the "always recoverable" guarantee,
+      // which is precisely how the 2026-08-04 wedge got through with all three
+      // flags true. kill() clears cancelExpectingRestart, so a genuine app kill
+      // still lands here with wasCancelled=false and is still not restarted.
+      const willRestart = wasCancelled || (!wasIntentional && wasHealthy);
       console.log(
         `[ACP ${this.options.agentName}] exit decision: willRestart=${willRestart} ` +
           `(intentional=${wasIntentional} healthy=${wasHealthy} cancelled=${wasCancelled} ` +
@@ -791,6 +807,12 @@ export class AcpRuntimeManager extends EventEmitter {
       );
       if (willRestart) {
         this.scheduleRestart(`process exited (code=${code}, signal=${signal})`);
+      } else if (!wasIntentional) {
+        // Declined a restart on an exit nobody asked for. That is either
+        // correct (nothing was owed) or a wedge — and the difference is only
+        // visible a moment later, once every other recovery path has had its
+        // chance. Arm the detector rather than guess now.
+        this.armWedgeDetector(`exit (code=${code}, signal=${signal}, ${flavour})`);
       }
     });
 
@@ -1780,13 +1802,19 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   kill(opts?: { preserveQueue?: boolean }): void {
-    this.intentionalKill = true;
+    // `intentionalKill` is claimed at the BOTTOM of this method, not here —
+    // see the process check below for why claiming it up front poisoned the
+    // next process's exit decision.
+    //
     // A deliberate kill ends any restart a cancel was expecting, so the held
     // queue must not outlive it — dropQueuedPrompts below settles it unless
     // the caller is restart(), which preserves it on purpose.
     this.cancelExpectingRestart = false;
     this.stopPromptWatchdog();
     this.clearHumanWaitBackstop();
+    // A deliberate kill is not a wedge — disarm any alarm a previous exit left
+    // armed, so a user Stop never reports itself as one.
+    this.clearWedgeDetector();
     this.replyTurnActive = false;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
@@ -1810,7 +1838,21 @@ export class AcpRuntimeManager extends EventEmitter {
       // still owes those waiters a settlement.
       this.dropQueuedPrompts('runtime killed');
     }
+    // NOTHING TO KILL = NOTHING TO CLAIM. `intentionalKill` is only ever read
+    // by the 'exit' handler, and it is only ever reset there (line ~751). With
+    // no process there is no exit coming, so setting it here left it true for
+    // the entire life of the NEXT process — which then read its own unexpected
+    // exit as a deliberate app kill and refused to restart.
+    //
+    // This is not a rare path. restart() calls kill() and the exit handler has
+    // already nulled `this.process`, so EVERY auto-restart ran it: one restart
+    // was enough to poison the runtime permanently. Observed 2026-08-04 on
+    // DotNetPert and BAPert — a watchdog cancel killed the child, the exit
+    // decision read intentional=true, nothing was scheduled, and the agent sat
+    // dead holding a queued prompt and five deferred mails until a human noticed.
     if (!this.process) return;
+    // Claimed HERE, where an exit is now guaranteed to arrive and reset it.
+    this.intentionalKill = true;
     this.recordDown(`kill() by the app (preserveQueue=${opts?.preserveQueue === true}, midTurn=${this.promptInFlight})`);
     this.process.kill('SIGTERM');
     this.process = null;
@@ -1886,6 +1928,50 @@ export class AcpRuntimeManager extends EventEmitter {
     } finally {
       this.restarting = false;
     }
+  }
+
+  /**
+   * THE WEDGE ALARM.
+   *
+   * A wedge is one state: the process is gone, work is waiting, and nothing is
+   * scheduled to bring the runtime back. It has been diagnosed five times by
+   * reading tea leaves — twice wrongly — because it is INVISIBLE at the moment
+   * it forms. Every individual log line looks reasonable; only the absence of
+   * the next line is wrong, and absence is not something anyone greps for.
+   *
+   * So assert the invariant instead of trusting the code that maintains it.
+   * Armed by an exit that declined to restart, checked once the other recovery
+   * paths (restart(), a prompt reviving a dead runtime, the cancel-with-no-live-
+   * runtime branch) have had their chance. If the runtime is back, or a restart
+   * is pending, or nothing was owed — silence. Otherwise say so, loudly, with
+   * the full snapshot and the exit that started it.
+   *
+   * This catches the SHAPE of the failure, not one cause, so the next wedge from
+   * a cause nobody has thought of announces itself instead of being noticed
+   * hours later as an agent that went quiet.
+   */
+  private armWedgeDetector(cause: string): void {
+    if (this.wedgeTimer) return;
+    this.wedgeTimer = setTimeout(() => {
+      this.wedgeTimer = null;
+      // Recovered, or recovery is on its way — every one of these is a normal
+      // outcome and must stay silent, or the alarm becomes noise and gets muted.
+      if (this.process || this.restartTimer || this.restarting || this.initialized) return;
+      const owed =
+        this.promptQueue.length + this.pendingSteers.size + this.deferredMailHeaders.length + this.deferredMailOverflow;
+      if (owed === 0 && !this.promptInFlight) return;
+      const message =
+        `WEDGED — runtime is down, ${owed} item(s) waiting, and NOTHING is scheduled to bring it back. ` +
+        `Triggered by: ${cause}. This agent will stay dead until a human restarts the pane.`;
+      console.error(`[ACP ${this.options.agentName}] ${message} — ${this.describeRuntimeState()}`);
+      this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
+    }, WEDGE_CHECK_MS);
+  }
+
+  private clearWedgeDetector(): void {
+    if (!this.wedgeTimer) return;
+    clearTimeout(this.wedgeTimer);
+    this.wedgeTimer = null;
   }
 
   private scheduleRestart(reason: string): void {
@@ -2388,6 +2474,14 @@ const HUMAN_WAITING_NUDGE =
  */
 /** Ticks (× the 15s watchdog interval) a cancelled stall gets to settle before the kill+restart escalates. */
 const WATCHDOG_CANCEL_GRACE_TICKS = 2;
+
+/**
+ * How long the wedge detector waits after a restart-less exit before calling it.
+ * Must outlast the slowest legitimate recovery: restart()'s 500ms stdio-release
+ * pause, plus scheduleRestart()'s first backoff step (1s), plus room for a
+ * prompt/mail arriving a beat later and reviving the runtime itself.
+ */
+const WEDGE_CHECK_MS = 5_000;
 /** How long stderr throttle evidence (429/quota/backoff) stays fresh enough to extend grace. */
 const THROTTLE_EVIDENCE_FRESH_MS = 10 * 60_000;
 /**
