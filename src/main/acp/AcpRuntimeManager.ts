@@ -124,12 +124,68 @@ function extractActiveModelImageIn(sessionResult: Record<string, unknown>): bool
   return typeof active.imageIn === 'boolean' ? active.imageIn : undefined;
 }
 
-async function acquireInitLock(): Promise<() => void> {
+/**
+ * Longest any runtime will wait for the shared init lock before going anyway.
+ *
+ * The lock serializes `initialize` across ALL runtimes (kimi shared-global-state
+ * races, -32603). It had no bound: `await oldLock` waits forever, and the holder
+ * only releases when its handshake settles. A provider that accepts the request
+ * and never answers — the `wait_state`-then-silence stall seen repeatedly on
+ * this machine — therefore parked every later start on the box behind it.
+ *
+ * That is the wedge. restart() sets `restarting = true` before calling start(),
+ * and clears it only in a finally that never runs, so every subsequent restart
+ * hit `if (this.restarting) return` and died silently. The agent could not come
+ * back at all, with no error, no restart-budget message, nothing.
+ *
+ * 60s is far past a healthy handshake (sub-second) and far short of the 300s
+ * turn watchdog. Going ahead risks the kimi race the lock exists to prevent —
+ * acceptable, because by then the alternative is a permanently dead agent.
+ */
+const INIT_LOCK_MAX_WAIT_MS = 60_000;
+
+/** Bounds the handshake itself, so the HOLDER releases instead of hanging forever. */
+const HANDSHAKE_TIMEOUT_MS = 90_000;
+
+async function acquireInitLock(agentName: string): Promise<() => void> {
   const oldLock = initLock;
   let release: () => void;
   initLock = new Promise<void>((resolve) => { release = resolve; });
-  await oldLock;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    oldLock.then(() => false),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), INIT_LOCK_MAX_WAIT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  if (timedOut) {
+    console.warn(
+      `[ACP ${agentName}] init lock held >${INIT_LOCK_MAX_WAIT_MS}ms by a handshake that never ` +
+        `released — proceeding without it. A previous runtime's initialize is hung; expect that ` +
+        `agent to be unhealthy, but this one must not be held hostage to it.`,
+    );
+  }
   return release!;
+}
+
+/** Reject a never-settling handshake request so its caller can fail and recover. */
+function withHandshakeTimeout<T>(p: Promise<T>, label: string, agentName: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p.finally(() => { if (timer) clearTimeout(timer); }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} did not answer within ${HANDSHAKE_TIMEOUT_MS}ms`)),
+        HANDSHAKE_TIMEOUT_MS,
+      );
+    }),
+  ]).catch((err) => {
+    console.warn(`[ACP ${agentName}] handshake ${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  });
 }
 
 export class AcpRuntimeManager extends EventEmitter {
@@ -723,7 +779,17 @@ export class AcpRuntimeManager extends EventEmitter {
       // An exit that FOLLOWS a cancel is always recoverable: the cancel was a
       // kill we asked for, not a failure, so it must be restarted regardless
       // of what `initialized` currently says.
-      if (!wasIntentional && (wasHealthy || wasCancelled)) {
+      // Named, not inferred. A wedge (exit with nothing scheduled to bring the
+      // runtime back) has been diagnosed three times by reading tea leaves and
+      // twice wrongly. This line makes the next one state its own cause.
+      const willRestart = !wasIntentional && (wasHealthy || wasCancelled);
+      console.log(
+        `[ACP ${this.options.agentName}] exit decision: willRestart=${willRestart} ` +
+          `(intentional=${wasIntentional} healthy=${wasHealthy} cancelled=${wasCancelled} ` +
+          `restartTimerPending=${this.restartTimer !== null} restartCount=${this.restartCount} ` +
+          `restarting=${this.restarting} code=${code} signal=${signal})`,
+      );
+      if (willRestart) {
         this.scheduleRestart(`process exited (code=${code}, signal=${signal})`);
       }
     });
@@ -732,17 +798,17 @@ export class AcpRuntimeManager extends EventEmitter {
 
     // Serialize the initialize handshake across all ACP runtimes to avoid Kimi
     // shared-global-state races that surface as -32603 internal errors.
-    const releaseLock = await acquireInitLock();
+    const releaseLock = await acquireInitLock(this.options.agentName);
     let initResult: Record<string, unknown>;
     let sessionResult: Record<string, unknown>;
     let agentCaps: AcpAgentCapabilities = {};
     let resumed = false;
     try {
-      initResult = (await this.process.request('initialize', {
+      initResult = (await withHandshakeTimeout(this.process.request('initialize', {
         protocolVersion: 1,
         capabilities: this.provider.defaultCapabilities,
         clientInfo: { name: 'acp-desktop', version: '1.0.0' },
-      })) as Record<string, unknown>;
+      }), 'initialize', this.options.agentName)) as Record<string, unknown>;
       agentCaps = (initResult.agentCapabilities as AcpAgentCapabilities) ?? {};
 
       // Version floor (WO-ACP-KIMI-NATIVE-IMAGE-PASTE §4): the delegated
@@ -783,11 +849,11 @@ export class AcpRuntimeManager extends EventEmitter {
       }
       if (!skipResume && this.lastSessionId && agentCaps.loadSession) {
         try {
-          await this.process.request('session/resume', {
+          await withHandshakeTimeout(this.process.request('session/resume', {
             sessionId: this.lastSessionId,
             cwd: this.options.workDir,
             mcpServers: [],
-          });
+          }), 'session/resume', this.options.agentName);
           resumed = true;
           console.log(`[ACP ${this.options.agentName}] resumed session ${this.lastSessionId}`);
         } catch (err) {
@@ -797,10 +863,10 @@ export class AcpRuntimeManager extends EventEmitter {
       if (resumed) {
         sessionResult = { sessionId: this.lastSessionId };
       } else {
-        sessionResult = (await this.process.request('session/new', {
+        sessionResult = (await withHandshakeTimeout(this.process.request('session/new', {
           mcpServers: [],
           cwd: this.options.workDir,
-        })) as Record<string, unknown>;
+        }), 'session/new', this.options.agentName)) as Record<string, unknown>;
       }
     } finally {
       releaseLock();
@@ -1754,7 +1820,18 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    if (this.restarting) return;
+    // Silent no-op = permanent death. `restarting` clears only in the finally
+    // below, so if start() never settles this flag stays true forever and every
+    // future restart is discarded without a word. Prime suspect for the wedge:
+    // startOnce() waits on a mutex serialized across ALL runtimes, so one hung
+    // initialize can park every later restart behind it.
+    if (this.restarting) {
+      console.warn(
+        `[ACP ${this.options.agentName}] restart SKIPPED — a previous restart never completed ` +
+          `(restarting flag still set). This agent cannot come back until it clears.`,
+      );
+      return;
+    }
     this.restarting = true;
     console.log(`[ACP ${this.options.agentName}] Restarting runtime`);
     this.kill({ preserveQueue: true });
@@ -1812,7 +1889,15 @@ export class AcpRuntimeManager extends EventEmitter {
   }
 
   private scheduleRestart(reason: string): void {
-    if (this.restartTimer) return;
+    // The silent early-return: a restart is requested, refused, and nothing
+    // says so. If the pending timer never fires the agent is dead with no
+    // trace of why. Say it out loud.
+    if (this.restartTimer) {
+      console.warn(
+        `[ACP ${this.options.agentName}] restart request IGNORED (a restart is already pending): ${reason}`,
+      );
+      return;
+    }
     if (this.restartCount >= this.MAX_RESTARTS) {
       const message = `Runtime keeps failing (${this.restartCount} restarts): ${reason}`;
       // The terminal state: nothing will bring this pane back without a human.
