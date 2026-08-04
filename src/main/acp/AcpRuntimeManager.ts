@@ -1646,6 +1646,15 @@ export class AcpRuntimeManager extends EventEmitter {
           this.dropQueuedPrompts('runtime restarted with a fresh session');
         }
       }
+      // Mail held from before the restart is offered here too, NOT only via
+      // drainPromptQueue: the drain above is gated on there being queued
+      // prompts, and a watchdog kill calls dropQueuedPrompts() first — so an
+      // agent that stalled, died and resumed comes back with an empty queue
+      // and nothing would ever trigger the offer. That is exactly the agent
+      // that most needs to know what it missed while it was face-down.
+      // Only meaningful on a resumed session; a fresh one has no continuity to
+      // hand the mail back into (dropQueuedPrompts above makes the same call).
+      if (this.resumedLastStart) this.offerDeferredMail();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[ACP ${this.options.agentName}] Runtime restart failed:`, err);
