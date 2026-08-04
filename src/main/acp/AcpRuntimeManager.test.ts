@@ -2538,6 +2538,37 @@ describe('AcpRuntimeManager', () => {
     manager.kill();
   });
 
+  it('names the cause of death in the error a dead runtime surfaces', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-diag' });
+    await manager.start();
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Budget first so the exit handler's scheduleRestart bails without arming a
+    // timer — otherwise the prompt is held and never reaches the failure path.
+    (manager as unknown as { restartCount: number }).restartCount = 99;
+    getProcess().emit('exit', 137, 'SIGKILL');
+    await Promise.resolve();
+
+    await manager.prompt('anyone home');
+
+    const failure = events.find(
+      (e) => e.update.sessionUpdate === 'error' && String((e.update as { error?: string }).error ?? '').includes('runtime not initialized'),
+    );
+    const text = String((failure?.update as { error?: string } | undefined)?.error ?? '');
+    // "ACP runtime not initialized" alone was reported three times in two days
+    // with nothing to diagnose from. The message must carry which half of the
+    // guard failed, and what killed the process.
+    expect(text).toContain('process=absent');
+    expect(text).toContain('code=137');
+    expect(text).toContain('signal=SIGKILL');
+    expect(text).toContain('restarts=');
+    vi.restoreAllMocks();
+
+    manager.kill();
+  });
+
   it('still fails a prompt outright once the restart budget is exhausted', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-budget' });

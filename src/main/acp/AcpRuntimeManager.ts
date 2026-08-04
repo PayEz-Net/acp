@@ -245,6 +245,13 @@ export class AcpRuntimeManager extends EventEmitter {
   private restartCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly MAX_RESTARTS = 5;
+  // Cause of death of the LAST runtime process, recorded at every site that
+  // takes one down (exit, process error, start failure, kill). "ACP runtime
+  // not initialized" on its own says nothing about WHY the runtime was gone —
+  // reported repeatedly (2026-08-03/04) with no way to tell a crash from a
+  // watchdog kill from a session that never established. Every down-runtime
+  // log line now carries this plus describeRuntimeState().
+  private lastDownReason: { reason: string; at: number } | null = null;
 
   // Pending re-dispatch after a turn.agent_busy re-sync (see the catch branch
   // in executePrompt). One at a time. The episode is bounded twice: a cap of
@@ -496,6 +503,7 @@ export class AcpRuntimeManager extends EventEmitter {
         if (lastErr instanceof ModelNotRecognizedError) throw lastErr;
         if (lastErr instanceof UnsupportedAgentVersionError) throw lastErr;
         console.warn(`[ACP] start attempt ${attempt}/${maxAttempts} failed for ${this.options.agentName}: ${lastErr.message}`);
+        this.recordDown(`start attempt ${attempt}/${maxAttempts} failed: ${lastErr.message}`);
         this.cleanupProcess();
         if (attempt < maxAttempts) {
           const delay = attempt * 2000;
@@ -673,6 +681,7 @@ export class AcpRuntimeManager extends EventEmitter {
 
     this.process.on('error', (err: Error) => {
       console.error(`[ACP ${this.options.agentName}] process error:`, err);
+      this.recordDown(`process error: ${err.message}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? undefined, error: err.message });
       this.scheduleRestart(`process error: ${err.message}`);
     });
@@ -684,7 +693,17 @@ export class AcpRuntimeManager extends EventEmitter {
       // whatever `initialized` says by the time the exit lands.
       const wasCancelled = this.cancelExpectingRestart;
       this.intentionalKill = false;
-      console.warn(`[ACP ${this.options.agentName}] process exited (code=${code}, signal=${signal})`);
+      // Record BEFORE the state is torn down, and name the flavour of exit —
+      // "intentional" (kill/restart), "cancelled" (a cancel we sent, which on
+      // claude IS the kill) and "unexpected" send a prompt down very different
+      // paths, and after the fact they are indistinguishable in the logs.
+      const flavour = wasIntentional ? 'intentional' : wasCancelled ? 'after-cancel' : 'unexpected';
+      this.recordDown(
+        `process exited (code=${code}, signal=${signal}, ${flavour}, wasInitialized=${wasHealthy}, midTurn=${this.promptInFlight})`,
+      );
+      console.warn(
+        `[ACP ${this.options.agentName}] process exited (code=${code}, signal=${signal}, ${flavour}) — ${this.describeRuntimeState()}`,
+      );
       this.stopPromptWatchdog();
       this.process = null;
       this.sessionId = null;
@@ -955,11 +974,14 @@ export class AcpRuntimeManager extends EventEmitter {
       if (this.restartTimer || this.restarting || this.cancelExpectingRestart) {
         this.rememberDeferredMail(text);
         console.log(
-          `[ACP ${this.options.agentName}] mail deferred (runtime restarting) — will be summarised after the resume`,
+          `[ACP ${this.options.agentName}] mail deferred (runtime restarting) — will be summarised after the resume ` +
+            `— ${this.describeRuntimeState()}`,
         );
         return 'deferred';
       }
-      console.warn(`[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized`);
+      console.warn(
+        `[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized — ${this.describeRuntimeState()}`,
+      );
       return 'failed';
     }
 
@@ -997,6 +1019,9 @@ export class AcpRuntimeManager extends EventEmitter {
       // existing restart machinery settles it (drained on a resumed session,
       // dropped visibly on a fresh one, dropped again if the restart budget is
       // gone). This branch used to be terminal for the message.
+      console.warn(
+        `[ACP ${this.options.agentName}] ${kind} prompt hit a down runtime — ${this.describeRuntimeState()}`,
+      );
       this.scheduleRestart('runtime not running when prompt sent');
       if (this.restartTimer || this.restarting || this.cancelExpectingRestart) {
         return this.holdForRestart(prompt, kind);
@@ -1004,7 +1029,9 @@ export class AcpRuntimeManager extends EventEmitter {
       // Nothing is coming — the restart budget is exhausted (scheduleRestart
       // has already said so, and settled the rest of the queue). Fail visibly
       // rather than park the message on a runtime that will never return.
-      const message = 'ACP runtime not initialized';
+      // The state snapshot rides along: this string is what lands in the pane
+      // (and used to be ALL anyone got), so it has to name the cause.
+      const message = `ACP runtime not initialized [${this.describeRuntimeState()}]`;
       console.error(`[ACP ${this.options.agentName}] ${message}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
       return Promise.resolve(false);
@@ -1042,7 +1069,7 @@ export class AcpRuntimeManager extends EventEmitter {
     const sessionId = this.sessionId ?? '';
     console.warn(
       `[ACP ${this.options.agentName}] runtime down — holding ${kind} prompt for the pending restart ` +
-        `(depth=${this.promptQueue.length + 1})`,
+        `(depth=${this.promptQueue.length + 1}) — ${this.describeRuntimeState()}`,
     );
     const promise = new Promise<boolean>((resolve) => {
       this.promptQueue.push({ prompt, resolve, kind });
@@ -1269,8 +1296,8 @@ export class AcpRuntimeManager extends EventEmitter {
     kind: 'human' | 'system' = 'system',
   ): void {
     if (!this.process?.isRunning() || !this.sessionId) {
-      const message = 'ACP runtime not initialized';
-      console.error(`[ACP ${this.options.agentName}] ${message}`);
+      const message = `ACP runtime not initialized [${this.describeRuntimeState()}]`;
+      console.error(`[ACP ${this.options.agentName}] executePrompt(${kind}) on a down runtime: ${message}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
       this.scheduleRestart('runtime not running when prompt sent');
       resolveDispatched?.(false);
@@ -1666,7 +1693,8 @@ export class AcpRuntimeManager extends EventEmitter {
       // Observed twice on 2026-08-03. A cancel must never be the thing that
       // ends an agent — that is what the Stop button is for.
       console.warn(
-        `[ACP ${this.options.agentName}] cancel with no live runtime — scheduling a restart so the pane does not stay dead`,
+        `[ACP ${this.options.agentName}] cancel with no live runtime — scheduling a restart so the pane does not stay dead ` +
+          `— ${this.describeRuntimeState()}`,
       );
       this.scheduleRestart('cancel arrived with no live runtime');
     }
@@ -1717,6 +1745,7 @@ export class AcpRuntimeManager extends EventEmitter {
       this.dropQueuedPrompts('runtime killed');
     }
     if (!this.process) return;
+    this.recordDown(`kill() by the app (preserveQueue=${opts?.preserveQueue === true}, midTurn=${this.promptInFlight})`);
     this.process.kill('SIGTERM');
     this.process = null;
     this.sessionId = null;
@@ -1786,7 +1815,10 @@ export class AcpRuntimeManager extends EventEmitter {
     if (this.restartTimer) return;
     if (this.restartCount >= this.MAX_RESTARTS) {
       const message = `Runtime keeps failing (${this.restartCount} restarts): ${reason}`;
-      console.error(`[ACP ${this.options.agentName}] ${message}`);
+      // The terminal state: nothing will bring this pane back without a human.
+      // Log the full snapshot here or the budget-exhaustion is invisible in the
+      // logs except as a sudden absence of restarts.
+      console.error(`[ACP ${this.options.agentName}] ${message} — ${this.describeRuntimeState()}`);
       this.emitAcpEvent({ sessionUpdate: 'error', sessionId: this.sessionId ?? '', error: message });
       // No restart is coming — settle the queue so waiters resolve false
       // instead of hanging forever (WO 11483).
@@ -1829,6 +1861,55 @@ export class AcpRuntimeManager extends EventEmitter {
       console.log(`[ACP ${this.options.agentName}] runtime healthy; reset restart counter`);
       this.restartCount = 0;
     }
+  }
+
+  /**
+   * Record why the runtime went down, at the site that took it down. Read back
+   * by describeRuntimeState() so the next "runtime not initialized" carries the
+   * cause instead of only the symptom.
+   */
+  private recordDown(reason: string): void {
+    this.lastDownReason = { reason, at: Date.now() };
+  }
+
+  /**
+   * One-line snapshot of everything that decides whether a prompt can be sent
+   * right now, and what is (or is not) coming to fix it. Appended to every
+   * down-runtime log line and to the error the renderer surfaces.
+   *
+   * The two halves of the `!process?.isRunning() || !sessionId` guard are
+   * DIFFERENT failures — a dead child vs. a live child whose session never
+   * established (handshake in flight, resume rejected) — and the old message
+   * collapsed them into one indistinguishable string.
+   */
+  private describeRuntimeState(): string {
+    const proc = !this.process ? 'absent' : this.process.isRunning() ? 'running' : 'dead';
+    const parts = [
+      `process=${proc}`,
+      `session=${this.sessionId ?? 'none'}`,
+      `initialized=${this.initialized}`,
+      `promptInFlight=${this.promptInFlight}`,
+      `queue=${this.promptQueue.length}`,
+      `steers=${this.pendingSteers.size}`,
+      `heldMail=${this.deferredMailHeaders.length + this.deferredMailOverflow}`,
+      `restarts=${this.restartCount}/${this.MAX_RESTARTS}`,
+      `restartTimer=${this.restartTimer ? 'pending' : 'none'}`,
+      `restarting=${this.restarting}`,
+      `cancelExpectingRestart=${this.cancelExpectingRestart}`,
+      `intentionalKill=${this.intentionalKill}`,
+    ];
+    if (this.lastDownReason) {
+      const ago = Math.round((Date.now() - this.lastDownReason.at) / 100) / 10;
+      parts.push(`lastDown="${this.lastDownReason.reason}" ${ago}s ago`);
+    } else {
+      parts.push('lastDown=never (runtime has not been down in this process)');
+    }
+    return parts.join(' ');
+  }
+
+  /** Same snapshot, for out-of-band inspection (IPC diagnostics, tests). */
+  getRuntimeState(): string {
+    return this.describeRuntimeState();
   }
 
   respondToPermission(requestId: number | string, optionId: string, outcome = 'selected'): void {

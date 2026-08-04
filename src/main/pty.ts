@@ -1345,8 +1345,19 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   ipcMain.handle(IPC_CHANNELS.ACP_PROMPT, async (_, payload: AcpPromptPayload) => {
     const runtime = getAcpRuntimeByAgent(payload.agent);
     if (!runtime) {
-      console.warn(`[ACP] prompt for unknown agent: ${payload.agent}`);
-      return;
+      // NOT a silent return. There is no runtime object at all — the agent was
+      // Stopped (killTerminal drops it from acpRuntimes) or never started — so
+      // no restart machinery exists to hold this prompt for. Returning quietly
+      // let the composer clear the input and post a user turn that nothing
+      // would ever answer. Say so instead, and name who IS live: this is a
+      // different failure from "the runtime exists but is down", which
+      // AcpRuntimeManager now holds and revives.
+      const live = Array.from(acpRuntimes.values()).map((r) => r.getAgentName());
+      const message =
+        `No ACP runtime for "${payload.agent}" — the pane is stopped or was never started ` +
+        `(live ACP agents: ${live.length ? live.join(', ') : 'none'}). Start the pane and resend.`;
+      console.warn(`[ACP main] ${message}`);
+      throw new Error(message);
     }
     console.log(`[ACP main] prompt received for ${payload.agent}: ${payload.text.slice(0, 80)} (images=${payload.images?.length ?? 0})`);
     await runtime.prompt(payload.text, payload.images);
