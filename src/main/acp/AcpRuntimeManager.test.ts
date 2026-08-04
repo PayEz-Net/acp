@@ -2440,6 +2440,66 @@ describe('AcpRuntimeManager', () => {
     expect(endAgentSession).toHaveBeenCalledWith('rt-vibe-end', 'normal');
   });
 
+  it('never destroys held mail by offering it into a turn the queue drain just started', async () => {
+    mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-race' });
+    mockState.setResponse('session/resume', { sessionId: 'sess-mail-race' });
+    await manager.start();
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // Mail arrives mid-turn and defers — the turn never settles, so it is still
+    // in flight when the offer is attempted.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    void manager.prompt('working');
+    await Promise.resolve();
+    await manager.injectMail('[ACP Mail] You have a message from QAPert: "STOP"');
+    expect((manager as unknown as { deferredMailHeaders: string[] }).deferredMailHeaders.length).toBe(1);
+
+    // This is restart()'s call after drainPromptQueue() dispatched a queued
+    // prompt: "at idle" is false, a turn is live. Unfixed, the offer cleared the
+    // notices, was rejected with "Claude turn already in flight", and lost them.
+    expect((manager as unknown as { promptInFlight: boolean }).promptInFlight).toBe(true);
+    (manager as unknown as { offerDeferredMail: () => void }).offerDeferredMail();
+
+    const held = (manager as unknown as { deferredMailHeaders: string[] }).deferredMailHeaders;
+    expect(held.length).toBe(1);
+    expect(held[0]).toContain('QAPert');
+
+    manager.kill();
+  });
+
+  it('re-holds a mail offer that never dispatched instead of swallowing the notices', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-mail-rehold' });
+    await manager.start();
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Two notices deferred behind a live turn.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    void manager.prompt('working');
+    await Promise.resolve();
+    await manager.injectMail('[ACP Mail] from BAPert: one');
+    await manager.injectMail('[ACP Mail] from QAPert: two');
+    expect((manager as unknown as { deferredMailHeaders: string[] }).deferredMailHeaders.length).toBe(2);
+
+    // The runtime dies, then the offer runs at what looks like idle but is a
+    // corpse: executePrompt bails at the down-runtime guard having already
+    // cleared the notices. They must come back, not vanish with the dispatch.
+    getProcess().kill();
+    (manager as unknown as { promptInFlight: boolean }).promptInFlight = false;
+    (manager as unknown as { offerDeferredMail: () => void }).offerDeferredMail();
+
+    const held = (manager as unknown as { deferredMailHeaders: string[] }).deferredMailHeaders;
+    expect(held.length).toBe(2);
+
+    manager.kill();
+  });
+
   it('does not carry a kill intent into the next process — one auto-restart used to poison a runtime forever', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-poison' });

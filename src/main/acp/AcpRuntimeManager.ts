@@ -1736,6 +1736,19 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   private offerDeferredMail(): void {
     if (!this.deferredMailHeaders.length) return;
+    // "At idle" is a PRECONDITION, not a description of where this is called
+    // from. restart() calls it straight after drainPromptQueue(), which may
+    // have just started a turn — and this method clears the held mail BEFORE
+    // dispatching, so the collision did not merely fail, it DESTROYED the
+    // notices: cleared, rejected with "Claude turn already in flight", never
+    // restored, never re-offered. Observed 2026-08-04 losing 5 notices for
+    // NextPert and more for DotNetPert and Aurum.
+    //
+    // Returning early is safe and lossless: the mail stays deferred, and the
+    // turn now in flight ends in drainPromptQueue(), whose empty-queue branch
+    // is the canonical idle offer. Guarding HERE rather than at the call sites
+    // keeps the invariant with the state it protects.
+    if (this.promptInFlight) return;
     const headers = this.deferredMailHeaders;
     const overflow = this.deferredMailOverflow;
     const total = headers.length + overflow;
@@ -1753,7 +1766,24 @@ export class AcpRuntimeManager extends EventEmitter {
       `curl -s "http://127.0.0.1:3001/v1/mail/messages/<id>" -H "X-ACP-Agent: ${this.options.agentName}"`;
 
     console.log(`[ACP ${this.options.agentName}] offering ${total} deferred mail notice(s) at idle`);
-    this.executePrompt([{ type: 'text', text }], undefined, false, 'system');
+    // Clearing before dispatch (above) is deliberate — the summary is itself a
+    // turn whose completion re-enters drainPromptQueue, and clearing first is
+    // what stops it looping. But that trade means a dispatch which never starts
+    // takes the only record of the mail with it. Put it back: a runtime that
+    // died between the idle check and here must not cost the agent its inbox.
+    this.executePrompt(
+      [{ type: 'text', text }],
+      (dispatched) => {
+        if (dispatched) return;
+        this.deferredMailHeaders = [...headers, ...this.deferredMailHeaders];
+        this.deferredMailOverflow += overflow;
+        console.warn(
+          `[ACP ${this.options.agentName}] mail offer did not dispatch — ${total} notice(s) re-held for the next idle`,
+        );
+      },
+      false,
+      'system',
+    );
   }
 
   cancel(): void {
