@@ -185,6 +185,47 @@ describe('comments + archive (G3/G5)', () => {
     expect(storage.updateTask.mock.calls[0][1]).toMatchObject({ archived: true });
   });
 
+  // 2026-08-05 REGRESSION. Observed in production: POST /archive returned 200 {"success":true}
+  // and `archived` stayed false. Cards could not leave a board and nobody noticed for days.
+  //
+  // Why the test above could not catch it: createMockStorage's updateTask is
+  // `async (_id, updates) => ({ id: 1, ...updates })` — it ECHOES BACK whatever it is handed, so
+  // the persisted value always equals the requested one by construction. The real storage layer
+  // drops `archived` from its writable columns, still touches updatedAt, and still returns a row.
+  // A kind mock made a broken write indistinguishable from a working one.
+  //
+  // This stub reproduces the real behaviour: row updates, requested field silently dropped.
+  test('archiveTask throws when storage DROPS the archived field (row updates, value does not)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    // Non-null row (so the !updated check passes) with archived absent — production's exact shape.
+    storage.updateTask.mockResolvedValue({ ...sampleTask, updatedAt: '2026-08-05T15:02:58Z' });
+
+    await expect(archiveTask(storage, 1, true, 'jon'))
+      .rejects.toMatchObject({ code: 'ARCHIVE_NOT_PERSISTED' });
+  });
+
+  test('archiveTask throws when storage returns a STALE archived value (unarchive path)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask, archived: true });
+    // Asked to unarchive; row comes back still archived. Same defect, opposite direction —
+    // unarchive is archiveTask(...,false) and gets the identical guard.
+    storage.updateTask.mockResolvedValue({ ...sampleTask, archived: true });
+
+    await expect(archiveTask(storage, 1, false, 'jon'))
+      .rejects.toMatchObject({ code: 'ARCHIVE_NOT_PERSISTED' });
+  });
+
+  test('archiveTask does NOT record activity when the value failed to persist', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    storage.updateTask.mockResolvedValue({ ...sampleTask });
+
+    await expect(archiveTask(storage, 1, true, 'jon')).rejects.toThrow();
+    // An audit trail asserting an archive that never happened is worse than no trail.
+    expect(storage.appendKanbanActivity).not.toHaveBeenCalled();
+  });
+
   // #109: previousAssignee exposed for the reassigned-vs-assigned activity distinction
   test('first-assign (no prior owner) -> previousAssignee null', async () => {
     const storage = createMockStorage();

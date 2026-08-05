@@ -198,6 +198,20 @@ export async function archiveTask(storage, id, archived, actor, projectId) {
     err.code = 'ARCHIVE_NOT_PERSISTED';
     throw err;
   }
+  // A row updating is NOT the same as the value landing. If storage.updateTask silently drops
+  // `archived` from its writable column set, it still touches updatedAt and returns the row — so
+  // the !updated check above passes and we return {"success":true} with archived unchanged. That
+  // is the observed 2026-08-05 failure: POST /archive -> 200, archived stays false, and it went
+  // unnoticed for days because nothing compared the persisted value to the requested one.
+  // Assert the VALUE, not the row. Keep this after the backend fix — it is defence-in-depth, not
+  // a workaround, and it is what tells us if a future storage layer regresses this silently.
+  if (!!updated.archived !== !!archived) {
+    const err = new Error(
+      `Archive did not persist for task ${id}: requested archived=${!!archived}, ` +
+      `row reports archived=${!!updated.archived}`);
+    err.code = 'ARCHIVE_NOT_PERSISTED';
+    throw err;
+  }
   await recordActivity(storage, id, actor, archived ? 'archived' : 'unarchived', { projectId });
   return updated;
 }
