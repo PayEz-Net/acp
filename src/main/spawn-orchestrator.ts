@@ -262,7 +262,42 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
   // NOTE (deferred wrinkle, to-do list): if a member declares a
   // work_dir_override different from the working/colonized folder it
   // won't work anyway — not reconciled here per Jon.
-  const workspaceRoot = project.repo_path ?? getSettings().installerWorkspaceRoot ?? null;
+  // A REPO PATH IS A MACHINE FACT, NOT A PROJECT FACT.
+  //
+  // project.repo_path is ONE cloud row shared by every machine on the account,
+  // so whichever box wrote it last dictates where every other box spawns. On
+  // 2026-08-04 that was a Windows rig: the Mac read `e:\repos`, which is not
+  // absolute on POSIX, resolved it against the app cwd, and handed every agent
+  // `/Users/.../acp-desktop/e:\repos`. All seven died `code=1` before emitting a
+  // byte and the restart ladder relaunched into the identical death. Worse, the
+  // mkdirSync below had been dutifully CREATING that literal directory inside
+  // the repo since 2026-08-01. Same failure as the tenant-wide current-project
+  // pointer, one field over.
+  //
+  // The project decides WHICH repo. It cannot decide where that repo lives on
+  // this box. So a cloud root is used only if it is shaped like an absolute
+  // path for THIS platform; otherwise this machine falls back to its own
+  // installer root. Deliberately not the reverse precedence — preferring local
+  // everywhere would just point the stomp back at Windows. This way both boxes
+  // work off the same project row at the same time.
+  //
+  // isAbsolute alone is not enough in the other direction: on win32 it returns
+  // true for a POSIX '/Users/...' path (drive-relative), so a Mac value would
+  // sail through on Windows. Check the platform's actual shape.
+  const cloudRoot = project.repo_path ?? null;
+  const cloudRootUsable =
+    cloudRoot != null &&
+    (process.platform === 'win32'
+      ? /^[a-zA-Z]:[\\/]/.test(cloudRoot) || cloudRoot.startsWith('\\\\')
+      : cloudRoot.startsWith('/'));
+  if (cloudRoot != null && !cloudRootUsable) {
+    console.warn(
+      `[SpawnOrch] project=${projectId} repo_path "${cloudRoot}" is not a valid absolute path on ` +
+      `${process.platform} — it belongs to another machine. Falling back to this rig's installer ` +
+      `workspace root. (A repo path is machine-local; it must not be resolved from a shared project row.)`,
+    );
+  }
+  const workspaceRoot = (cloudRootUsable ? cloudRoot : null) ?? getSettings().installerWorkspaceRoot ?? null;
   if (!workspaceRoot) {
     console.error(
       `[SpawnOrch] project=${projectId} has NO workspace root ` +
