@@ -977,6 +977,21 @@ export function UnifiedTerminal({
       trackEvent({ event: 'composer_send', combined });
     }
 
+    // /btw — a discoverable "by the way" side-remark. A message sent mid-turn is
+    // already STEERED into the running turn by the adapter (WO 11585 Slice B), so
+    // this never interrupts and never needs Esc. The framing tells the agent to
+    // treat it as a side-note, not a new top-level task — and, crucially, gives
+    // the human an explicit, named way to say "just a heads-up, keep going"
+    // instead of guessing whether a plain message will steer or halt. Empty
+    // `/btw` falls through unchanged. (Jon 2026-08-05)
+    {
+      const btwMatch = value.match(/^\s*\/btw\b[ \t]*/i);
+      if (btwMatch) {
+        const remark = value.slice(btwMatch[0].length).trim();
+        if (remark) value = `[by the way — a side remark, not a new task; keep going and just factor this in] ${remark}`;
+      }
+    }
+
     if (isAcpMode) {
       // A bare interrupt typed mid-turn interrupts (WO 11635): the turn
       // cancels immediately; the queue is PRESERVED and read afterward.
@@ -1525,7 +1540,7 @@ export function UnifiedTerminal({
             onPaste={handleInputPaste}
             onFocus={onFocus}
             disabled={!terminalId}
-            placeholder={terminalId ? `Message ${agentName}…` : 'Start the agent to type…'}
+            placeholder={terminalId ? `Message ${agentName}…   ·   /btw for a side-note (no interrupt)` : 'Start the agent to type…'}
             className="flex-1 bg-transparent text-slate-200 text-sm font-sans placeholder:text-slate-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             data-testid="terminal-input"
             aria-label="Terminal message input"
