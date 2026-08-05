@@ -29,13 +29,25 @@ export default function chatRoutes(cfg: Config, localEventBus: LocalEventBus, st
       }
       const conversation = await chat.createConversation({ title, type, projectId: activeProjectId ? String(activeProjectId) : null, metadata });
 
-      // Add participants if provided
+      // Add participants if provided. Accept the bare-string form too — callers
+      // reasonably send ["Observer","BAPert"], and silently storing those as
+      // participants with NO id (which is what happened) yields a conversation
+      // nobody is in, indistinguishable downstream from "nobody messaged me".
       if (Array.isArray(participants)) {
-        for (const p of participants) {
+        for (const raw of participants) {
+          const p = typeof raw === 'string' ? { participantId: raw } : (raw || {});
+          const participantId = p.participantId || p.participant_id;
+          if (!participantId) {
+            res.status(400).json(error(
+              'INVALID_REQUEST',
+              'each participant needs participantId (or a bare agent-name string)',
+              'chat_create_conv', (req as any).requestId));
+            return;
+          }
           await chat.addParticipant(conversation.id, {
-            participantId: p.participantId || p.participant_id,
+            participantId,
             participantType: p.participantType || p.participant_type || 'agent',
-            displayName: p.displayName || p.display_name || p.participantId,
+            displayName: p.displayName || p.display_name || participantId,
           });
         }
       }
