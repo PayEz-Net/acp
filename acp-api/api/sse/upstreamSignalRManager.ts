@@ -23,9 +23,35 @@ type MailEventHandler = (agent: string, data: Record<string, unknown>) => void;
  * The public interface mirrors UpstreamSseManager so server.js/shutdown can
  * swap it in without wider changes.
  */
+/**
+ * How often the dropped-notification summary is emitted, when there is anything
+ * to say. Deliberately NOT per-drop: a line per drop is what produced 251
+ * identical warnings in one session, which is the volume at which a log stops
+ * being read at all.
+ */
+const DROP_SUMMARY_INTERVAL_MS = 5 * 60_000;
+
 export class UpstreamSignalRManager {
   private connection: signalR.HubConnection | null = null;
   private agents = new Set<string>();
+  /**
+   * Dropped-notification accounting.
+   *
+   * Every drop below is correct behaviour, and every one of them was invisible.
+   * 251 notifications for a project this rig was not engaged on went to a
+   * console.warn nobody reads — from the OTHER project's side that is simply
+   * "we mailed them and never got a reply", indistinguishable from everyone
+   * being busy. A log-spotter cannot catch this class: a grep only fires on
+   * patterns someone predicted, and the whole problem is that nobody predicted
+   * it. The fix is not a better filter, it is making the condition a number
+   * that gets read whether or not anyone went looking.
+   *
+   * `window` resets each time a summary is emitted; `lifetime` never does, so
+   * a quiet window still reports an accurate running total.
+   */
+  private dropWindow = new Map<string, number>();
+  private dropLifetime = new Map<string, number>();
+  private dropSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private states = new Map<string, AgentConnection>();
   private handlers: MailEventHandler[] = [];
   private cfg: Config;
@@ -60,6 +86,11 @@ export class UpstreamSignalRManager {
 
   start(agents: string[]): void {
     this.running = true;
+    if (!this.dropSummaryTimer) {
+      this.dropSummaryTimer = setInterval(() => this.emitDropSummary(), DROP_SUMMARY_INTERVAL_MS);
+      // Don't hold the process open for a reporting timer.
+      this.dropSummaryTimer.unref?.();
+    }
     for (const agent of agents) {
       this.agents.add(agent);
       if (!this.states.has(agent)) {
@@ -71,6 +102,14 @@ export class UpstreamSignalRManager {
 
   stop(): void {
     this.running = false;
+    if (this.dropSummaryTimer) {
+      clearInterval(this.dropSummaryTimer);
+      this.dropSummaryTimer = null;
+    }
+    // Flush before going quiet — drops accumulated since the last summary would
+    // otherwise be discarded at shutdown, which is exactly the silence this
+    // counter exists to remove.
+    this.emitDropSummary();
     for (const conn of this.states.values()) {
       conn.state = 'stopped';
     }
@@ -216,6 +255,31 @@ export class UpstreamSignalRManager {
     }
   }
 
+  /** Tally one dropped notification under a stable reason key. */
+  private recordDrop(reason: string): void {
+    this.dropWindow.set(reason, (this.dropWindow.get(reason) ?? 0) + 1);
+    this.dropLifetime.set(reason, (this.dropLifetime.get(reason) ?? 0) + 1);
+  }
+
+  /**
+   * Emit one summary line per reason, loudest first, then reset the window.
+   * Silent when nothing was dropped — this must not become background noise, or
+   * it inherits the problem it exists to solve.
+   */
+  private emitDropSummary(): void {
+    if (this.dropWindow.size === 0) return;
+    const mins = Math.round(DROP_SUMMARY_INTERVAL_MS / 60_000);
+    const rows = [...this.dropWindow.entries()].sort((a, b) => b[1] - a[1]);
+    const total = rows.reduce((n, [, c]) => n + c, 0);
+    console.warn(
+      `[SignalR] DROPPED ${total} notification(s) in the last ${mins}m — these were received and discarded, not delivered:`,
+    );
+    for (const [reason, count] of rows) {
+      console.warn(`[SignalR]   ${count} × ${reason}  (lifetime ${this.dropLifetime.get(reason) ?? count})`);
+    }
+    this.dropWindow.clear();
+  }
+
   private handleNotification(notification: Record<string, unknown>): void {
     const data = notification.data as Record<string, unknown> | undefined;
 
@@ -236,7 +300,11 @@ export class UpstreamSignalRManager {
     const notifiedProject = data?.project_id as number | undefined;
     const startedProject = getStartedProjectId();
     if (notifiedProject != null && startedProject != null && notifiedProject !== startedProject) {
-      console.warn(
+      // Counted, not logged per-occurrence — see emitDropSummary(). At debug
+      // level the individual line is still there when someone is chasing a
+      // specific message_id.
+      this.recordDrop(`wrong project: notified for ${notifiedProject}, this rig is engaged on ${startedProject}`);
+      console.debug(
         `[SignalR] Dropping notification for project ${notifiedProject}: this rig is engaged on ${startedProject}.`,
         { event_type: notification.event_type, message_id: data?.message_id, to_agent: data?.to_agent },
       );
@@ -247,6 +315,7 @@ export class UpstreamSignalRManager {
     const fromAgent = data?.from_agent as string | undefined;
 
     if (!toAgent) {
+      this.recordDrop('missing to_agent (cloud payload not routing-ready)');
       console.warn('[SignalR] Dropping notification: missing to_agent. Cloud payload is not routing-ready.', {
         event_type: notification.event_type,
         message_id: data?.message_id,
@@ -256,6 +325,7 @@ export class UpstreamSignalRManager {
     }
 
     if (!this.agents.has(toAgent)) {
+      this.recordDrop(`recipient "${toAgent}" not in this rig's tracked agent set`);
       console.warn(`[SignalR] Dropping notification: recipient "${toAgent}" is not in the tracked agent set.`, {
         event_type: notification.event_type,
         message_id: data?.message_id,
