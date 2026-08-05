@@ -245,7 +245,7 @@ export class AcpRuntimeManager extends EventEmitter {
   // prompts are the ones the reply-turn nudge may fold into itself (see
   // takeQueuedHumanTexts); 'system' prompts (nudges, kickoffs) always dispatch
   // as their own turn.
-  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system'; replyNudge?: boolean }> = [];
+  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system'; replyNudge?: boolean; cancelReport?: boolean }> = [];
   // Prompts sent THROUGH into the active turn (slice B steer passthrough).
   // Tracked (with their prompt) so kill()/dropQueuedPrompts can settle their
   // waiters exactly like queued prompts — and so a resumed restart can
@@ -275,6 +275,10 @@ export class AcpRuntimeManager extends EventEmitter {
   // grace cancel must never fire against it — that turn IS the reply the
   // human is waiting for (see armHumanWaitBackstop).
   private replyTurnActive = false;
+  // True while the post-cancel report turn is the active turn. Cancelling THAT
+  // turn must not queue another report — otherwise every Esc on a report turn
+  // mints a fresh one and the agent can never actually stop (see cancel()).
+  private cancelReportActive = false;
   // Learned runtime capability. The kimi TUI has two distinct primitives for
   // input during a busy turn — Esc interrupts (cancel), Ctrl+S steers (pushes
   // up into the live turn) — but the ACP wire only has session/prompt, and
@@ -1487,6 +1491,7 @@ export class AcpRuntimeManager extends EventEmitter {
         console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result ?? null).slice(0, 2000));
         this.promptInFlight = false;
         this.replyTurnActive = false;
+        this.cancelReportActive = false;
         this.clearHumanWaitBackstop();
         if (this.stalledTurnNudgePending) {
           this.stalledTurnNudgePending = false;
@@ -1726,6 +1731,7 @@ export class AcpRuntimeManager extends EventEmitter {
         queueDepth: this.promptQueue.length,
       });
       if (next.replyNudge) this.replyTurnActive = true;
+      if (next.cancelReport) this.cancelReportActive = true;
       this.executePrompt(next.prompt, next.resolve, false, next.kind);
       return;
     }
@@ -1829,6 +1835,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // after the child dies, so `this.process &&` was true for a corpse and the
     // wedge branch below could never be reached.
     if (this.process?.isRunning() && sessionId) {
+      // Queue the report BEFORE the cancel: on claude sendSessionCancel kills
+      // the child, and drainPromptQueue can run off that exit — the nudge has
+      // to already be in the queue to be held across the restart.
+      this.queueCancelReport();
       // On claude this notify IS a process kill (`-p` has no cancel verb), so
       // a restart is coming and the queue must survive it — see drainPromptQueue.
       this.cancelExpectingRestart = true;
@@ -1859,6 +1869,32 @@ export class AcpRuntimeManager extends EventEmitter {
     });
   }
 
+  /**
+   * Unshift the post-cancel report turn (see CANCEL_REPORT_NUDGE). Three gates:
+   * no live turn means there is nothing to report on; a cancel landing on the
+   * report turn itself must not mint another; and a report already waiting in
+   * the queue is not duplicated by a second Esc.
+   */
+  private queueCancelReport(): void {
+    if (!this.promptInFlight) return;
+    if (this.cancelReportActive) {
+      console.log(
+        `[ACP ${this.options.agentName}] cancel hit the post-cancel report turn — stopping for real, no further report queued`,
+      );
+      return;
+    }
+    if (this.promptQueue.some((entry) => entry.cancelReport)) return;
+    console.log(
+      `[ACP ${this.options.agentName}] human cancel — queueing a report-and-stop turn so the interrupted work is not lost`,
+    );
+    this.promptQueue.unshift({
+      prompt: [{ type: 'text', text: CANCEL_REPORT_NUDGE }],
+      resolve: () => {},
+      kind: 'system',
+      cancelReport: true,
+    });
+  }
+
   setMode(mode: string): void {
     if (!this.process || !this.sessionId) return;
     this.process.notify('session/set_mode', { sessionId: this.sessionId, modeId: mode });
@@ -1879,6 +1915,7 @@ export class AcpRuntimeManager extends EventEmitter {
     // armed, so a user Stop never reports itself as one.
     this.clearWedgeDetector();
     this.replyTurnActive = false;
+    this.cancelReportActive = false;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -2558,6 +2595,25 @@ const THROTTLE_STDERR_PATTERN = /\b429\b|rate.?limit|too many requests|quota|bal
 const STALLED_TURN_NUDGE =
   '[ACP] Your previous turn produced no output for over 5 minutes, so the platform cancelled it — your process, session and context are intact, nothing was restarted. ' +
   'Briefly tell the human where things stand, then continue your work.';
+
+/**
+ * Front-of-queue nudge dispatched after the HUMAN cancels a live turn (Stop /
+ * Esc). Stop still means stop — this deliberately does NOT resume the task.
+ * It exists because the work was being thrown away silently: a cancel kills
+ * the child mid-step, and on `--resume` Claude Code's own "Continue from where
+ * you left off." lands on an agent whose boot prompt tells it not to speak
+ * unprompted, so it answers "No response requested." and idles. Everything the
+ * turn established dies with it (Jon 2026-08-05: BAPert was cut off one tool
+ * call after finding a real platform bug, and never reported it).
+ *
+ * Unconditional on a live turn, by design — a report saying "barely started,
+ * nothing to tell you" costs one short turn; a silently discarded finding
+ * costs the whole investigation.
+ */
+const CANCEL_REPORT_NUDGE =
+  '[ACP] The human interrupted your previous turn — that was deliberate, so do NOT resume the task and do NOT start new work. ' +
+  'Your context above is intact. In 2-4 sentences tell them what you had established and where any partial work was left ' +
+  '(files written, commands run, findings), then stop and wait for their next instruction. If you had barely started, say exactly that.';
 
 /**
  * Build the reply-turn nudge. Steer-capable runtime: the human's steered

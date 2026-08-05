@@ -2,6 +2,10 @@
 // app configure secrets without relying on shell env vars.
 import './loadEnv';
 
+// Before any other import can log: every main-process line gets a clock.
+import { installLogTimestamps } from './logTimestamps';
+installLogTimestamps();
+
 import { app, BrowserWindow, ipcMain, shell, session, dialog, clipboard } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import net from 'net';

@@ -2731,6 +2731,98 @@ describe('AcpRuntimeManager', () => {
     manager.kill();
   });
 
+  /**
+   * Human cancel = "stop", and it used to also mean "silently throw away
+   * everything this turn established". The cancel kills the turn mid-step, and
+   * on resume the agent has no reason to speak, so a finding one tool call from
+   * being reported dies with the process (Jon 2026-08-05). Stop still stops —
+   * the agent just says what it had first.
+   */
+  function promptTexts(): string[] {
+    return getProcess()
+      .requests.filter((r) => r.method === 'session/prompt')
+      .map((r) => JSON.stringify((r.params as { prompt?: unknown }).prompt ?? ''));
+  }
+
+  it('a human cancel of a live turn queues a report-and-stop turn', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-cancel-report' });
+    await manager.start();
+
+    let releaseTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((r) => { releaseTurn = r; }));
+    const turn = manager.prompt('go find the archive bug');
+    await Promise.resolve();
+
+    manager.cancel();
+    releaseTurn({ stopReason: 'cancelled' });
+    await turn.catch(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // The report turn dispatched, and it tells the agent NOT to resume.
+    const reports = promptTexts().filter((t) => t.includes('interrupted your previous turn'));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain('do NOT resume');
+
+    manager.kill();
+  });
+
+  it('cancelling the report turn itself does not mint another one', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-cancel-loop' });
+    await manager.start();
+
+    // Turn 1: real work, cancelled by the human.
+    let releaseTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((r) => { releaseTurn = r; }));
+    const turn = manager.prompt('working');
+    await Promise.resolve();
+    manager.cancel();
+    // Arm a still-pending response BEFORE the settle drains the queue, so the
+    // report turn is genuinely in flight when the second Esc lands — otherwise
+    // it settles instantly and the second cancel hits the no-turn gate, which
+    // would pass this test without ever exercising the anti-loop guard.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    releaseTurn({ stopReason: 'cancelled' });
+    await turn.catch(() => {});
+    await new Promise((r) => setImmediate(r));
+    expect(promptTexts().filter((t) => t.includes('interrupted your previous turn'))).toHaveLength(1);
+
+    // Turn 2 IS the report turn — and the human hits Esc again. Without the
+    // guard this queues a report about the report, forever: the agent can
+    // never actually stop.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    manager.cancel();
+    await new Promise((r) => setImmediate(r));
+
+    expect(promptTexts().filter((t) => t.includes('interrupted your previous turn'))).toHaveLength(1);
+    expect(log.mock.calls.some((c) => String(c[0]).includes('stopping for real'))).toBe(true);
+    log.mockRestore();
+
+    manager.kill();
+  });
+
+  it('a cancel with no turn in flight reports nothing', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-cancel-idle' });
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.start();
+
+    // Idle agent, stray Esc. There is no interrupted work to describe, so a
+    // report turn here is pure noise (and a spurious billed turn).
+    manager.cancel();
+    await new Promise((r) => setImmediate(r));
+
+    expect(promptTexts().filter((t) => t.includes('interrupted your previous turn'))).toHaveLength(0);
+    // Assert the QUEUE, not just what dispatched: at idle nothing drains, so a
+    // wrongly-queued report would sit there invisibly and then ambush the
+    // agent's next real turn.
+    const queued = (manager as unknown as { promptQueue: Array<{ cancelReport?: boolean }> }).promptQueue;
+    expect(queued.filter((e) => e.cancelReport)).toHaveLength(0);
+
+    manager.kill();
+  });
+
   it('a human prompt at a dead runtime restarts it and holds the message, never throws', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-dead' });
