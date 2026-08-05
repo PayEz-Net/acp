@@ -536,6 +536,35 @@ export class AcpRuntimeManager extends EventEmitter {
     this.promptSettledRef = null;
   }
 
+  /**
+   * The ONE place that decides whether an update proves a turn is still alive.
+   *
+   * Both runtimes must go through here. They did not: kimi's updates arrive as
+   * JSON-RPC 'notification' -> handleNotification, which applied this gate,
+   * while claude's adapter emits already-mapped updates on 'sessionUpdate',
+   * whose handler only called emitAcpEvent. emitAcpEvent logs and re-emits; it
+   * never touches the idle counter.
+   *
+   * So on claude NOTHING reset promptIdleTicks, and the watchdog counted from
+   * the moment the prompt was sent regardless of how much the agent produced.
+   * Every claude turn longer than PROMPT_IDLE_MS was killed — not hung turns,
+   * ALL long turns, and the busiest agents most often. Each kill cost the
+   * turn's work plus a respawn plus a session resume, and it read in the logs
+   * as "no response for 300s while a turn was pending" from an agent that had
+   * been streaming the whole time. Observed 2026-08-04 across NextPert, BAPert,
+   * Aurum, QAPert, DotNetPert and Nextpert-Scout.
+   *
+   * Shared rather than duplicated on purpose: a second copy of this gate is how
+   * the two paths drifted apart in the first place.
+   */
+  private noteTurnProgress(sessionUpdate: string, update: Record<string, unknown>): void {
+    if (!MEANINGFUL_SESSION_UPDATES.has(sessionUpdate)) return;
+    // A wait_state frame counts only when it actually parses — a malformed
+    // frame is dropped from the UI and must not feed the idle budget.
+    if (sessionUpdate === 'wait_state' && parseWaitState(update) == null) return;
+    this.markPromptActivity();
+  }
+
   private markPromptActivity(): void {
     if (this.promptPending) {
       this.promptIdleTicks = 0;
@@ -721,6 +750,10 @@ export class AcpRuntimeManager extends EventEmitter {
       if (update.sessionUpdate === 'initialized' && update.agentInfo && this.options.effort) {
         update = { ...update, agentInfo: { ...update.agentInfo, effort: this.options.effort } };
       }
+      // Claude's turn-alive signal. Without this the idle watchdog never saw a
+      // claude turn make progress and guillotined it at PROMPT_IDLE_MS — see
+      // noteTurnProgress().
+      this.noteTurnProgress(update.sessionUpdate, update as unknown as Record<string, unknown>);
       this.emitAcpEvent(update);
     });
 
@@ -2142,14 +2175,8 @@ export class AcpRuntimeManager extends EventEmitter {
     // (keepalives, lifecycle chatter, unknown update types) must not reset
     // the idle watchdog: a runtime that streams noise while producing nothing
     // is hung and has to trip PROMPT_IDLE_MS.
-    if (MEANINGFUL_SESSION_UPDATES.has(sessionUpdate)) {
-      // A wait_state frame counts only when it actually parses — a malformed
-      // frame is dropped from the UI and must not feed the idle budget
-      // (WO 11498 hardening).
-      if (sessionUpdate !== 'wait_state' || parseWaitState(update) != null) {
-        this.markPromptActivity();
-      }
-    }
+    // Same gate the claude path uses (WO 11498 hardening lives in there now).
+    this.noteTurnProgress(sessionUpdate, update);
     const sessionId = (updateParams.sessionId as string) ?? this.sessionId ?? '';
     // Skip logging high-frequency streaming updates — they fire per token or
     // per tool-progress tick and flood the terminal. One-shot lifecycle

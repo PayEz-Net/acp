@@ -2440,6 +2440,53 @@ describe('AcpRuntimeManager', () => {
     expect(endAgentSession).toHaveBeenCalledWith('rt-vibe-end', 'normal');
   });
 
+  it('lets claude turn output reset the idle watchdog — long turns were guillotined at 300s', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-claude-idle' });
+    await manager.start();
+
+    // A turn is live and the watchdog has been counting silence.
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    void manager.prompt('a long job');
+    await Promise.resolve();
+    const state = manager as unknown as { promptIdleTicks: number; promptPending: boolean };
+    expect(state.promptPending).toBe(true);
+    state.promptIdleTicks = 15;
+
+    // Claude's adapter emits already-mapped updates on 'sessionUpdate', NOT the
+    // JSON-RPC 'notification' channel kimi uses. Only the latter reached the
+    // gate, so a claude agent could stream for five minutes and still be killed
+    // as unresponsive.
+    getProcess().emit('sessionUpdate', {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'still working' },
+    });
+
+    expect(state.promptIdleTicks).toBe(0);
+
+    manager.kill();
+  });
+
+  it('does not let claude lifecycle chatter reset the idle watchdog', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-claude-noise' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+    void manager.prompt('a long job');
+    await Promise.resolve();
+    const state = manager as unknown as { promptIdleTicks: number };
+    state.promptIdleTicks = 15;
+
+    // Not turn output. A runtime that streams noise while producing nothing is
+    // hung and must still trip the watchdog — the fix must not open that hole.
+    getProcess().emit('sessionUpdate', { sessionUpdate: 'available_commands_update', commands: [] });
+
+    expect(state.promptIdleTicks).toBe(15);
+
+    manager.kill();
+  });
+
   it('never destroys held mail by offering it into a turn the queue drain just started', async () => {
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/new', { sessionId: 'sess-mail-race' });
