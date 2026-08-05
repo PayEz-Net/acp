@@ -4,6 +4,19 @@ import { error } from '../response.js';
 /** Routes that require Bearer auth only — agents never call these directly (AC-5) */
 const BEARER_ONLY_PATTERN = /\/v1\/agents\/[^/]+\/(register|deregister)$/;
 
+/**
+ * The OBSERVER — the human's/spotter's singular private line to the team lead.
+ * NOT a team agent and NOT roster-validated: a distinct local caller whose only
+ * surface is the chat channel. It exists so the observer can nudge the lead
+ * without impersonating an agent, and — critically — chat is passive (no PTY
+ * inject, no poller), so this adds ZERO agent turns. Reserved name; the roster
+ * must never register an agent called this. Localhost-trust, like all local auth
+ * here; a later hardening could bind it to a token. (Jon 2026-08-05: "a private
+ * line to the workshop floor", no impersonation, must not pile turns.)
+ */
+const OBSERVER_IDENTITY = 'Observer';
+const OBSERVER_ALLOWED_PREFIX = '/v1/chat/';
+
 interface AgentStorage {
   getAgentRegistration(agentId: string): Promise<unknown | null>;
 }
@@ -69,6 +82,23 @@ export function localAuth(secret: string | null, storage?: AgentStorage) {
       res.status(401).json(
         error('UNAUTHORIZED', 'This endpoint requires Bearer authentication', 'auth', (req as any).requestId)
       );
+      return;
+    }
+
+    // --- Observer identity (private observer<->lead chat line — Jon 2026-08-05) ---
+    // Accepted WITHOUT roster validation (it is not a team agent), but denied on
+    // everything except the chat channel — so it can never become a second,
+    // mail-style, turn-piling surface. The whole point is that chat is passive.
+    if (agentHeader === OBSERVER_IDENTITY) {
+      if (!req.path.startsWith(OBSERVER_ALLOWED_PREFIX)) {
+        res.status(403).json(
+          error('FORBIDDEN', 'The observer identity is scoped to the chat channel (/v1/chat) only', 'auth', (req as any).requestId)
+        );
+        return;
+      }
+      (req as any).agentName = OBSERVER_IDENTITY;
+      (req as any).authMethod = 'observer';
+      next();
       return;
     }
 

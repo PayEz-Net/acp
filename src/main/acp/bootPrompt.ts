@@ -26,6 +26,11 @@ export interface BootPromptOptions {
 
 const DEFAULT_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
+// First pass: the team lead who carries the private observer line is BAPert.
+// (Later this could be a lead flag passed by the caller; hardcoded here so the
+// change stays contained to this file. Jon 2026-08-05.)
+const OBSERVER_LEAD = 'BAPert';
+
 /**
  * Build an onboarding prompt for an agent.
  *
@@ -97,6 +102,29 @@ Your profile and mail status are already provided above. Do NOT run any addition
 
 Run ONLY the curl command(s) above to load your identity (and optionally check mail). Once you have the real data, output the ready message and stop. ${hasContext ? 'You may briefly acknowledge the restart context after the ready message, then stop.' : ''} Do NOT run any other tools during this first turn. Wait for the next user message before doing any work.`;
 
+  // Team-lead only: the private observer line. Chat is passive (no PTY inject,
+  // no poller), so this adds ZERO turns — the lead reads it on a cycle it is
+  // already taking. Never spin a loop for it. (Jon 2026-08-05)
+  const observerSection = agentName === OBSERVER_LEAD
+    ? `## Observer line (team lead only)
+
+There is a **private observer line** — a direct chat channel between you and the **Observer** (the human's spotter, watching the whole rig). It is separate from mail and from the human's own messages, and it is deliberately low-volume.
+
+The observer uses it to steer you — most often to re-engage the team when it has gone idle. Chat is **passive**: it never injects a turn. So you must **check it yourself, as part of a cycle you are already taking** (e.g., an unattended check-in) — never spin a new loop for it. List your observer line:
+
+\`\`\`bash
+curl -s "${apiUrl}/v1/chat/conversations?agent=${encodeURIComponent(agentName)}" -H "X-ACP-Agent: ${agentName}"
+\`\`\`
+
+If the Observer messaged you, act on it (e.g., re-engage idle agents) and reply on the same channel:
+
+\`\`\`bash
+curl -s -X POST "${apiUrl}/v1/chat/conversations/<conversationId>/messages" -H "X-ACP-Agent: ${agentName}" -H "Content-Type: application/json" -d '{"authorId":"${agentName}","text":"<reply>"}'
+\`\`\`
+
+Reply only when the observer asked something. Never treat this as another mail firehose — it is a private line, checked on cycle.`
+    : '';
+
   return `${identityHeader}
 
 ${profileSection}
@@ -127,6 +155,7 @@ A user-turn line that starts with \`[ACP Mail]\` is a system notification that m
 
 When you send or reply to mail (or standup), follow the **Mail discipline** norm in the agent-mail skill: glance, don't ack — reply only when you have new info, an answer to a direct question asked of you, a real blocker, a correction that changes what someone does, or a disagreement. Silence is the default; a reply is the exception.
 
+${observerSection}
 ## Ready
 
 Say exactly:
