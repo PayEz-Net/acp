@@ -502,7 +502,11 @@ export function UnifiedTerminal({
   const acpActiveTurn = isAcpMode
     ? (acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId) ?? null)
     : null;
-  const acpIsThinkingLive = acpActiveTurn?.status === 'thinking';
+  // Busy = a turn is ACTIVE, full stop (turn_started → turn_complete). Keying
+  // on status === 'thinking' dropped the pill to 'Ready' the moment the turn
+  // moved to answering/tool — the agent visibly working while the pill said
+  // Ready (Jon 2026-08-07, screenshot-evidenced).
+  const acpIsThinkingLive = acpActiveTurn != null;
   const footerLineCount = isAcpMode ? (acpSession?.turns.length ?? 0) : lineCount;
   const footerThinkingCount = isAcpMode ? 0 : thinkingCount;
 

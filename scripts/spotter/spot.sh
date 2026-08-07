@@ -34,15 +34,24 @@ DROPS=$(echo "$DIGEST" | grep -c 'dropping .* queued' || true)
 DEFERS=$(echo "$DIGEST" | grep -c 'mail deferred' || true)
 R429=$(echo "$DIGEST" | grep -c 'HTTP 429' || true)
 LASTLINE=$(echo "$DIGEST" | tail -3)
+# BAPert is the lynchpin (Jon 2026-08-07): his defers and silence get their own
+# counters so the model doesn't have to fish for them.
+BA_DEFERS=$(tail -300 "$LOG" | grep -c '\[ACP BAPert\] mail deferred' || true)
+BA_TURNS=$(echo "$DIGEST" | grep -cE '\[ACP BAPert\] (>>>|<<<)' || true)
+BA_LAST=$(tail -400 "$LOG" | grep '\[ACP BAPert\]' | grep -vE 'notification: (tool_call|plan)' | tail -3)
 
 PROMPT="You are a log-triage classifier for an agent platform. Output EXACTLY one line, starting with OK: or ALERT:.
 
 Rules:
 - ALERT if: restarts happening repeatedly, watchdog cancels firing repeatedly, an error repeating in a loop, or mail deferring while agents appear idle (queued mail not draining).
+- ALERT if BAPert (the team lead — his stalls stall the whole project) shows: mail deferred with NO BAPert turn dispatch or settle nearby (his turns are getting lost), a BAPert turn cancelled mid-work (stopReason=cancelled outside an obvious human interrupt), or zero BAPert activity lines while other agents are actively working.
 - OK if: turns settling (end_turn), mail delivering, occasional single busy-rejection followed by immediate cancel (that is a designed zombie-cleanup), or quiet with no errors.
 - If the log shows the app shutting down (SIGTERM/teardown/Quit), output OK: app stopped.
 
-Recent counters: zombie_cancels=$CANCEL_ZOMBIE busy_resyncs=$BUSY_RESYNC watchdog_fires=$WATCHDOG restarts=$RESTART queue_drops=$DROPS mail_defers=$DEFERS http429=$R429
+Recent counters: zombie_cancels=$CANCEL_ZOMBIE busy_resyncs=$BUSY_RESYNC watchdog_fires=$WATCHDOG restarts=$RESTART queue_drops=$DROPS mail_defers=$DEFERS http429=$R429 bapert_defers=$BA_DEFERS bapert_turn_events=$BA_TURNS
+
+BAPert's most recent lines:
+$BA_LAST
 
 Recent log lines:
 $DIGEST"
