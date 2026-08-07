@@ -129,6 +129,21 @@ describe('workActivityStamp middleware', () => {
     });
     expect(activity.snapshot(T0 + MIN).silenceSeconds).toBe(0);
   });
+
+  test('read-only mail GETs never stamp (QAPert 22443: an inbox-poll cron must not defeat the detector)', () => {
+    for (const path of ['/v1/mail/inbox/DotNetPert', '/v1/mail/inbox/DotNetPert?unread=true', '/v1/mail/messages/123']) {
+      const { activity } = run({ authMethod: 'agent', agentName: 'DotNetPert', method: 'GET', path });
+      expect(activity.snapshot(T0 + 60 * MIN).silenceSeconds).toBe(3600);
+    }
+    // ...but a deliberate POST action (read-all) is still work.
+    const { activity } = run({
+      authMethod: 'agent',
+      agentName: 'DotNetPert',
+      method: 'POST',
+      path: '/v1/mail/inbox/DotNetPert/read-all',
+    });
+    expect(activity.snapshot(T0 + MIN).silenceSeconds).toBe(0);
+  });
 });
 
 describe('WorkStoppageMonitor', () => {

@@ -49,6 +49,10 @@ export class WorkStoppageMonitor {
     this.timer = setInterval(() => {
       void this.tick();
     }, tickMs);
+    // Never hold the process open on our own (QAPert 22443 rider): the real
+    // server stays up via its listener and shutdown.ts stops us; a scratch or
+    // test boot that never wires shutdown handlers must still be able to exit.
+    this.timer.unref?.();
     console.log(
       `[WorkStoppageMonitor] Started, tick every ${this.cfg.workStoppageTickSeconds}s, ` +
         `silence threshold ${this.cfg.workStoppageSilenceMinutes}m`,

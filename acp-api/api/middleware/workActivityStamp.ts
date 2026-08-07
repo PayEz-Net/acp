@@ -25,11 +25,17 @@ export function workActivityStamp(activity: WorkActivity) {
     if ((req as any).authMethod === 'agent') {
       const path = req.path || '';
       const isNonWorkPath = NON_WORK_PREFIXES.some((p) => path.startsWith(p));
+      // Read-only mail GETs never stamp (QAPert 22443): a standing inbox-poll
+      // cron is the exact brain-idle-but-chattering shape this feature exists
+      // to catch. Mail READS that precede real work are followed by work calls
+      // that stamp elsewhere; a poll that precedes nothing stamps nothing.
+      // Sends and read-all remain work — they are deliberate acts, not polls.
+      const isMailReadPoll = req.method === 'GET' && path.startsWith('/v1/mail/');
       const isPlatformMail =
         req.method === 'POST' &&
         path === '/v1/mail/send' &&
         PLATFORM_MAIL_SUBJECTS.some((s) => String((req.body as any)?.subject ?? '').startsWith(s));
-      if (!isNonWorkPath && !isPlatformMail) {
+      if (!isNonWorkPath && !isMailReadPoll && !isPlatformMail) {
         activity.record((req as any).agentName || 'unknown');
       }
     }
