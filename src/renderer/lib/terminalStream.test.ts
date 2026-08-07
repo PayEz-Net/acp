@@ -820,6 +820,14 @@ describe('TerminalStreamNormalizer — ReDoS guards', () => {
     expect(timeProcess('|-. '.repeat(LEN / 4) + 'Z')).toBeLessThan(BUDGET_MS);
   });
 
+  it('rejects an interleaved spinner-glyph run without backtracking (THINKING_GLYPHS)', () => {
+    // This classifier carried the same nested shape PAST eec445f: measured at
+    // HEAD before the fix, 26 glyph+space pairs took ~1.7s, growing ~4x per
+    // pair. Spinner glyphs interleaved with whitespace are the adversarial
+    // input because an all-glyph run is linear even on the old pattern.
+    expect(timeProcess('⠋ '.repeat(LEN / 2) + 'Z')).toBeLessThan(BUDGET_MS);
+  });
+
   it('short-circuits classification above the length cap', () => {
     // Over the cap the line is content, not noise, and must render rather than
     // be suppressed.
