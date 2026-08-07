@@ -272,26 +272,23 @@ export class AcpRuntimeManager extends EventEmitter {
     private readonly options: AcpRuntimeOptions,
   ) {
     super();
-    // Hydrate the session id from the previous app run so session/resume can
-    // reattach the agent's working context after an app crash/restart, not
-    // just after in-process runtime restarts. Absent/unknown ids are a no-op:
-    // startOnce() falls back to session/new when resume fails.
-    this.lastSessionId = this.readPersistedSessionId();
+    // SESSION ROTATION POLICY (Jon 2026-08-07): every app launch starts a
+    // FRESH session — we deliberately do NOT hydrate lastSessionId from
+    // persisted settings here. The immortal-resume pattern grew sessions past
+    // 1,000 messages and ~250k cached-read tokens PER TURN (511M cache-reads
+    // in 2 days — Jon's weekly allowance in a day). Continuity lives
+    // server-side (kanban/mail/profile, all re-read by the boot prompt), so a
+    // fresh session loses chit-chat, not work. In-process restarts (watchdog,
+    // crash) still resume via the in-memory lastSessionId — a session born
+    // this run is young and cheap. The persisted id is still WRITTEN each
+    // start: the future "session fluffer" (cherry-picked tail-of-previous-
+    // context restore, not condensed) will read it to find the prior session.
+    // Do not "fix" this back without re-reading the token math.
   }
 
   /** electron-store key scoping this runtime's persisted session id. */
   private get sessionPersistKey(): string {
     return `${this.options.agentName}::${this.options.workDir}`;
-  }
-
-  private readPersistedSessionId(): string | null {
-    try {
-      return getSettings().acpSessionIds?.[this.sessionPersistKey] ?? null;
-    } catch (err) {
-      // Settings read failure must never block runtime startup.
-      console.warn(`[ACP ${this.options.agentName}] failed to read persisted session id:`, err);
-      return null;
-    }
   }
 
   private persistSessionId(sessionId: string): void {
@@ -651,9 +648,13 @@ export class AcpRuntimeManager extends EventEmitter {
         }
       }
 
-      // Resume the prior session when possible. A restart (watchdog, crash,
-      // failed turn) must not throw away the agent's working context by
-      // starting an empty session/new. Kimi advertises loadSession and
+      // Resume the prior session when possible — IN-PROCESS restarts only
+      // (watchdog, crash, failed turn): lastSessionId is set in memory after
+      // this process's first start, and a session born this run is young and
+      // cheap to resume. App LAUNCH never resumes (session-rotation policy,
+      // Jon 2026-08-07 — see the constructor note): the constructor does not
+      // hydrate lastSessionId from settings, so this branch can only fire
+      // after an in-process restart. Kimi advertises loadSession and
       // implements session/resume (no history replay — the renderer already
       // holds the transcript). Unknown/expired sessions return a JSON-RPC
       // error and fall back to session/new.
@@ -695,9 +696,10 @@ export class AcpRuntimeManager extends EventEmitter {
 
     this.sessionId = (sessionResult.sessionId as string) ?? null;
     this.lastSessionId = this.sessionId;
-    // Persist so an app-level crash/restart (not just a runtime restart) can
-    // resume this session on next launch. When resume just succeeded this is
-    // a no-op (id unchanged); a fresh session/new self-heals the entry.
+    // Persist so an in-process crash restart can resume this session, and so
+    // the id on disk is always the CURRENT session — the emergency manual
+    // reload handle (and later, the fluffer's pointer to the previous
+    // session). A fresh session/new self-heals the entry.
     if (this.sessionId) this.persistSessionId(this.sessionId);
     this.resumedLastStart = resumed;
     this.initialized = true;

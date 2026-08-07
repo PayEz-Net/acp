@@ -1755,7 +1755,10 @@ describe('AcpRuntimeManager', () => {
     expect(latestBootPrompt.prompt[0].text).toContain('Restart context');
   });
 
-  it('hydrates the persisted session id and resumes it on start', async () => {
+  it('starts FRESH at app launch even with a persisted session id (session-rotation policy)', async () => {
+    // Jon 2026-08-07: immortal resumed sessions grew past 1k messages and
+    // ~250k cached-read tokens per turn. Launch always opens session/new;
+    // the persisted id stays on disk as the manual emergency-reload handle.
     mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-persisted' };
     manager = new AcpRuntimeManager('rt-persist', getProviderConfig('kimi'), {
       agentName: 'NextPert',
@@ -1765,26 +1768,22 @@ describe('AcpRuntimeManager', () => {
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
+    mockState.setResponse('session/new', { sessionId: 'sess-fresh-rotation' });
 
     await manager.start();
 
+    expect(getProcess().requests.find((r) => r.method === 'session/resume')).toBeUndefined();
     expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({
-        method: 'session/resume',
-        params: expect.objectContaining({ sessionId: 'sess-persisted' }),
-      }),
+      expect.objectContaining({ method: 'session/new' }),
     );
-    expect(getProcess().requests.find((r) => r.method === 'session/new')).toBeUndefined();
-    expect(manager.getSessionId()).toBe('sess-persisted');
-    // App-launch resume: a lightweight wake-up nudge goes out so the agent
-    // visibly comes online — but NOT the full boot prompt (the resumed
-    // session already carries identity and history).
-    const nudgeRequest = getProcess().requests.find((r) => r.method === 'session/prompt');
-    expect(nudgeRequest).toBeDefined();
-    const nudgeText = ((nudgeRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
-    expect(nudgeText).toContain('NextPert');
-    expect(nudgeText).toContain('session resumed');
-    expect(nudgeText).not.toContain('Load Identity');
+    expect(manager.getSessionId()).toBe('sess-fresh-rotation');
+    // A fresh session gets the FULL boot prompt (identity + mail instructions),
+    // which now leads with the ACP-<agent> session label.
+    const bootRequest = getProcess().requests.find((r) => r.method === 'session/prompt');
+    expect(bootRequest).toBeDefined();
+    const bootText = ((bootRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
+    expect(bootText).toContain('Load Identity');
+    expect(bootText).toMatch(/^\[ACP-NextPert — /);
   });
 
   it('does not re-nudge after an in-process restart of a resumed session', async () => {
@@ -1796,19 +1795,24 @@ describe('AcpRuntimeManager', () => {
     });
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
-    mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
+    mockState.setResponse('session/new', { sessionId: 'sess-launched-fresh' });
+    mockState.setResponse('session/resume', { sessionId: 'sess-launched-fresh' });
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
 
     await manager.start();
-    // App-launch resume sent exactly one wake-up nudge.
+    // Launch is fresh (rotation policy): session/new + exactly one boot prompt.
     expect(getProcess().requests.filter((r) => r.method === 'session/prompt')).toHaveLength(1);
 
     await manager.restart();
 
-    // In-process restart resumes again (new process), but stays silent: the
-    // renderer still holds the transcript, so no nudge and no boot prompt.
+    // In-process restart resumes the session born this run (young and cheap),
+    // and stays silent: the renderer still holds the transcript, so no nudge
+    // and no second boot prompt.
     expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({ method: 'session/resume' }),
+      expect.objectContaining({
+        method: 'session/resume',
+        params: expect.objectContaining({ sessionId: 'sess-launched-fresh' }),
+      }),
     );
     expect(getProcess().requests.find((r) => r.method === 'session/prompt')).toBeUndefined();
   });
@@ -1822,7 +1826,7 @@ describe('AcpRuntimeManager', () => {
     expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-new-persist');
   });
 
-  it('falls back to session/new and re-persists when resume of the persisted id fails', async () => {
+  it('overwrites the persisted id with the fresh session at launch (emergency handle stays current)', async () => {
     mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-stale' };
     manager = new AcpRuntimeManager('rt-stale', getProviderConfig('kimi'), {
       agentName: 'NextPert',
@@ -1831,14 +1835,11 @@ describe('AcpRuntimeManager', () => {
     });
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
-    mockState.setResponse('session/resume', new Error('invalid params: session not found'));
     mockState.setResponse('session/new', { sessionId: 'sess-fresh' });
 
     await manager.start();
 
-    expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({ method: 'session/new' }),
-    );
+    expect(getProcess().requests.find((r) => r.method === 'session/resume')).toBeUndefined();
     expect(manager.getSessionId()).toBe('sess-fresh');
     expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-fresh');
   });

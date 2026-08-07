@@ -26,6 +26,13 @@ export interface BootPromptOptions {
 
 const DEFAULT_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
+/** `2026-08-07 11:50` in local time, for the session label. */
+function sessionLabelStamp(): string {
+  const d = new Date();
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /**
  * Build an onboarding prompt for an agent.
  *
@@ -97,7 +104,15 @@ Your profile and mail status are already provided above. Do NOT run any addition
 
 Run ONLY the curl command(s) above to load your identity (and optionally check mail). Once you have the real data, output the ready message and stop. ${hasContext ? 'You may briefly acknowledge the restart context after the ready message, then stop.' : ''} Do NOT run any other tools during this first turn. Wait for the next user message before doing any work.`;
 
-  return `${identityHeader}
+  // Jon 2026-08-07: the first line doubles as the session's human-readable
+  // NAME. Kimi derives the session title from the first prompt (raw
+  // truncation today), so a leading label makes the session identifiable in
+  // the kimi picker for an emergency manual resume — fresh-session-at-launch
+  // is the policy, and the previous session stays on disk as the escape
+  // hatch. Keep this line FIRST; do not move it below the identity header.
+  return `[ACP-${agentName} — ${sessionLabelStamp()}]
+
+${identityHeader}
 
 ${profileSection}
 

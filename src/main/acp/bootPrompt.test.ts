@@ -48,3 +48,13 @@ describe('human-interrupt rule', () => {
     expect(prompt).toMatch(/before your next tool call/);
   });
 });
+
+// Jon 2026-08-07: fresh-session-at-launch is the token policy; the previous
+// session stays on disk as the emergency escape hatch, and the boot prompt's
+// first line is what makes it findable in the kimi session picker.
+describe('session label (emergency-resume discoverability)', () => {
+  it('leads with an ACP-<agent> timestamped label', () => {
+    const prompt = buildAgentBootPrompt('NextPert');
+    expect(prompt).toMatch(/^\[ACP-NextPert — \d{4}-\d{2}-\d{2} \d{2}:\d{2}\]/);
+  });
+});
