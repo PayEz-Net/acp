@@ -42,21 +42,18 @@ afterEach(() => {
 });
 
 describe('routeMailNotice wiring (WO 11517)', () => {
-  it('pty-echo: a PTY-bridge agent gets the self-instructing notice as an info line', async () => {
+  it('pty-echo: a PTY-bridge agent gets NO SSE echo box — pty.ts poller/MCP is the sole notice+delivery path (duplicate box removed, Jon 2026-08-05)', async () => {
     useAppStore.setState({
       agents: [{ id: '1', name: 'NextPert', terminalId: 't-pty' } as never],
     });
 
     await routeMailNotice('NextPert', 'BAPert', 'WORK ORDER', 9101);
 
-    const lines = useAgentOutputStore.getState().lines;
-    expect(lines).toHaveLength(1);
-    expect(lines[0]?.source).toBe('info');
-    expect(lines[0]?.terminal_id).toBe('t-pty');
-    expect(lines[0]?.line).toContain('[ACP Mail] You have a message from BAPert: "WORK ORDER" (id: 9101)');
-    expect(lines[0]?.line).toContain('inline mail body');
-    expect(lines[0]?.line).toContain('do not wait for the human');
-    // No injection on the echo path — the main-side poller/MCP delivers.
+    // The SSE hook no longer paints the redundant "You have a message from" box on
+    // the pty-echo route: the main-process poller (pty.ts) already prints the
+    // "New message from" chat line and delivers out-of-band. So nothing here.
+    expect(useAgentOutputStore.getState().lines).toHaveLength(0);
+    // And it still never injects on this route.
     expect(mockInjectAcpMail).not.toHaveBeenCalled();
   });
 

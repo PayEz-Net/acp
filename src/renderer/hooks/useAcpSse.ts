@@ -193,15 +193,14 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
     return;
   }
 
-  // pty-echo: PTY bridge — the main-process inbox poller (kimi/codex) or the
-  // MCP channel (claude) delivers out-of-band; the line is the visual echo.
-  // provider-fallback-echo: no live surface and a claude registration — rely
-  // on the MCP channel push once the agent is up. Either way the echo goes
-  // through the retry loop: in the no-surface case a single render attempt
-  // would die silently in console.warn (WO 11491 P2).
-  renderMailLineWithRetry({
-    render: () => renderMailSurfaceLine(agentName, noticeText),
-  });
+  // pty-echo / provider-fallback-echo: the main-process inbox poller (kimi/codex)
+  // or the MCP channel (claude) delivers out-of-band AND already prints the
+  // human-visible "[ACP Mail] New message from …" chat line in the pane (pty.ts).
+  // The SSE hook USED to also paint a second "You have a message from …" echo box
+  // here — a redundant duplicate notice that, with a 7-agent team, firehosed the
+  // pane and slid under the UI. Removed (Jon 2026-08-05): keep the chat notice
+  // (pty.ts), drop the duplicate box. Delivery is unaffected — this route never
+  // delivered, it only echoed; the acp-inject route above still delivers + echoes.
 }
 
 /**
