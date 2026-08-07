@@ -25,6 +25,10 @@ import sseStreamRoutes from './routes/sseStream.js';
 import terminalReplayRoutes from './routes/terminalReplay.js';
 import { BackoffManager } from './lifecycle/backoff.js';
 import { HealthMonitor } from './lifecycle/healthMonitor.js';
+import { WorkActivity } from './lifecycle/workActivity.js';
+import { WorkStoppageMonitor } from './lifecycle/workStoppageMonitor.js';
+import { workActivityStamp } from './middleware/workActivityStamp.js';
+import { makeApiMailSender } from '../collaboration/mail.js';
 import { makeCrashRestartScheduler } from './lifecycle/crashRestart.js';
 import agentLifecycleRoutes from './routes/agentLifecycle.js';
 import { bootstrap } from '../core/bootstrap.js';
@@ -108,6 +112,12 @@ export async function createApp(cfg) {
 
   // Apply local auth middleware to all routes after this point
   app.use(localAuth(appConfig.acpLocalSecret || null, storage));
+
+  // Work-activity stamp (kanban 181986) — AFTER localAuth so req.authMethod /
+  // req.agentName are set. Only agent-authenticated, work-bearing calls count;
+  // heartbeats, SSE keepalives and platform mail are excluded inside.
+  const workActivity = new WorkActivity();
+  app.use(workActivityStamp(workActivity));
   
   // Health endpoint — unauthenticated, must respond within 1s
   // Storage probe has 500ms timeout to stay within budget
@@ -206,6 +216,24 @@ export async function createApp(cfg) {
   });
 
   const healthMonitor = new HealthMonitor(appConfig, backoffManager, callbackPort, scheduleRestart);
+
+  // Work-stoppage detection (kanban 181986). Kicks ride the same mail API the
+  // supervisor ping uses; the sender identity is the configured platform voice
+  // (default BAPert — the supervisor-ping precedent, supervisor.js:444).
+  const apiMailSend = makeApiMailSender(appConfig.port);
+  const workStoppageMonitor = new WorkStoppageMonitor(
+    appConfig,
+    storage,
+    workActivity,
+    (to, subject, body) =>
+      apiMailSend(storage, { from: appConfig.workStoppageKickFrom, to, subject, body, priority: 'high' }),
+  );
+
+  // Silence probe for the desktop / JonPert (181986 design pt 5) — poll this
+  // instead of log-scraping.
+  app.get('/v1/platform/activity', (req, res) => {
+    res.json(success(workActivity.snapshot(), 'platform_activity', req.requestId));
+  });
 
   app.use('/v1/lifecycle/agents', agentLifecycleRoutes({
     cfg: appConfig,
@@ -375,6 +403,8 @@ export async function createApp(cfg) {
   app._upstreamSse = upstreamSse;
   app._backoffManager = backoffManager;
   app._healthMonitor = healthMonitor;
+  app._workStoppageMonitor = workStoppageMonitor;
+  app._workActivity = workActivity;
   app._lifecycleHooks = lifecycleHooks;
   app._localEventBus = localEventBus;
   return app;
@@ -408,6 +438,10 @@ if (process.argv[1]?.endsWith('server.js')) {
     // Start health monitor for Electron callback server
     app._healthMonitor.start();
 
+    // Start work-stoppage monitor (kanban 181986) — alongside HealthMonitor;
+    // createApp() never starts it, so app-level tests see no timers.
+    app._workStoppageMonitor.start();
+
     // The config-gated boot auto-spawn loop was REMOVED (BAPert 1425; Aurum
     // 1413 greenfield-no-dead-code). It was a dead, competing autostart path:
     // ACP_AUTO_SPAWN defaulted OFF and no surface set it true, while the
@@ -421,6 +455,7 @@ if (process.argv[1]?.endsWith('server.js')) {
       partyEngine: app._partyEngine,
       upstreamSse: app._upstreamSse,
       healthMonitor: app._healthMonitor,
+      workStoppageMonitor: app._workStoppageMonitor,
       backoffManager: app._backoffManager,
       server,
       callbackPort: config.acpCallbackPort,

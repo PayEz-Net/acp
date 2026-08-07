@@ -95,6 +95,11 @@ export const config = {
   autonomyMaxRuntimeHours: parseInt(process.env.AUTONOMY_MAX_RUNTIME_HOURS ?? '', 10) || 4,
   escalationSensitivity: parseInt(process.env.ESCALATION_SENSITIVITY ?? '', 10) || 2,
 
+  // Work-stoppage detection (kanban 181986) — see api/lifecycle/workStoppageMonitor.ts
+  workStoppageSilenceMinutes: parseInt(process.env.WORK_STOPPAGE_SILENCE_MINUTES ?? '', 10) || 30,
+  workStoppageTickSeconds: parseInt(process.env.WORK_STOPPAGE_TICK_SECONDS ?? '', 10) || 60,
+  workStoppageKickFrom: process.env.WORK_STOPPAGE_KICK_FROM || 'BAPert',
+
   // VibeSQL direct lane — used by agent roster raw queries and the agent
   // document store. Kept central here so callers don't proliferate env reads.
   vibesqlUrl: process.env.VIBESQL_URL || '',
