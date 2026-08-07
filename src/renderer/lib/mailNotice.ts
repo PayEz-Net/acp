@@ -65,8 +65,10 @@ export function buildMailDeliveryFailedText(
 /**
  * Intentional defer (WO 11622): the agent is mid-turn and the push was
  * skipped BY DESIGN so the live step is never interrupted. Not a failure —
- * the pane line must say the true thing: skipped for now, where it waits,
- * and that it re-surfaces at the next idle catch-up.
+ * the pane line must say the true thing: WHO was spared the interrupt, which
+ * message waits, and that it re-pushes when the turn ends (the deferred-mail
+ * re-drive, 2026-08-07). Jon: point at the message itself (agents can read it
+ * directly); unread=true only matters at session start — don't mention it.
  */
 export function buildMailDeliveryDeferredText(
   agentName: string,
@@ -75,9 +77,9 @@ export function buildMailDeliveryDeferredText(
   subject: string,
 ): string {
   return (
-    `[ACP Mail] Delivery deferred — agent is mid-turn, push skipped to avoid interrupting it. ` +
-    `Message ${id} from ${from} ("${subject}") is waiting in ` +
-    `${ACP_API_BASE}/v1/mail/inbox/${agentName}?unread=true and re-surfaces at the next idle catch-up.`
+    `[ACP Mail] Delivery deferred — ${agentName} is mid-turn; push skipped to avoid interrupting ${agentName}. ` +
+    `Message ${id} from ${from} ("${subject}") is parked and will be pushed when the turn ends — ` +
+    `or read it now: ${ACP_API_BASE}/v1/mail/messages/${id}.`
   );
 }
 

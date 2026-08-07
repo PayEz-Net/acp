@@ -853,7 +853,7 @@ export class AcpRuntimeManager extends EventEmitter {
       // step died, and restarting the sessions did not cure it). Mail is
       // durable in the inbox; defer it. The idle catch-up synthesis
       // re-notifies when the turn completes.
-      console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; idle catch-up will deliver`);
+      console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; re-drive delivers at turn end`);
       return 'deferred';
     }
     this.executePrompt(prompt);

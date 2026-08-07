@@ -52,12 +52,14 @@ describe('buildMailDeliveryFailedText', () => {
 });
 
 describe('buildMailDeliveryDeferredText', () => {
-  it('says the true thing: push skipped by design mid-turn, mail waits in the inbox', () => {
+  it('says the true thing: push skipped by design mid-turn, message parked with its own link', () => {
     const text = buildMailDeliveryDeferredText('BAPert', 17372, 'NextPert', 'F2 block confirmed');
     expect(text).toContain('[ACP Mail] Delivery deferred');
-    expect(text).toContain('mid-turn');
+    expect(text).toContain('BAPert is mid-turn');
+    expect(text).toContain('interrupting BAPert');
     expect(text).toContain('Message 17372 from NextPert ("F2 block confirmed")');
-    expect(text).toContain('/v1/mail/inbox/BAPert?unread=true');
+    expect(text).toContain('/v1/mail/messages/17372');
+    expect(text).not.toContain('unread=true');
     expect(text).not.toContain('failed');
   });
 });
