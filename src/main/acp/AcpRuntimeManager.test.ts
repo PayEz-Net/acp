@@ -1431,6 +1431,32 @@ describe('AcpRuntimeManager', () => {
     vi.useRealTimers();
   });
 
+  it('cancels a resume-zombie on the FIRST busy rejection after a fresh spawn (no 3-probe wait)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-zombie' });
+    // The very first dispatch (the boot kickoff) hits the zombie turn marker
+    // from the session file — no live turn can exist on a fresh process, so
+    // the cancel must go out immediately, not after 3 probes.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+
+    vi.useFakeTimers();
+    try {
+      await manager.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+
+      // The next probe (5s) re-dispatches the re-queued kickoff cleanly.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('trips the idle watchdog mid-busy-episode and restarts with session/new (skip resume once)', async () => {
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/new', { sessionId: 'sess-busy-wedged' });

@@ -90,4 +90,38 @@ describe('routeMailNotice wiring (WO 11517)', () => {
     // And never through the PTY info-line channel.
     expect(useAgentOutputStore.getState().lines).toHaveLength(0);
   });
+
+  it('deferred acp-inject re-drives when the agent goes idle (turn end)', async () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.setState({
+        agents: [{ id: '1', name: 'NextPert', terminalId: 't-acp' } as never],
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's-live',
+        update: { sessionUpdate: 'initialized', sessionId: 's-live' },
+      } as never);
+      // Agent mid-turn: the inject defers (tri-state) and parks the notice.
+      useAcpSessionStore.getState().startAssistantTurn('NextPert', 's-live');
+      mockInjectAcpMail.mockResolvedValue('deferred');
+
+      void routeMailNotice('NextPert', 'BAPert', 'WORK ORDER', 9103);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockInjectAcpMail).toHaveBeenCalledTimes(1);
+
+      // Turn ends — the parked notice re-drives through the full route.
+      mockInjectAcpMail.mockResolvedValue('delivered');
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's-live',
+        update: { sessionUpdate: 'turn_complete', sessionId: 's-live', stopReason: 'end_turn' },
+      } as never);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockInjectAcpMail).toHaveBeenCalledTimes(2);
+    } finally {
+      mockInjectAcpMail.mockResolvedValue('delivered');
+      vi.useRealTimers();
+    }
+  });
 });

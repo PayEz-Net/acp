@@ -251,6 +251,13 @@ export class AcpRuntimeManager extends EventEmitter {
   // survives the episode is a property of the resumed session, and
   // re-resuming it just re-enters the busy loop.
   private skipResumeOnce = false;
+  // Dispatch attempts on the CURRENT process (reset in startOnce). A busy
+  // rejection on the very first dispatch after a fresh spawn is definitional:
+  // no live turn can exist on a brand-new process, so the "active turn" the
+  // runtime reports is a zombie marker from the resumed session file — the
+  // busy re-sync cancels it immediately instead of probing for 15s while
+  // every mail defers against the ghost.
+  private dispatchAttemptsThisProcess = 0;
 
   // Preserve the most recent user prompts across runtime restarts so a watchdog
   // restart (or unexpected process crash) doesn't force the user to restate the
@@ -540,6 +547,7 @@ export class AcpRuntimeManager extends EventEmitter {
       cwd: this.options.workDir,
       env: spawnEnv,
     });
+    this.dispatchAttemptsThisProcess = 0;
 
     // Developer visibility (Jon's ask): show the exact launch command —
     // overrides included — as a banner line in the pane, the way the old PTY
@@ -1148,6 +1156,7 @@ export class AcpRuntimeManager extends EventEmitter {
     // a healthy turn is still streaming; the manager-level watchdog handles hangs.
     // turn_started tells the renderer a dispatch happened NOW — the busy pill
     // must not wait for the first streamed chunk (card 182119).
+    this.dispatchAttemptsThisProcess++;
     this.emitAcpEvent({ sessionUpdate: 'turn_started', sessionId });
     this.process.request('session/prompt', { sessionId, prompt }, 0)
       .then((result) => {
@@ -1226,18 +1235,22 @@ export class AcpRuntimeManager extends EventEmitter {
             // it is set — hand it a live ref or the re-sync ends on the next
             // tick. The idle tick count is deliberately NOT reset.
             this.promptSettledRef = { current: false };
-            if (this.agentBusyRejectionCount === AGENT_BUSY_CANCEL_AFTER) {
-              // A busy turn that outlives a few probes is almost always a
-              // zombie left over from a previous incarnation (the process is
-              // gone; the session file still thinks the turn is live). Cancel
-              // it NOW and keep probing: if the cancel frees the session, the
-              // next retry dispatches and the resumed context survives. If the
-              // busy turn is real (or the cancel doesn't take), the episode
-              // escalates at the cap exactly as before — the cancel the
-              // escalation already sends makes this a no-op policy-wise, just
-              // early enough to actually do some good.
+            const resumeZombie = this.dispatchAttemptsThisProcess <= 1;
+            if (resumeZombie || this.agentBusyRejectionCount === AGENT_BUSY_CANCEL_AFTER) {
+              // A busy turn on the FIRST dispatch after a fresh spawn is
+              // definitionally a zombie — no live turn can exist on a new
+              // process; the resumed session file just still thinks one is
+              // active. Cancel it NOW (not after 3 probes): every mail defers
+              // against the ghost while we wait. The few-probes path remains
+              // for mid-process episodes, where a busy turn could be real.
+              // If the cancel frees the session, the next retry dispatches and
+              // the resumed context survives; if the busy turn somehow is real
+              // (or the cancel doesn't take), the episode escalates at the cap
+              // exactly as before.
               console.warn(
-                `[ACP ${this.options.agentName}] busy turn survived ${AGENT_BUSY_CANCEL_AFTER} probes — sending session/cancel to free the session`,
+                resumeZombie
+                  ? `[ACP ${this.options.agentName}] first dispatch after spawn busy-rejected — cancelling the resume-zombie turn immediately`
+                  : `[ACP ${this.options.agentName}] busy turn survived ${AGENT_BUSY_CANCEL_AFTER} probes — sending session/cancel to free the session`,
               );
               this.process?.notify('session/cancel', { sessionId });
               this.agentBusyCancelSent = true;

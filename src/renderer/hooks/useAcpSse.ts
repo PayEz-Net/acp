@@ -130,7 +130,7 @@ async function fetchMailBody(agentName: string, id: string | number): Promise<st
  *
  * Exported for the wiring tests (WO 11517) — not part of the hook's API.
  */
-export async function routeMailNotice(agentName: string, from: string, subject: string, id: string | number): Promise<void> {
+export async function routeMailNotice(agentName: string, from: string, subject: string, id: string | number, redriveAttempt = 0): Promise<void> {
   const body = typeof id === 'number' ? await fetchMailBody(agentName, id) : null;
   const noticeText = buildMailNoticeText(agentName, from, subject, id, body ?? undefined);
   const agentState = useAppStore.getState().agents.find((a) => a.name === agentName);
@@ -171,6 +171,10 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
         renderMailLineWithRetry({
           render: () => renderMailSurfaceLine(agentName, deferredText),
         });
+        // The idle catch-up synthesis is gone — park the notice and re-drive
+        // it when this agent's turn ends, or a defer means the notice NEVER
+        // arrives (Jon 2026-08-07: "mails falling through the cracks").
+        parkDeferredNotice(agentName, from, subject, id, redriveAttempt);
       },
       onFailed: () => {
         console.warn(`[AcpSse] Mail notice delivery failed for ${agentName} after all retries`);
@@ -201,6 +205,49 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
   // pane and slid under the UI. Removed (Jon 2026-08-05): keep the chat notice
   // (pty.ts), drop the duplicate box. Delivery is unaffected — this route never
   // delivered, it only echoed; the acp-inject route above still delivers + echoes.
+}
+
+/**
+ * Deferred-mail re-drive (Jon 2026-08-07: "mails falling through the cracks").
+ * The idle catch-up synthesis that used to re-surface deferred notices is gone,
+ * so a mid-turn defer with no re-drive meant the notice NEVER arrived — wake-up
+ * mail vanished against busy/zombie turns while the pane claimed "re-surfaces
+ * at idle catch-up". Now a defer parks the notice here; the next moment the
+ * agent has no active turn, the oldest parked notice is re-routed through the
+ * full routeMailNotice path (routing + echo semantics intact). A re-drive that
+ * defers again re-parks via onDeferred; attempts are bounded per notice so a
+ * permanently-wedged lane can't loop forever.
+ */
+const parkedNotices = new Map<string, Array<{ from: string; subject: string; id: string | number; attempts: number }>>();
+const redriveArmed = new Set<string>();
+const MAX_REDRIVE_ATTEMPTS = 8;
+
+function parkDeferredNotice(agentName: string, from: string, subject: string, id: string | number, attempts: number): void {
+  const parked = parkedNotices.get(agentName) ?? [];
+  parked.push({ from, subject, id, attempts });
+  parkedNotices.set(agentName, parked);
+  armRedrive(agentName);
+}
+
+function armRedrive(agentName: string): void {
+  if (redriveArmed.has(agentName)) return;
+  redriveArmed.add(agentName);
+  const unsub = useAcpSessionStore.subscribe(() => {
+    const session = useAcpSessionStore.getState().sessions.get(agentName);
+    if (session?.activeTurnId) return; // still busy — wait for the turn end
+    unsub();
+    redriveArmed.delete(agentName);
+    const parked = parkedNotices.get(agentName);
+    const next = parked?.shift();
+    if (parked && parked.length === 0) parkedNotices.delete(agentName);
+    if (!next) return;
+    const attempt = next.attempts + 1;
+    if (attempt > MAX_REDRIVE_ATTEMPTS) {
+      console.warn(`[AcpSse] Deferred notice for ${agentName} gave up after ${MAX_REDRIVE_ATTEMPTS} re-drives (id=${next.id}) — mail waits in inbox`);
+      return;
+    }
+    void routeMailNotice(agentName, next.from, next.subject, next.id, attempt);
+  });
 }
 
 /**
