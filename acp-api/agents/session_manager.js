@@ -511,7 +511,7 @@ export class SessionManager {
       description: row.description,
       status: row.status,
       priority: row.priority,
-      assignedTo: row.assigned_to,
+      assignedTo: row.assigned_to ?? row.agent_name ?? null,
       createdBy: row.created_by,
       specPath: row.spec_path,
       milestone: row.milestone,
@@ -611,22 +611,21 @@ export class SessionManager {
     return this._rowToTask(t, pid);
   }
 
-  // Maps to the EXISTING cloud board reads (GET /v1/projects/{id}/kanban/active|done|waiting,
-  // DnP 7279). Those return board columns, so to reproduce the old arbitrary-filter SELECT we
-  // fetch ALL three boards, merge (dedupe by id), then apply the remaining predicates IN-MEMORY
-  // — exactly what the SQL did — instead of guessing a status->board mapping. A failed fetch
-  // THROWS (surfaced), never a silent []. FLAGGED to DnP: confirms board read wrapper shape
-  // (assumed { data: { tasks: [...] } } | { data: [...] }).
+  // 117039: reads the list-ALL endpoint (GET /v1/projects/{id}/kanban/tasks,
+  // page_size=0 full set, `{ data: { tasks, ... } }`) — NOT the three column boards.
+  // The old active/done/waiting merge had two stacked defects: done/waiting paginate
+  // server-side (default 20), so cards past page 1 were INVISIBLE to the list (the
+  // "ceiling"), and the column DTO was lean. The list-all endpoint exists precisely
+  // for this consumer and returns every status in one read. Remaining predicates are
+  // applied IN-MEMORY as before. A failed fetch THROWS (surfaced), never a silent [].
   async listTasks(filter = {}) {
     const pid = this._requireProjectId(filter.projectId, 'listTasks');
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks`);
+    const tasks = res?.data?.tasks ?? res?.data?.items ?? [];
     const seen = new Map();
-    for (const board of ['active', 'done', 'waiting']) {
-      const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/${board}`);
-      const tasks = res?.data?.tasks ?? res?.data?.items ?? res?.data ?? [];
-      for (const t of (Array.isArray(tasks) ? tasks : [])) {
-        const mapped = this._rowToTask(t, pid);
-        if (mapped.id != null) seen.set(mapped.id, mapped);
-      }
+    for (const t of (Array.isArray(tasks) ? tasks : [])) {
+      const mapped = this._rowToTask(t, pid);
+      if (mapped.id != null) seen.set(mapped.id, mapped);
     }
     let rows = Array.from(seen.values());
     // In-memory predicates mirroring the prior SQL. archived three-valued: legacy null = NOT archived.

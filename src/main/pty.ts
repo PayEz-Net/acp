@@ -623,24 +623,17 @@ function startInboxPoller(managed: ManagedPty): void {
       seen.add(Number(id));
       const from = m.from_agent ?? 'unknown';
       const subject = m.subject ?? '(no subject)';
-      // The notice used to say `Read it NOW with: curl .../v1/mail/messages/N`.
-      // That GET STAMPS read_at in the cloud, so we were instructing every agent
-      // to run the one call that marks its own mail read — BEFORE acting on it.
-      // Result: 42 of 42 inbox entries carried a read_at nobody set deliberately,
-      // unread_count sat at 0 forever, and the inbox stopped working as a work
-      // queue. Confirmed by controlled probe (DotNetPert-Scout, 2026-07-30):
-      // read_at null -> one GET -> read_at stamped, unread_count 0.
-      //
-      // Team convention is that unread means NOT YET ACTIONED, which is why we
-      // leave mail unread in-session. Read-on-GET redefines it as NOT YET
-      // FETCHED — a different thing, and the difference is what destroyed the
-      // queue. So the notice no longer commands the fetch: it carries enough to
-      // act on, and tells the agent that fetching costs its unread state.
+      // Per-mail notice is intentionally LEAN: who / subject / id + the body-fetch
+      // curl, nothing else. GET on a message does NOT stamp read (re-confirmed
+      // 2026-08-05 by controlled probe: GET by id, inbox count + entry unchanged),
+      // so there is no fetch-cost to warn about. The old notice carried a stale
+      // "fetching marks it read, fetch only when ready to action" lecture in EVERY
+      // push — false and a context clogger (Jon, 2026-08-05). Mail-read and
+      // autonomy discipline lives in agent onboarding, not here.
       const text =
         `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
         `Act on it. If you need the body: curl -s ${apiBase}/v1/mail/messages/${id} ` +
-        `-H "X-ACP-Agent: ${agentName}" — NOTE that fetching marks it read, so fetch ` +
-        `only when you are ready to action it, not to triage. Do not wait for the human.`;
+        `-H "X-ACP-Agent: ${agentName}".`;
       // Inject as bracketed paste + a SEPARATE Enter write. A raw
       // `write(text + '\r')` arrives as one input burst; the kimi TUI treats
       // the burst as pasted content and the trailing \r becomes a newline in

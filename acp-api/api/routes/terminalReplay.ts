@@ -84,6 +84,11 @@ function buildHistoryQuery(
   );
   params.set('limit', String(limit));
 
+  // 117048: tail access. Forwarded verbatim; the backend honors order=desc
+  // (newest-first) with offset cursors working in both directions.
+  const order = (req.query.order as string | undefined) || undefined;
+  if (order) params.set('order', order);
+
   if (extra.cursor) params.set('cursor', extra.cursor);
 
   return params.toString();
@@ -125,23 +130,35 @@ async function fetchHistoryPage(
   return envelope.data;
 }
 
+/**
+ * 117048: fetchAllHistory is BOUNDED. The old unbounded loop 500'd the aggregator
+ * endpoints (/sessions, /export) exactly when history was large — "Result set too
+ * large" upstream. Now: at most MAX_PAGES pages, and the caller is TOLD when the
+ * accumulation stopped early (truncated flag) instead of dying or pretending
+ * completeness. Overseer/spotter callers should pass a `since` window — it is
+ * forwarded to the backend and keeps the read cheap by construction.
+ */
+const MAX_PAGES = 20; // 20 × 5000 = 100k lines worst case, then loud truncation
+
 async function fetchAllHistory(
   cfg: Config,
   headers: Record<string, string>,
   projectId: number,
   req: Request,
-): Promise<HistoryLine[]> {
+): Promise<{ lines: HistoryLine[]; truncated: boolean }> {
   const lines: HistoryLine[] = [];
   let cursor: string | undefined;
+  let pages = 0;
 
   do {
     const query = buildHistoryQuery(projectId, req, { cursor, limit: MAX_LIMIT });
     const page = await fetchHistoryPage(cfg, query, headers);
     lines.push(...page.lines);
     cursor = page.next_cursor;
-  } while (cursor);
+    pages += 1;
+  } while (cursor && pages < MAX_PAGES);
 
-  return lines;
+  return { lines, truncated: !!cursor };
 }
 
 export default function terminalReplayRoutes(cfg: Config): Router {
@@ -190,7 +207,7 @@ export default function terminalReplayRoutes(cfg: Config): Router {
     }
 
     try {
-      const lines = await fetchAllHistory(cfg, auth.headers, projectIdValue, req);
+      const { lines, truncated } = await fetchAllHistory(cfg, auth.headers, projectIdValue, req);
 
       const groups = new Map<string, TerminalReplaySession>();
       for (const line of lines) {
@@ -211,7 +228,9 @@ export default function terminalReplayRoutes(cfg: Config): Router {
       }
 
       const sessions = Array.from(groups.values()).sort((a, b) => (b.last_ts > a.last_ts ? 1 : -1));
-      res.json(success({ sessions }, 'terminal_sessions', (req as any).requestId));
+      // truncated=true means the window covers OLDEST history only — first_ts values
+      // are reliable, last_ts may be stale. Pass ?since= to bound the read by time.
+      res.json(success({ sessions, truncated }, 'terminal_sessions', (req as any).requestId));
     } catch (err: any) {
       console.error('[TerminalReplay] sessions failed:', err);
       res.status(502).json(error('UPSTREAM_FAILED', err.message || 'Failed to query terminal sessions from backend', 'terminal_sessions', (req as any).requestId));
@@ -239,7 +258,12 @@ export default function terminalReplayRoutes(cfg: Config): Router {
     }
 
     try {
-      const lines = await fetchAllHistory(cfg, auth.headers, projectIdValue, req);
+      const { lines, truncated } = await fetchAllHistory(cfg, auth.headers, projectIdValue, req);
+      if (truncated) {
+        // An export that silently stops at the page cap is a corrupted artifact —
+        // say so in-band before the payload, never ship quiet partial data.
+        res.setHeader('X-Export-Truncated', 'true');
+      }
       const project_id = String(projectIdValue);
 
       if (format === 'ndjson') {

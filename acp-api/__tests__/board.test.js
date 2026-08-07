@@ -221,3 +221,65 @@ describe('TRANSITIONS', () => {
     expect(TRANSITIONS.todo).toBeUndefined();
   });
 });
+
+// ── 117039: the LIST DTO must carry the fields a board view consumes ──────────
+// The defect this pins: the list read merged three cloud column boards whose rows
+// were lean (no assignee/blockers reachable), and done/waiting paginated server-
+// side at 20 — cards past page 1 were invisible ("the ceiling"). The fix reads the
+// cloud list-ALL endpoint (/kanban/tasks, full set) and maps agent_name as the
+// assignee fallback. Must-fail-first: before the fix, the endpoint assertion and
+// the assignedTo assertion below both fail.
+describe('117039 list DTO (session_manager storage)', () => {
+  async function makeManager(rows) {
+    // config.ts runs required() at module load — set throwaway values before import.
+    process.env.IDP_URL ||= 'http://127.0.0.1:9';
+    process.env.VIBE_API_URL ||= 'http://127.0.0.1:9';
+    const { SessionManager } = await import('../agents/session_manager.js');
+    const m = new SessionManager({ vibesqlUrl: 'http://localhost:5173' });
+    m._cloudKanban = jest.fn(async () => ({ data: { tasks: rows, total_count: rows.length, has_more: false } }));
+    return m;
+  }
+
+  test('listTasks reads the list-ALL endpoint, not the paginated column boards', async () => {
+    const m = await makeManager([]);
+    await m.listTasks({ projectId: 31 });
+    const path = m._cloudKanban.mock.calls[0][1];
+    expect(path).toBe('/v1/projects/31/kanban/tasks');
+    expect(path).not.toMatch(/kanban\/(active|done|waiting)/);
+  });
+
+  test('list row for a card with a known assignee CONTAINS assignedTo (agent_name fallback)', async () => {
+    const m = await makeManager([
+      { id: 42, title: 'Owned card', status: 'in_progress', priority: 'high', agent_name: 'DotNetPert', created_at: '2026-08-01T00:00:00Z' },
+    ]);
+    const rows = await m.listTasks({ projectId: 31 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].assignedTo).toBe('DotNetPert');
+  });
+
+  test('list row carries blockers / milestone / createdBy / updatedAt when the cloud sends them', async () => {
+    const m = await makeManager([
+      {
+        id: 43, title: 'Blocked card', status: 'in_progress', priority: 'high',
+        assigned_to: 'QAPert', blockers: 'waiting on WS1', milestone: 'vibeid-deploy',
+        created_by: 'BAPert', updated_at: '2026-08-06T00:00:00Z', created_at: '2026-08-01T00:00:00Z',
+      },
+    ]);
+    const [row] = await m.listTasks({ projectId: 31 });
+    expect(row.assignedTo).toBe('QAPert');
+    expect(row.blockers).toBe('waiting on WS1');
+    expect(row.milestone).toBe('vibeid-deploy');
+    expect(row.createdBy).toBe('BAPert');
+    expect(row.updatedAt).toBe('2026-08-06T00:00:00Z');
+  });
+
+  test('in-memory filters still apply over the full set (status, archived default-excluded)', async () => {
+    const m = await makeManager([
+      { id: 1, title: 'a', status: 'review', agent_name: 'BAPert' },
+      { id: 2, title: 'b', status: 'done', archived: true },
+      { id: 3, title: 'c', status: 'review' },
+    ]);
+    const review = await m.listTasks({ projectId: 31, status: 'review' });
+    expect(review.map((r) => r.id)).toEqual([1, 3]);
+  });
+});

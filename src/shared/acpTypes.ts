@@ -108,6 +108,15 @@ export type AcpSessionUpdate =
   | { sessionUpdate: 'prompt_queued'; sessionId: string; queueDepth: number }
   | { sessionUpdate: 'prompt_dequeued'; sessionId: string; queueDepth: number }
   | { sessionUpdate: 'queue_cleared'; sessionId: string }
+  /**
+   * Manager-authoritative turn boundary: a prompt was just dispatched to the
+   * runtime. Emitted for EVERY dispatch (human, mail-injected, queue-drained,
+   * boot/resume nudge) so the renderer's busy state spans the whole in-flight
+   * window — including the silent thinking front-end and turns the user did
+   * not personally send, which chunk-inferred turn detection misses (card
+   * 182119: the 'Ready' pill lying mid-work).
+   */
+  | { sessionUpdate: 'turn_started'; sessionId: string }
   | { sessionUpdate: 'turn_complete'; sessionId: string; stopReason: string }
   | { sessionUpdate: 'error'; sessionId?: string; error: string }
   | { sessionUpdate: 'stderr'; sessionId?: string; text: string }

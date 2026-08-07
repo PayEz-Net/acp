@@ -925,6 +925,22 @@ describe('AcpRuntimeManager', () => {
     });
   });
 
+  it('emits turn_started on every dispatch so the renderer busy pill spans the silent front-end (card 182119)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-ts' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('hello');
+
+    const started = events.filter((e) => e.update.sessionUpdate === 'turn_started');
+    // Boot prompt + the human prompt — one turn_started per dispatch.
+    expect(started.length).toBeGreaterThanOrEqual(2);
+    expect(started[0]?.update).toMatchObject({ sessionUpdate: 'turn_started', sessionId: 'sess-ts' });
+
+    manager.kill();
+  });
+
   it('emits an error event when session/prompt hangs (image-paste Answering spinner bug)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-hang' });

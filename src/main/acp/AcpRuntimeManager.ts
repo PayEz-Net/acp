@@ -1146,6 +1146,9 @@ export class AcpRuntimeManager extends EventEmitter {
     // Send prompt without awaiting — the response arrives as streaming notifications.
     // Pass timeoutMs=0 so the per-request timeout in AcpProcess doesn't fire while
     // a healthy turn is still streaming; the manager-level watchdog handles hangs.
+    // turn_started tells the renderer a dispatch happened NOW — the busy pill
+    // must not wait for the first streamed chunk (card 182119).
+    this.emitAcpEvent({ sessionUpdate: 'turn_started', sessionId });
     this.process.request('session/prompt', { sessionId, prompt }, 0)
       .then((result) => {
         if (settledRef.current) return;
