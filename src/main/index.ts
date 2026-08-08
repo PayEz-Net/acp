@@ -7,8 +7,8 @@ import { autoUpdater } from 'electron-updater';
 import net from 'net';
 import { execSync } from 'child_process';
 import path from 'path';
-import { setupPtyHandlers, killAllPty } from './pty';
-import { initOutputSpill } from './ptyOutputReporter';
+import { setupPtyHandlers, killAllPty, getSessionTokenForTerminal } from './pty';
+import { initOutputSpill, setLiveSessionTokenResolver } from './ptyOutputReporter';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus, acpApiCall, ACP_API_URL } from './acp-api-client';
@@ -494,6 +494,11 @@ app.whenReady().then(async () => {
   // orphaned on disk. Runs after the single-instance check so two instances
   // never drain the same directory concurrently.
   initOutputSpill(app.getPath('userData'));
+  // 184984: let the spill drain re-resolve a LIVE sessionToken per terminal
+  // instead of replaying whatever (if anything) was captured when a payload
+  // first failed. Wired here rather than a static import between pty.ts and
+  // ptyOutputReporter.ts, which already import each other the other way.
+  setLiveSessionTokenResolver(getSessionTokenForTerminal);
 
   // Collision check #2 — foreign/zombie the lock misses (different app-id /
   // cross-build, or a zombie that released the lock but still holds the OAuth

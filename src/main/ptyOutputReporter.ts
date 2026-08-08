@@ -454,7 +454,25 @@ async function spillOrDrop(
     recordDrop(payload, cause, attempts, true);
     return;
   }
-  const { result, evictedBytes } = await spillOutput(payload, idempotencyKey);
+  // 184947: persist WHY this exhausted its retries, so the spill file is a
+  // real failure record instead of destroying the one thing it was in a
+  // position to keep. Previously `cause`/`attempts` were in hand right here
+  // and thrown away — the only place either survived was a console.warn.
+  //
+  // 184984: never write the sessionToken to disk. It is re-resolved live at
+  // drain time (getSessionTokenForTerminal) instead of being frozen at
+  // whatever it was when this payload first failed — a spilled entry can sit
+  // for days, by which point a captured token is exactly as likely to be
+  // dead as fresh, and a dead credential written to disk in plaintext buys
+  // nothing but retention risk.
+  const { sessionToken: _redactedForSpill, ...redactedPayload } = payload;
+  const { result, evictedBytes } = await spillOutput(
+    redactedPayload,
+    idempotencyKey,
+    undefined,
+    cause,
+    attempts,
+  );
   if (result === 'unavailable') {
     console.warn(
       `[PtyOutput] SPILL UNAVAILABLE for ${payload.agentName} — falling back to drop`,
@@ -481,6 +499,18 @@ let spilledCount = 0;
 let spilledBytes = 0;
 let drainTimer: NodeJS.Timeout | null = null;
 
+/** Resolves a LIVE sessionToken for a terminal at drain time (184984).
+ *  Deliberately a settable hook rather than a static import of pty.ts —
+ *  pty.ts already imports THIS module, so a static import back would be
+ *  circular. Wired once from index.ts, which imports both. Unwired = drained
+ *  payloads carry no sessionToken (already optional server-side) rather than
+ *  a stale one from whenever the payload first failed. */
+let resolveLiveSessionToken: ((terminalId: string) => string | undefined) | null = null;
+
+export function setLiveSessionTokenResolver(fn: (terminalId: string) => string | undefined): void {
+  resolveLiveSessionToken = fn;
+}
+
 /**
  * Enable the on-disk queue and start draining it.
  *
@@ -503,12 +533,36 @@ async function runDrain(): Promise<void> {
   draining = true;
   try {
     const res = await drainSpill<CloudOutputPayload>(
-      (payload, key) => postAgentOutput(payload, key),
+      (payload, key) => {
+        // 184984: re-attach a FRESH token rather than whatever (if anything —
+        // spillOrDrop redacts it) survived from when this payload first
+        // failed. undefined when the terminal is gone or never wired, which
+        // is already a supported shape (sessionToken is optional).
+        const sessionToken = resolveLiveSessionToken?.(payload.terminalId);
+        return postAgentOutput({ ...payload, sessionToken }, key);
+      },
+      {
+        // 140734/184947: classify with the SAME retryability rule already
+        // used for in-memory retry, so "backend is down" (break, no count,
+        // never dead-lettered) and "this entry is rejected" (skip, count,
+        // eventually dead-lettered) cannot be confused with each other.
+        classify: (err) => (isRetryable(err) ? 'retryable' : 'terminal'),
+      },
     );
     if (res.sent > 0) {
       console.log(
         `[PtyOutput] Recovered ${res.sent} spilled payload(s) from disk; ` +
           `${res.remaining} still queued`,
+      );
+    }
+    if (res.deadLettered > 0) {
+      // Loud on purpose, same reasoning as the eviction warning above: a
+      // dead-lettered entry will NEVER reach the record through this path,
+      // and silence here would look identical to "everything drained clean".
+      console.warn(
+        `[PtyOutput] DEAD-LETTERED ${res.deadLettered} spilled payload(s) — ` +
+          `proven undeliverable across repeated drain attempts (140734). ` +
+          `Moved to agent-output-spill/dead-letter, not deleted.`,
       );
     }
   } catch {

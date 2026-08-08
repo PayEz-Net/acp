@@ -1484,6 +1484,15 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number): 
   return false;
 }
 
+/** Current sessionToken for a live terminal, or undefined if the terminal is
+ *  gone or never got one (184984). Used to re-resolve a FRESH token at spill
+ *  drain time instead of replaying whatever was captured when the payload
+ *  first failed — which may be a session that ended days ago by the time a
+ *  stranded entry finally drains. */
+export function getSessionTokenForTerminal(terminalId: string): string | undefined {
+  return terminals.get(terminalId)?.sessionToken;
+}
+
 /** Get terminal info by agent name.
  *  When projectId is provided, scopes to that project (P0 namespace fix).
  *  When omitted, falls back to global-by-name for legacy callers. */

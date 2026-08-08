@@ -108,4 +108,102 @@ describe('outputSpill', () => {
     expect(seen).toEqual(['k1']);
     expect(res.remaining).toBe(0);
   });
+
+  // --- 184947: cause/attempts persist on the spilled entry -------------------
+
+  it('persists cause and attempts on the spilled entry (184947)', async () => {
+    await spillOutput({ data: 'x' }, 'k1', 1000, 'server-error', 5);
+    const files = await fs.readdir(dir);
+    const entry = JSON.parse(await fs.readFile(path.join(dir, files[0]), 'utf8'));
+    expect(entry.cause).toBe('server-error');
+    expect(entry.attempts).toBe(5);
+  });
+
+  it('omits cause/attempts entirely when the caller supplies none (back-compat shape)', async () => {
+    await spillOutput({ data: 'x' }, 'k1', 1000);
+    const files = await fs.readdir(dir);
+    const entry = JSON.parse(await fs.readFile(path.join(dir, files[0]), 'utf8'));
+    expect('cause' in entry).toBe(false);
+    expect('attempts' in entry).toBe(false);
+  });
+
+  // --- 140734/184947: classify-driven drain policy ----------------------------
+
+  it('a RETRYABLE failure stops the tick and never counts toward dead-letter, however many ticks it spans', async () => {
+    await spillOutput({ data: 'a' }, 'k1', 1000);
+    await spillOutput({ data: 'b' }, 'k2', 2000);
+
+    // 20 ticks, all classified retryable — well past the default dead-letter
+    // budget of 10 — must never dead-letter or lose the entry.
+    let res;
+    for (let i = 0; i < 20; i++) {
+      res = await drainSpill(async () => { throw new Error('backend down'); }, {
+        classify: () => 'retryable',
+      });
+    }
+    expect(res!.deadLettered).toBe(0);
+    expect(res!.stoppedOnFailure).toBe(true);
+    expect((await spillStats()).entries).toBe(2);
+  });
+
+  it('a TERMINAL failure is skipped (not blocking) so later entries still drain the same tick', async () => {
+    await spillOutput({ data: 'poison' }, 'k1', 1000);
+    await spillOutput({ data: 'good' }, 'k2', 2000);
+
+    const sent: string[] = [];
+    const res = await drainSpill(
+      async (_p, k) => {
+        if (k === 'k1') throw new Error('rejected');
+        sent.push(k);
+      },
+      { classify: () => 'terminal' },
+    );
+
+    expect(sent).toEqual(['k2']);
+    expect(res.sent).toBe(1);
+    expect(res.deadLettered).toBe(0); // one failure, under the attempt budget
+  });
+
+  it('dead-letters a TERMINAL entry after exceeding maxDrainAttempts, moving it aside (not deleting)', async () => {
+    await spillOutput({ data: 'poison' }, 'k1', 1000);
+
+    let res;
+    for (let i = 0; i < 3; i++) {
+      res = await drainSpill(async () => { throw new Error('rejected'); }, {
+        classify: () => 'terminal',
+        maxDrainAttempts: 2,
+      });
+    }
+
+    expect(res!.deadLettered).toBe(1);
+    expect(res!.remaining).toBe(0); // no longer counted in the live queue
+    expect((await spillStats()).entries).toBe(0);
+
+    const deadLetterDir = path.join(dir, 'dead-letter');
+    const deadFiles = await fs.readdir(deadLetterDir);
+    expect(deadFiles).toHaveLength(1);
+    const preserved = JSON.parse(await fs.readFile(path.join(deadLetterDir, deadFiles[0]), 'utf8'));
+    expect(preserved.payload).toEqual({ data: 'poison' }); // moved, not destroyed
+  });
+
+  it('mixed classification: a global outage on the head does not stop a later per-entry rejection from being processed once the head clears', async () => {
+    await spillOutput({ data: 'good' }, 'k1', 1000);
+    await spillOutput({ data: 'poison' }, 'k2', 2000);
+
+    // Tick 1: head (k1) succeeds, k2 is terminal-rejected but under budget.
+    const res1 = await drainSpill(
+      async (_p, k) => { if (k === 'k2') throw new Error('rejected'); },
+      { classify: () => 'terminal', maxDrainAttempts: 1 },
+    );
+    expect(res1.sent).toBe(1);
+    expect(res1.deadLettered).toBe(0);
+
+    // Tick 2: k2 fails again, now exceeding the budget of 1 -> dead-lettered.
+    const res2 = await drainSpill(
+      async () => { throw new Error('rejected'); },
+      { classify: () => 'terminal', maxDrainAttempts: 1 },
+    );
+    expect(res2.deadLettered).toBe(1);
+    expect((await spillStats()).entries).toBe(0);
+  });
 });

@@ -16,9 +16,27 @@
  *    disk-full outage, which is worse. On overflow the OLDEST entry is evicted
  *    and that eviction is reported — a silent cap would read as "nothing was
  *    lost", which is the exact failure mode this module exists to end.
- *  - Draining stops at the FIRST failure. If the backend is still down, walking
- *    the rest of the queue just burns requests and re-times-out; the next tick
- *    retries from the same point.
+ *  - Draining CLASSIFIES each failure (140734/184947 — this is not optional:
+ *    without a cause you cannot tell the two cases below apart, and picking
+ *    either blanket policy is wrong for the other case):
+ *      RETRYABLE (backend-wide — network, 5xx, no bearer yet): behaves EXACTLY
+ *        as before this card — stop the whole tick, no counting, never
+ *        dead-lettered. "Always continue" here would cost one request per
+ *        queued entry per tick against a backend that is already down, which
+ *        is the exact self-inflicted flood the original stop-on-failure
+ *        existed to prevent.
+ *      TERMINAL (this entry specifically — rejected, malformed, dead
+ *        credential): skip it and keep draining the rest of THIS tick,
+ *        counting attempts, and dead-letter (move to `<dir>/dead-letter/`,
+ *        never delete) once `maxDrainAttempts` is exceeded. "Always break"
+ *        here is 140734 itself: one entry that can NEVER succeed blocked
+ *        every entry behind it for 45+ hours while delivery to the backend
+ *        was working the entire time.
+ *    The caller supplies the classifier (its own isRetryable, already used
+ *    for in-memory retry); the default classifies everything as retryable,
+ *    which is the historical (pre-140734-fix) behavior, so a caller that
+ *    hasn't wired classification yet gets the old, safe-but-blocking policy
+ *    rather than a silently different one.
  *  - Entries carry their original idempotency key, so a payload that actually
  *    landed before the client gave up cannot be double-stored on drain.
  */
@@ -30,10 +48,33 @@ export interface SpilledEntry<P = unknown> {
   idempotencyKey: string;
   /** When the payload was first spilled (epoch ms). Ordering + diagnostics. */
   spilledAt: number;
+  /** Why this payload exhausted its in-memory retries (184947). Previously the
+   *  caller HAD this at the spill site and threw it away — the console.warn
+   *  that named it is not persisted anywhere, so it was unrecoverable the
+   *  moment the process that logged it moved on. Optional: entries already on
+   *  disk before this field existed, and any caller with no diagnosis, still
+   *  parse cleanly. */
+  cause?: string;
+  /** In-memory retry attempts made before spilling (184947), same rationale. */
+  attempts?: number;
+  /** Separate DRAIN ticks this entry has failed on since being spilled
+   *  (140734) — distinct from `attempts` above, which counts in-memory
+   *  retries BEFORE the entry ever reached disk. Persisted so the count
+   *  survives a process restart; absent/0 means never attempted since spill. */
+  drainAttempts?: number;
 }
 
 /** Bounded so a long outage cannot fill the disk. */
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+
+/** Separate drain ticks an entry must fail on before it is dead-lettered
+ *  (140734). At the 15s drainIntervalMs this module is configured with
+ *  elsewhere, 10 is ~2.5 minutes — long enough that an ordinary reconnect
+ *  clears it via the normal stop-and-retry path first, short enough that a
+ *  genuinely poisoned entry no longer blocks the queue for days. */
+const DEFAULT_MAX_DRAIN_ATTEMPTS = 10;
+
+const DEAD_LETTER_DIRNAME = 'dead-letter';
 
 let spillDir: string | null = null;
 let maxBytes = DEFAULT_MAX_BYTES;
@@ -98,11 +139,16 @@ export async function spillOutput<P>(
   payload: P,
   idempotencyKey: string,
   now: number = Date.now(),
+  cause?: string,
+  attempts?: number,
 ): Promise<{ result: 'spilled' | 'evicted' | 'unavailable'; evictedBytes: number }> {
   const dir = spillDir;
   if (!dir) return { result: 'unavailable', evictedBytes: 0 };
 
-  const entry: SpilledEntry<P> = { payload, idempotencyKey, spilledAt: now };
+  // JSON.stringify drops undefined-valued keys, so a caller with no
+  // diagnosis produces the exact same on-disk shape as before this field
+  // existed (184947).
+  const entry: SpilledEntry<P> = { payload, idempotencyKey, spilledAt: now, cause, attempts };
   const body = JSON.stringify(entry);
 
   try {
@@ -134,21 +180,63 @@ export async function spillOutput<P>(
   }
 }
 
+/** Move a poison entry aside instead of deleting it (140734) — it survived
+ *  every in-memory retry AND the entire drain-attempt budget, so whatever it
+ *  contains is exactly the kind of thing someone will want to inspect. Falls
+ *  back to delete only if the move itself fails, so a filesystem hiccup can
+ *  never resurrect 140734 by leaving the poisoned head in the live queue. */
+async function deadLetterEntry(dir: string, filename: string): Promise<void> {
+  const deadDir = path.join(dir, DEAD_LETTER_DIRNAME);
+  const from = path.join(dir, filename);
+  try {
+    await fs.mkdir(deadDir, { recursive: true });
+    await fs.rename(from, path.join(deadDir, filename));
+  } catch {
+    await fs.unlink(from).catch(() => {});
+  }
+}
+
+/** How a drain failure should be handled — see the module header. */
+export type DrainFailureClass = 'retryable' | 'terminal';
+
+export interface DrainOptions {
+  /** Cap on entries examined this tick. */
+  limit?: number;
+  /** Separate drain ticks a 'terminal'-classified entry must fail on before
+   *  it is dead-lettered. Irrelevant to 'retryable' failures, which are
+   *  never dead-lettered regardless of how many ticks they span. */
+  maxDrainAttempts?: number;
+  /** Classify a thrown failure. Defaults to always 'retryable' — the
+   *  historical stop-on-first-failure behavior — so a caller that has not
+   *  wired a classifier gets the old, blocking-but-safe policy rather than a
+   *  silently different one. Callers should pass their own retryability
+   *  check (ptyOutputReporter.ts already has one for exactly this). */
+  classify?: (err: unknown) => DrainFailureClass;
+}
+
 /**
  * Attempt to re-send spilled entries oldest-first.
  *
- * `post` must throw on failure. Stops at the first failure — a still-down
- * backend should not cost one request per queued entry.
+ * `post` must throw on failure. See the module header for the classify-
+ * driven policy split (140734/184947): a 'retryable' failure stops the whole
+ * tick with no counting, exactly as before this card; a 'terminal' one is
+ * skipped, counted, and eventually dead-lettered instead of blocking
+ * everything behind it.
  */
 export async function drainSpill<P>(
   post: (payload: P, idempotencyKey: string) => Promise<void>,
-  limit = 50,
-): Promise<{ sent: number; remaining: number; stoppedOnFailure: boolean }> {
+  opts: DrainOptions = {},
+): Promise<{ sent: number; remaining: number; deadLettered: number; stoppedOnFailure: boolean }> {
   const dir = spillDir;
-  if (!dir) return { sent: 0, remaining: 0, stoppedOnFailure: false };
+  if (!dir) return { sent: 0, remaining: 0, deadLettered: 0, stoppedOnFailure: false };
+
+  const limit = opts.limit ?? 50;
+  const maxDrainAttempts = opts.maxDrainAttempts ?? DEFAULT_MAX_DRAIN_ATTEMPTS;
+  const classify = opts.classify ?? (() => 'retryable' as const);
 
   const files = await entryFiles(dir);
   let sent = 0;
+  let deadLettered = 0;
   let stoppedOnFailure = false;
 
   for (const f of files.slice(0, limit)) {
@@ -166,14 +254,33 @@ export async function drainSpill<P>(
       await post(entry.payload, entry.idempotencyKey);
       await fs.unlink(p).catch(() => {});
       sent++;
-    } catch {
-      stoppedOnFailure = true;
-      break;
+    } catch (err) {
+      if (classify(err) === 'retryable') {
+        // Backend-wide, not this entry's fault: stop here, exactly as this
+        // module always has. No counting, never dead-lettered — only
+        // spillOutput's own overflow eviction bounds how long this can sit.
+        stoppedOnFailure = true;
+        break;
+      }
+
+      // 'terminal': this entry itself cannot succeed. Skip it (keep draining
+      // whatever is behind it THIS tick — that is 140734's fix) and count
+      // toward dead-lettering rather than retrying it forever.
+      const drainAttempts = (entry.drainAttempts ?? 0) + 1;
+      if (drainAttempts > maxDrainAttempts) {
+        await deadLetterEntry(dir, f);
+        deadLettered++;
+        continue;
+      }
+      await fs
+        .writeFile(p, JSON.stringify({ ...entry, drainAttempts }), 'utf8')
+        .catch(() => {});
+      continue;
     }
   }
 
   const after = await entryFiles(dir);
-  return { sent, remaining: after.length, stoppedOnFailure };
+  return { sent, remaining: after.length, deadLettered, stoppedOnFailure };
 }
 
 /** Queue depth and size, for status reporting. */
