@@ -53,6 +53,9 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
   stale build, and on a file that moved. **Prove the check can fail — run it against a known-bad
   input — before its success counts as evidence.** Corroboration needs a *different* instrument;
   running the same one twice is one measurement, twice.
+- **Read past the confirmation.** The reader-side version of the above: stopping at the sentence
+  that agrees with you is how a check that cannot fail survives review. The file that said "a
+  second copy drifts" made the copy three lines later, and two readers stopped at the first half.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
 
 > Canonical source: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` @ `e987342`. The rules above are
