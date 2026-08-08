@@ -9,6 +9,44 @@ ACP is one product with two halves:
 | **Desktop Shell** | `E:\Repos\acp-desktop` (this repo) | Electron 28 + React 18 + TypeScript + Vite |
 | **Backend API** | `acp-desktop/acp-api/` | Node.js + Express (migrating to TypeScript) |
 
+## Engineering doctrine — read this before writing code
+
+Five rules. Each one cost a real defect. Adding a sixth means removing one.
+
+**1. No fallbacks. The default answer is NO.** `?? 'totp'`, `?? []`, silent catch, "safe default" —
+each converts a failure into a plausible wrong answer. A fallback does not prevent a bug; it hides
+one and moves it somewhere harder to find. **When a call fails, fail loudly.**
+
+**2. Config is data, not a default with a config-shaped name.** If a value can be configured,
+**read it**. A constant a config *could* have supplied is not configuration — it is a lie with good
+naming. If the config source is unreachable, see rule 1.
+
+**3. Verify at the source, and know which instrument you used.** **Source, disk, and wire are three
+different instruments** and they disagree. A bundle on disk is not what the running process serves;
+a source file is not runtime behaviour. Backward inference (observed effect → cause) is strong;
+forward inference (source → predicted behaviour) is where failures live — **label it**.
+**Two people reading the same file is one measurement, twice.** Corroboration requires a *different
+instrument*, not a different reader.
+
+**4. Check the package first.** Before building it: does `@payez/next-mvp` already do this?
+Rebuilding what the package already ships is the most expensive way to be wrong, because it looks
+like progress the entire time.
+
+**5. Decision-relevance — ask it FIRST, not last.** *"If I learn this, what do I do differently?"*
+If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, do not escalate it.
+
+**Corollaries that keep re-earning their place**
+
+- **Orphaned ≠ removed.** A defect made unreachable by a caller's early return is still a defect,
+  and the next refactor re-arms it silently. Fix it, or assert the guard — a comment is deleted by
+  the same refactor it warns about.
+- **Attribution is not verification.** Citing whose measurement it is does not make acting on it safe.
+- **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
+
+> Canonical source: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` @ `e987342`. The rules above are
+> reproduced verbatim so they load with this repo; if the two ever disagree, the canonical file wins
+> and this copy is the defect.
+
 ## What This Repo Contains
 
 The Electron desktop app that humans use to orchestrate, observe, and interact with the AI agent team.

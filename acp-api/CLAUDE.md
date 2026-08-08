@@ -9,6 +9,20 @@ ACP is one product with two halves:
 | **Desktop Shell** | `E:\Repos\acp-desktop` | Electron 28 + React 18 + TypeScript + Vite |
 | **Backend API** | `E:\Repos\acp` (this repo) | Node.js + Express (migrating to TypeScript) |
 
+## Engineering doctrine — read this before writing code
+
+**The five rules live in `../CLAUDE.md`** (repo root) and apply to this directory unchanged. They
+are held in one place on purpose: a second copy is a second thing to drift, which is rule 2.
+
+Short form, so the headline survives even if you never open it:
+
+1. **No fallbacks** — a fallback converts a failure into a plausible wrong answer.
+2. **Config is data**, not a default with a config-shaped name.
+3. **Verify at the source, and know which instrument you used** — source, disk and wire disagree.
+   Two people reading the same file is one measurement, twice.
+4. **Check the package first** — does `@payez/next-mvp` already do this?
+5. **Decision-relevance** — "if I learn this, what do I do differently?" If nothing, stop.
+
 ## What This Repo Contains
 
 The headless API server that powers agent collaboration, autonomy, and coordination.
