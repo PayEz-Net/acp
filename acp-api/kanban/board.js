@@ -206,6 +206,20 @@ export async function archiveTask(storage, id, archived, actor, projectId) {
     err.code = 'ARCHIVE_NOT_PERSISTED';
     throw err;
   }
+  // VALUE read-back, not just row-existence: the guard above only catches a NULL row, so a
+  // downstream store that returns 200 while SILENTLY DROPPING `archived` (echoing false/undefined
+  // when true was asked) still fake-greens. Assert the persisted value equals the requested one —
+  // that is the only way the 200 means what it says. Fail loud (doctrine rule 1).
+  //
+  // Cannot false-alarm on un-archive: session_manager._rowToTask maps `archived: row.archived === true`,
+  // a strict boolean, so an omitted field reads as false and `false !== false` is never true.
+  if (updated.archived !== !!archived) {
+    const err = new Error(
+      `Archive did not persist for task ${id}: requested archived=${!!archived}, store reflects ${updated.archived}. ` +
+      `The downstream kanban store dropped the field (its PATCH must accept + echo 'archived').`);
+    err.code = 'ARCHIVE_NOT_PERSISTED';
+    throw err;
+  }
   await recordActivity(storage, id, actor, archived ? 'archived' : 'unarchived', { projectId });
   return updated;
 }
