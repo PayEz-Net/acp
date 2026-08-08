@@ -402,6 +402,25 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // value is moot in that case; treating undefined as non-kimi just skips
     // an unnecessary stagger before the block fires.
     const effectiveProvider = runtime;
+
+    // Re-check the dedup guard immediately before spawning. The check at the
+    // top of this iteration ran BEFORE `await fetchBootPrompt`, and the direct
+    // PTY path can spawn this same agent during that await — leaving `existing`
+    // stale and this loop free to start a SECOND process on the same claude
+    // session id. Observed 2026-08-08 prod boot: QAPert ran twice on session
+    // dbb732d5 (two opus/high processes appending to one JSONL) while the
+    // orchestrator reported `spawn complete: 1/7`, because from its own view it
+    // had only spawned one. Check-then-act across an await needs the check
+    // repeated after the await, not just before it.
+    const raced = getAgentSessionByAgent(member.agent_name, projectId);
+    if (raced) {
+      console.log(
+        `[SpawnOrch] ${member.agent_name} acquired ${raced.kind.toUpperCase()} ${raced.id} ` +
+        `during boot-prompt fetch; skipping duplicate spawn in project=${projectId}`,
+      );
+      continue;
+    }
+
     try {
       const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, modelOverride, projectId, agentId: member.agent_id });
       records.push({

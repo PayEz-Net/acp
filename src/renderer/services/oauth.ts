@@ -412,7 +412,8 @@ export async function registerWithIDP(
   name: string,
   picture?: string,
   providerAccessToken?: string,
-  providerRefreshToken?: string
+  providerRefreshToken?: string,
+  providerIdToken?: string
 ): Promise<IDPOAuthResult> {
   console.log('[OAuth] Registering with IDP:', { provider: providerName, email });
 
@@ -432,6 +433,13 @@ export async function registerWithIDP(
       image: picture || '',
       access_token: providerAccessToken || '',
       refresh_token: providerRefreshToken || '',
+      // The ONLY field the IDP can verify: it checks this JWT's signature
+      // against the provider JWKS and treats its email as authoritative
+      // (OAuthCallbackRequest.IdToken, #170003). provider / email /
+      // provider_account_id are unverified assertions. The mint fails closed
+      // when this is absent — omitting it is a 401 UNVERIFIED_ASSERTION, not a
+      // degraded success. Sent only when the provider returned one.
+      ...(providerIdToken ? { id_token: providerIdToken } : {}),
       app: IDP_CLIENT_APP,
     }),
   });
@@ -439,10 +447,21 @@ export async function registerWithIDP(
   if (!response.ok) {
     const error = await response.text();
     console.error('[OAuth] IDP registration failed:', error);
-    return {
-      success: false,
-      error: { code: `HTTP_${response.status}`, message: 'OAuth registration failed' },
-    };
+    // Surface the IDP's own code/message. A generic "OAuth registration failed"
+    // in the UI hid UNVERIFIED_ASSERTION behind a string that named neither the
+    // cause nor where to look; the request_id is what ties this to Graylog.
+    let code = `HTTP_${response.status}`;
+    let message = 'OAuth registration failed';
+    try {
+      const parsed = JSON.parse(error);
+      if (parsed?.error?.code) code = parsed.error.code;
+      if (parsed?.error?.message) message = parsed.error.message;
+      const requestId = parsed?.request_id ?? parsed?.error?.support?.request_id;
+      if (requestId) message += ` (request_id ${requestId})`;
+    } catch {
+      /* non-JSON body — keep the status-derived code */
+    }
+    return { success: false, error: { code, message } };
   }
 
   const data = await response.json();
@@ -507,7 +526,8 @@ export async function completeOAuthFlow(
       userInfo.name || '',
       userInfo.picture,
       tokens.accessToken,
-      tokens.refreshToken
+      tokens.refreshToken,
+      tokens.idToken
     );
 
     return result;

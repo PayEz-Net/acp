@@ -246,8 +246,14 @@ interface ManagedPty {
   // longer wrestle PTY bytes for mail push (that's handled by the MCP
   // Channels path in acp-mail-channel.js).
   bracketedPasteEnabled: boolean;
-  // Handle for the Kimi/Codex inbox poller. Claude agents use the MCP
-  // channel server (acp-mail-channel.js) instead and leave this null.
+  // Handle for the inbox poller. Runs for EVERY provider including claude —
+  // startInboxPoller is called unconditionally at spawn and delivers by
+  // injecting a bracketed-paste notice into the PTY (see the loop at the end
+  // of startInboxPoller). This comment previously said claude used the
+  // acp-mail MCP channel server and left this null; that server was removed
+  // and the claim was never re-checked. Measured on the wire 2026-08-08:
+  // `[PTY] Pushed mail 22657 from DotNetPert into BAPert PTY` on a
+  // claude-runtime spawn, 8 pushes across 4 agents in one boot.
   mailPollTimer: NodeJS.Timeout | null;
   // Path to the boot-prompt tmp file passed via --system-prompt-file (Claude)
   // or kept for reference when PTY-injected (Kimi/Codex). Cleaned up on
@@ -1222,8 +1228,14 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
       //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."  (the file's instruction)
       // Found by QAPert 2026-07-29. Do not "simplify" this back.
-      // NOTE — claude has NO mail delivery path (Gate B, wire-verified
-      // 2026-07-29), and this spawn no longer pretends otherwise.
+      // NOTE — claude DOES have a mail delivery path: the inbox poller runs
+      // for every provider and injects an "[ACP Mail]" notice into the PTY.
+      // This note used to assert the opposite ("claude has NO mail delivery
+      // path", Gate B 2026-07-29). That was true of the MCP channel only, and
+      // it outlived the change that made the poller unconditional. Re-measured
+      // 2026-08-08 on a claude-runtime boot: 11 "[PTY] Pushed mail" lines
+      // across 4 agents. A false NONE here is worse than no note — an agent
+      // that reads it concludes it cannot be reached and stops trying.
       //
       // It used to register the `acp-mail` MCP server via `--mcp-config` so
       // that `--dangerously-load-development-channels server:acp-mail` would
@@ -1239,11 +1251,17 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // emitter). With the notification path dead it was 8 orphan node
       // processes per boot polling acp-api to no effect.
       //
-      // Claude also has no inbox poller (see the provider check below), so
-      // there is no delivery path at all until the stream-json adapter (G4)
-      // lands. Do NOT read a rendered "[ACP Mail]" line in a claude pane as
-      // delivery — that line is the renderer's unconditional visual echo
-      // (SEV-1 #114823), not proof the agent received anything.
+      // The inbox poller DOES run for claude (startInboxPoller is called
+      // unconditionally at spawn) and delivers by PTY injection. The G4
+      // stream-json adapter would replace polling with a push stream; it is an
+      // upgrade, not the thing standing between claude and any mail at all.
+      //
+      // Still true, and worth keeping: a rendered "[ACP Mail]" line in a pane
+      // is the renderer's unconditional visual echo (SEV-1 #114823) and is NOT
+      // proof the agent received anything. The evidence that delivery happened
+      // is the main-process log line "[PTY] Pushed mail <id> ... into <agent>
+      // PTY" — that records the write. Proof of RECEIPT is the agent acting on
+      // the message. Do not conflate the three.
       // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
       // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
       // module load — so the composition lives in a module with no electron dep.
@@ -1273,7 +1291,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         : rejectedModel
           ? `, model: default (override '${opts.modelOverride}' rejected — foreign runtime)`
           : `, model: ${opts.modelOverride}`;
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: inbox poller -> PTY injection, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
