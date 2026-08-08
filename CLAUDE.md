@@ -41,6 +41,12 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
   and the next refactor re-arms it silently. Fix it, or assert the guard — a comment is deleted by
   the same refactor it warns about.
 - **Attribution is not verification.** Citing whose measurement it is does not make acting on it safe.
+- **An accident is not a control.** Ask of anything you are relying on: **"if it stopped being true,
+  would anything tell us?"** If nothing would, it is not a protection — it is a condition that
+  happens to hold, and it will stop holding without notice. A cold cache, a path that does not
+  resolve, a missing `--watch`, a field that happens to be present, a tree that is clean right now,
+  a remote that turns out to be private — each one protected us once and none of them would have
+  announced its own removal.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
 
 > Canonical source: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` @ `e987342`. The rules above are
