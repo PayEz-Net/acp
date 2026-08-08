@@ -119,8 +119,11 @@ describe('ptyOutputReporter -> outputSpill wiring', () => {
     const { initOutputSpill } = await loadReporter();
     initOutputSpill(dir, 5); // fast real ticks so the test doesn't wait on DEFAULT_MAX_DRAIN_ATTEMPTS x a real 15s interval
 
-    // DEFAULT_MAX_DRAIN_ATTEMPTS is 10 — generous margin past that many ticks.
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // DEFAULT_MAX_DRAIN_ATTEMPTS is 10 — generous margin past that many ticks,
+    // widened further (500ms -> 1500ms) after an observed flake when the full
+    // suite runs in parallel and real setTimeout ticks contend with other
+    // test files' I/O.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
 
     const deadLetterDir = path.join(spillDir, 'dead-letter');
     const deadFiles = await fs.readdir(deadLetterDir).catch(() => [] as string[]);
