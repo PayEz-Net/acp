@@ -11,8 +11,8 @@ ACP is one product with two halves:
 
 ## Engineering doctrine — read this before writing code
 
-**The doctrine — five rules and their corollaries — lives in [`../CLAUDE.md`](../CLAUDE.md) (repo
-root) and applies to this directory unchanged. Read it before writing code.**
+**The doctrine lives in [`../CLAUDE.md`](../CLAUDE.md) (repo root) and applies to this directory
+unchanged. Read it before writing code.**
 
 It is deliberately **not summarised here.** A summary is a second copy, a second copy drifts, and
 this one did: the version that sat here for 26 minutes was already missing two corollaries added
