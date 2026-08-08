@@ -35,8 +35,7 @@ like progress the entire time.
 5. **Decision-relevance — ask it FIRST, not last.** *"If I learn this, what do I do differently?"*
 If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, do not escalate it.
 
-**Corollaries that keep re-earning their place** — deliberately unnumbered: the rules above are a
-fixed set under a hard trade, these merge and prune. Numbering them would invite appending.
+**Corollaries — unnumbered on purpose: the rules are a fixed set under a trade, these merge and prune.**
 
 - **Orphaned ≠ removed.** A defect made unreachable by a caller's early return is still a defect,
   and the next refactor re-arms it silently. Fix it, or assert the guard — a comment is deleted by
