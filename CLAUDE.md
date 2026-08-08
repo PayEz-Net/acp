@@ -47,6 +47,12 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
   resolve, a missing `--watch`, a field that happens to be present, a tree that is clean right now,
   a remote that turns out to be private — each one protected us once and none of them would have
   announced its own removal.
+- **A check that cannot fail tells you nothing.** Before trusting a green, ask whether this
+  instrument could ever have gone red. A guard whose pattern matches nothing passes forever; a
+  probe searched for in the wrong field is absent forever; an absence-grep passes on a fix, on a
+  stale build, and on a file that moved. **Prove the check can fail — run it against a known-bad
+  input — before its success counts as evidence.** Corroboration needs a *different* instrument;
+  running the same one twice is one measurement, twice.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
 
 > Canonical source: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` @ `e987342`. The rules above are
