@@ -35,7 +35,8 @@ like progress the entire time.
 5. **Decision-relevance — ask it FIRST, not last.** *"If I learn this, what do I do differently?"*
 If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, do not escalate it.
 
-**Corollaries that keep re-earning their place**
+**Corollaries that keep re-earning their place** — deliberately unnumbered: the rules above are a
+fixed set under a hard trade, these merge and prune. Numbering them would invite appending.
 
 - **Orphaned ≠ removed.** A defect made unreachable by a caller's early return is still a defect,
   and the next refactor re-arms it silently. Fix it, or assert the guard — a comment is deleted by
@@ -43,9 +44,9 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
 - **Attribution is not verification.** Citing whose measurement it is does not make acting on it safe.
 - **If it cannot report its own failure, it is not evidence.** Ask of any check or protection:
   **"if it stopped being true, would anything tell us?"** A pattern matching nothing passes forever;
-  an absence-grep passes on a fix, a stale build and a moved file alike; a cold cache and a
-  clean-right-now tree each protected us once and neither would announce its removal. **Prove it can
-  fail against known-bad input before a pass counts** — and corroborate with a *different* instrument.
+  an absence-grep passes on a fix, a stale build and a moved file alike; a cold cache protects you
+  until it doesn't. **Prove it can fail against known-bad input before a pass counts** — and
+  corroborate with a *different* instrument.
 - **Read past the confirmation.** How the above survive review: readers stop at the sentence that
   agrees with them. The file saying "a second copy drifts" made the copy three lines below it.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
