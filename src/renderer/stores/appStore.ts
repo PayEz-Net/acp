@@ -109,11 +109,23 @@ export const useAppStore = create<AppStore>((set) => ({
         const existing = existingById.get(config.id);
         return {
           ...config,
-          status: 'offline' as const,
           // Preserve live PTY bindings across team-sync reconcile so mail
           // PTY injection and terminal surfaces keep working after polls.
           terminalId: existing?.terminalId,
           runtimeProvider: existing?.runtimeProvider,
+          // STATUS IS A PTY BINDING TOO. This used to be a hardcoded 'offline',
+          // alongside the two preserved fields above — so every team-sync poll
+          // stamped 'offline' over agents whose PTY was alive and working.
+          // 'ready' is only written once, at spawn (TerminalPane), so the first
+          // poll after startup flipped the whole team to 'offline' and nothing
+          // ever put it back: the roster read "offline" for the rest of the run
+          // while the agents were mid-task.
+          //
+          // A live terminalId is the evidence that the agent is up, and it is the
+          // same evidence the two lines above already trust. Absent it, 'offline'
+          // is correct — the agent is new to the roster, or was stopped by hand
+          // (stopAgent clears terminalId and sets 'offline' together).
+          status: existing?.terminalId ? existing.status : ('offline' as const),
         };
       }),
     };
