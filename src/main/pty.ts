@@ -411,7 +411,12 @@ const BRACKETED_PASTE_OFF = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x3
 // (writeBuf) preserves byte order across interleaved writes; single keystrokes
 // take the immediate fast path so normal typing has ZERO added latency.
 const PTY_WRITE_CHUNK = 16384;  // bytes per write — normal pastes go in ONE write (intact bracketed paste); ConPTY-safe to ~24 KB
-const PTY_WRITE_PACE_MS = 4;    // gap between chunks; only applies to >16 KB pastes
+const PTY_WRITE_PACE_MS = 4;    // gap between chunks; only applies to >16 KB NON-paste writes
+// Bracketed-paste envelope. A write containing PASTE_START is never split — see
+// drainPtyWrite. Named rather than inlined so the two places that care (the
+// no-split guard and injectBootPrompt) cannot drift apart.
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
 
 function queuePtyWrite(managed: ManagedPty, data: string): void {
   if (!data) return;
@@ -427,10 +432,10 @@ function queuePtyWrite(managed: ManagedPty, data: string): void {
  */
 function injectBootPrompt(managed: ManagedPty, bootPrompt: string): void {
   if (!bootPrompt) return;
-  if (bootPrompt.length > PTY_WRITE_CHUNK) {
-    console.warn(`[PTY] Boot prompt for ${managed.agentName} is ${bootPrompt.length} chars (> ${PTY_WRITE_CHUNK}); chunked paste may not land cleanly`);
-  }
-  const paste = `\x1b[200~${bootPrompt}\x1b[201~\r`;
+  // No size warning here any more: drainPtyWrite never splits a bracketed paste,
+  // so an oversized boot prompt is delivered whole rather than "may not land
+  // cleanly". The length is logged there for every paste, this one included.
+  const paste = `${PASTE_START}${bootPrompt}${PASTE_END}\r`;
   queuePtyWrite(managed, paste);
 }
 
@@ -443,6 +448,36 @@ function drainPtyWrite(managed: ManagedPty): void {
       managed.writeBuf = '';
     }
     managed.writeDraining = false;
+    return;
+  }
+
+  // NEVER SPLIT A BRACKETED PASTE, AT ANY SIZE.
+  //
+  // The block above explains why splitting truncates: the child's paste parser
+  // finalizes on the FIRST fragment and drops the remainder. Raising the chunk
+  // size to 16 KB stopped ordinary pastes being split, but left the split in
+  // place above that — so a paste over 16 KB still lost everything past the
+  // first chunk. Reported 2026-08-08: "paste too much and the agent gets a
+  // truncated copy", with the UI showing the full text because only the PTY
+  // write truncates.
+  //
+  // The defence for keeping the split ("at 16 KB they fragment 16x less than
+  // the old 1 KB") treated this as proportional. It is not. ONE boundary is
+  // enough to lose the rest, so fragmenting less often does not fragment less
+  // harmfully — it only makes the failure rarer and therefore harder to catch.
+  //
+  // If the buffer carries a paste-start marker, it goes out whole. ConPTY was
+  // measured lossless to ~24 KB in a single write even to a deliberately
+  // slow-draining child; beyond that is unmeasured, and an unmeasured single
+  // write is still strictly better than a split that is KNOWN to truncate.
+  if (managed.writeBuf.includes(PASTE_START)) {
+    const bytes = managed.writeBuf.length;
+    managed.pty.write(managed.writeBuf);
+    managed.writeBuf = '';
+    managed.writeDraining = false;
+    console.log(
+      `[PTY] paste ${managed.agentName}: ${bytes} chars written whole (unsplit; > ${PTY_WRITE_CHUNK} would previously have truncated)`,
+    );
     return;
   }
   managed.writeDraining = true;
@@ -757,7 +792,7 @@ function startInboxPoller(managed: ManagedPty): void {
       // the draft — the notice sat unsubmitted in the input box until a
       // human pressed Enter. Paste-close followed by a distinct Enter write
       // is processed as a real submit, so mail lands straight in context.
-      queuePtyWrite(managed, `\x1b[200~${text}\x1b[201~`);
+      queuePtyWrite(managed, `${PASTE_START}${text}${PASTE_END}`);
       setTimeout(() => queuePtyWrite(managed, '\r'), 100);
       console.log(`[PTY] Pushed mail ${id} from ${from} into ${agentName} PTY`);
     }
