@@ -42,14 +42,12 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
   the same refactor it warns about.
 - **Attribution is not verification.** Citing whose measurement it is does not make acting on it safe.
 - **If it cannot report its own failure, it is not evidence.** Ask of any check or protection:
-  **"if it stopped being true, would anything tell us?"** A guard whose pattern matches nothing
-  passes forever; an absence-grep passes on a fix, a stale build and a moved file alike; a cold
-  cache, an unresolvable path, a missing `--watch` and a clean-right-now tree each protected us
-  once and none would announce its removal. **Prove it can fail — run it against known-bad input —
-  before a pass counts.** Corroboration needs a *different* instrument, not a second run.
-- **Read past the confirmation.** The reader-side of the above, and how the rest survive review:
-  stopping at the sentence that agrees with you. The file that said "a second copy drifts" made the
-  copy three lines later, and two readers stopped at the first half.
+  **"if it stopped being true, would anything tell us?"** A pattern matching nothing passes forever;
+  an absence-grep passes on a fix, a stale build and a moved file alike; a cold cache and a
+  clean-right-now tree each protected us once and neither would announce its removal. **Prove it can
+  fail against known-bad input before a pass counts** — and corroborate with a *different* instrument.
+- **Read past the confirmation.** How the above survive review: readers stop at the sentence that
+  agrees with them. The file saying "a second copy drifts" made the copy three lines below it.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
 
 > **This file is authoritative, because it is the file that loads.** The five rules originate in
