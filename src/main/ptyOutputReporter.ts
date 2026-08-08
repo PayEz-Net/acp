@@ -295,6 +295,22 @@ class AgentOutputPostError extends Error {
 const RETRYABLE_ERROR_CODES = new Set(['AGENT_SESSION_NOT_FOUND']);
 
 /**
+ * How long `AGENT_SESSION_NOT_FOUND` stays transient once an entry has been
+ * SPILLED to disk (QAPert, 2026-08-08). `isRetryable()` below is right that
+ * this code is transient in-memory — `startAgentSession` takes 10-15s, so a
+ * retry ladder that tops out at ~30s legitimately catches the real case. But
+ * the disk-drain path has no such ceiling: a spilled entry names a terminal
+ * that may have died the moment it spilled, and "no session yet" and "no
+ * session ever again" are the same 400/code pair. Past this window from
+ * `spilledAt`, treat it as terminal instead of retrying forever — this is
+ * what turned one dead terminal into a permanent head-of-line block on the
+ * drain queue (10 days observed, zero log lines produced). Generous on
+ * purpose: real boot latency is single-digit seconds, so anything still
+ * unresolved five minutes after spill is not booting, it is dead.
+ */
+const SPILLED_SESSION_PENDING_TERMINAL_AFTER_MS = 5 * 60 * 1000;
+
+/**
  * Pull `error.code` out of a failed response without ever throwing.
  *
  * Reading the body is the only way to tell a transient 400 from a permanent one,
@@ -409,6 +425,14 @@ async function postAgentOutput(payload: CloudOutputPayload, idempotencyKey: stri
       Authorization: `Bearer ${token}`,
     },
     body,
+    // QAPert 2026-08-08: a hung connection previously had no upper bound —
+    // one tick could block forever rather than falling through to retry/
+    // spill classification. AbortSignal.timeout rejects with a status-less
+    // DOMException, which both isRetryable() and classifyDrop() already
+    // treat as retryable/'network' (no `.status` field), so no new branch is
+    // needed on the failure side — this only bounds how long a single
+    // attempt can hang.
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {
@@ -499,6 +523,24 @@ let spilledCount = 0;
 let spilledBytes = 0;
 let drainTimer: NodeJS.Timeout | null = null;
 
+/**
+ * Test-only. `initOutputSpill` clears the PREVIOUS `drainTimer` when called
+ * again on the SAME module instance, but a test suite that calls
+ * `vi.resetModules()` between tests gets a brand-new module instance (and
+ * closure) each time — the OLD instance's interval is orphaned, not cleared,
+ * because nothing in the new instance can reach it. `clearInterval` is a
+ * global Node API keyed on the handle, not the module, so the fix is to stop
+ * it explicitly before the reference is dropped (186721 — an orphaned real
+ * 5ms interval from an earlier test was still firing during a LATER test,
+ * and because `console.warn` is a single global that a later test may spy
+ * on, the orphaned interval's own warnings were captured as if they came
+ * from the test currently running).
+ */
+export function stopDrainForTests(): void {
+  if (drainTimer) clearInterval(drainTimer);
+  drainTimer = null;
+}
+
 /** Resolves a LIVE sessionToken for a terminal at drain time (184984).
  *  Deliberately a settable hook rather than a static import of pty.ts —
  *  pty.ts already imports THIS module, so a static import back would be
@@ -546,7 +588,23 @@ async function runDrain(): Promise<void> {
         // used for in-memory retry, so "backend is down" (break, no count,
         // never dead-lettered) and "this entry is rejected" (skip, count,
         // eventually dead-lettered) cannot be confused with each other.
-        classify: (err) => (isRetryable(err) ? 'retryable' : 'terminal'),
+        //
+        // QAPert 2026-08-08 addendum: `isRetryable()` alone is not enough for
+        // AGENT_SESSION_NOT_FOUND on the DRAIN path specifically — it is only
+        // transient within a boot window measured from when the entry was
+        // spilled, not forever. Past that window the terminal is dead and
+        // this downgrades to 'terminal' so the entry gets counted and
+        // eventually dead-lettered instead of blocking every entry behind it
+        // on every tick, indefinitely.
+        classify: (err, entry) => {
+          if (!isRetryable(err)) return 'terminal';
+          const code = (err as AgentOutputPostError)?.code;
+          if (code === 'AGENT_SESSION_NOT_FOUND') {
+            const age = Date.now() - entry.spilledAt;
+            if (age > SPILLED_SESSION_PENDING_TERMINAL_AFTER_MS) return 'terminal';
+          }
+          return 'retryable';
+        },
       },
     );
     if (res.sent > 0) {
@@ -563,6 +621,22 @@ async function runDrain(): Promise<void> {
         `[PtyOutput] DEAD-LETTERED ${res.deadLettered} spilled payload(s) — ` +
           `proven undeliverable across repeated drain attempts (140734). ` +
           `Moved to agent-output-spill/dead-letter, not deleted.`,
+      );
+    }
+    if (res.stoppedOnFailure) {
+      // QAPert 2026-08-08: this branch used to be silent — `stoppedOnFailure`
+      // was returned and discarded, so a permanently stalled queue and a
+      // clean empty drain produced byte-identical output (nothing). That is
+      // exactly the failure mode this module's header exists to end; log it
+      // every time it fires, not on a rollup, because a stall this rare
+      // matters more than console noise.
+      const ageMs = res.stopEntrySpilledAt != null ? Date.now() - res.stopEntrySpilledAt : null;
+      const cause = res.stopCause as any;
+      console.warn(
+        `[PtyOutput] DRAIN STALLED — head entry classified retryable, tick stopped ` +
+          `before reaching ${res.remaining} entr${res.remaining === 1 ? 'y' : 'ies'} behind it. ` +
+          `cause=${cause?.code ?? cause?.status ?? cause?.message ?? String(cause)} ` +
+          (ageMs != null ? `head-age=${(ageMs / 1000).toFixed(1)}s` : 'head-age=unknown'),
       );
     }
   } catch {

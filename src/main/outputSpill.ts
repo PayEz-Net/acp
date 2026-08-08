@@ -37,6 +37,19 @@
  *    which is the historical (pre-140734-fix) behavior, so a caller that
  *    hasn't wired classification yet gets the old, safe-but-blocking policy
  *    rather than a silently different one.
+ *  - RETRYABLE IS NOT PERMANENT (QAPert, 2026-08-08, on-disk forensics): a
+ *    code-based "transient" verdict can be right at spill time and wrong
+ *    forever after. `AGENT_SESSION_NOT_FOUND` is transient for a live
+ *    terminal mid-boot, but a spilled entry naming a terminal that died days
+ *    ago will get that identical verdict on every tick to come — the queue
+ *    head then blocks permanently, and because 'retryable' is never counted
+ *    or dead-lettered, this produces byte-identical output to a healthy
+ *    empty drain: nothing logged, nothing wrong-looking, ten days lost. The
+ *    classifier therefore receives the entry, not just the error, so an
+ *    age-aware caller can downgrade a stale "transient" code to 'terminal'.
+ *    `drainSpill` also surfaces `stopCause`/`stopEntrySpilledAt` on a
+ *    'retryable' stop so the caller can log the head-of-line block instead
+ *    of a stall reading as silence.
  *  - Entries carry their original idempotency key, so a payload that actually
  *    landed before the client gave up cannot be double-stored on drain.
  */
@@ -206,12 +219,17 @@ export interface DrainOptions {
    *  it is dead-lettered. Irrelevant to 'retryable' failures, which are
    *  never dead-lettered regardless of how many ticks they span. */
   maxDrainAttempts?: number;
-  /** Classify a thrown failure. Defaults to always 'retryable' — the
+  /** Classify a thrown failure. Receives the ENTRY as well as the error
+   *  (added post-140734, see the module header addendum below) because some
+   *  error codes are only transient within an age window measured from
+   *  `spilledAt` — a status/code check alone cannot distinguish "10s old,
+   *  genuinely still booting" from "10 days old, the terminal is dead and
+   *  will never gain a session". Defaults to always 'retryable' — the
    *  historical stop-on-first-failure behavior — so a caller that has not
    *  wired a classifier gets the old, blocking-but-safe policy rather than a
    *  silently different one. Callers should pass their own retryability
    *  check (ptyOutputReporter.ts already has one for exactly this). */
-  classify?: (err: unknown) => DrainFailureClass;
+  classify?: (err: unknown, entry: SpilledEntry<unknown>) => DrainFailureClass;
 }
 
 /**
@@ -226,7 +244,20 @@ export interface DrainOptions {
 export async function drainSpill<P>(
   post: (payload: P, idempotencyKey: string) => Promise<void>,
   opts: DrainOptions = {},
-): Promise<{ sent: number; remaining: number; deadLettered: number; stoppedOnFailure: boolean }> {
+): Promise<{
+  sent: number;
+  remaining: number;
+  deadLettered: number;
+  stoppedOnFailure: boolean;
+  /** Set only when `stoppedOnFailure` — the error that stopped the tick, for
+   *  logging. A stall must be loud (see module header); this is what makes
+   *  it possible to say WHY without the caller re-deriving it. */
+  stopCause?: unknown;
+  /** Set only when `stoppedOnFailure` — `spilledAt` of the entry that
+   *  stopped the tick, so the caller can log how old the head-of-line block
+   *  is (a 10-day-old block is a different incident than a 10-second one). */
+  stopEntrySpilledAt?: number;
+}> {
   const dir = spillDir;
   if (!dir) return { sent: 0, remaining: 0, deadLettered: 0, stoppedOnFailure: false };
 
@@ -238,6 +269,8 @@ export async function drainSpill<P>(
   let sent = 0;
   let deadLettered = 0;
   let stoppedOnFailure = false;
+  let stopCause: unknown;
+  let stopEntrySpilledAt: number | undefined;
 
   for (const f of files.slice(0, limit)) {
     const p = path.join(dir, f);
@@ -255,11 +288,13 @@ export async function drainSpill<P>(
       await fs.unlink(p).catch(() => {});
       sent++;
     } catch (err) {
-      if (classify(err) === 'retryable') {
+      if (classify(err, entry) === 'retryable') {
         // Backend-wide, not this entry's fault: stop here, exactly as this
         // module always has. No counting, never dead-lettered — only
         // spillOutput's own overflow eviction bounds how long this can sit.
         stoppedOnFailure = true;
+        stopCause = err;
+        stopEntrySpilledAt = entry.spilledAt;
         break;
       }
 
@@ -280,7 +315,13 @@ export async function drainSpill<P>(
   }
 
   const after = await entryFiles(dir);
-  return { sent, remaining: after.length, deadLettered, stoppedOnFailure };
+  return {
+    sent,
+    remaining: after.length,
+    deadLettered,
+    stoppedOnFailure,
+    ...(stoppedOnFailure ? { stopCause, stopEntrySpilledAt } : {}),
+  };
 }
 
 /** Queue depth and size, for status reporting. */
