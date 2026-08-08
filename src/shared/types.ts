@@ -590,6 +590,15 @@ export const IPC_CHANNELS = {
   TERMINAL_HISTORY: 'terminal:history',
   TERMINAL_SESSIONS: 'terminal:sessions',
   TERMINAL_EXPORT: 'terminal:export',
+
+  // Main → renderer: a LIVE terminal has reported zero rows to the cloud
+  // output record for longer than the alarm threshold (117107 fail-loud leg
+  // (c)). A telemetry pipeline whose success path silently stops running is
+  // indistinguishable from an idle team — this makes that condition visible
+  // instead of discoverable only by grepping /v1/terminal/replay after the
+  // fact. `recovered: true` on the SAME terminalId clears a prior alarm once
+  // rows resume.
+  TERMINAL_OUTPUT_STALLED: 'terminal:output-stalled',
   } as const;
 
 // Payload for IPC_CHANNELS.PTY_SPAWN_FAILED (main → renderer). Fixed event
@@ -622,6 +631,18 @@ export interface NoTeamEngagedPayload {
   /** Display name for the CTA surface (best-effort from the project DTO). */
   project_name: string;
   message: string;
+}
+
+// Payload for IPC_CHANNELS.TERMINAL_OUTPUT_STALLED (main → renderer). See the
+// channel comment (117107) — fired when a live terminal's reported-row
+// pipeline has gone quiet past the alarm threshold, and again with
+// `recovered: true` once it produces rows again.
+export interface TerminalOutputStalledPayload {
+  agentName: string;
+  terminalId: string;
+  /** Minutes since the last row was actually reported (or since spawn, if none ever was). */
+  minutesSinceLastOutput: number;
+  recovered?: boolean;
 }
 
 // Payload for IPC_CHANNELS.AGENT_SESSION_START_FAILED (main → renderer).

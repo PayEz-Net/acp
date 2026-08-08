@@ -27,7 +27,7 @@ import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
-import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnCommand';
+import { buildClaudeSpawnCommand, resolveClaudeEffort, isForeignRuntimeModel } from './claudeSpawnCommand';
 import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
@@ -39,6 +39,85 @@ import { TerminalScreen } from './terminalScreen';
 const terminalScreens = new Map<string, TerminalScreen>();
 const frameFlushTimers = new Map<string, NodeJS.Timeout>();
 const FRAME_FLUSH_MS = 40;
+
+// --- Settle-report (117107 fix leg a) ------------------------------------
+// A full-screen TUI (Claude Code) that only ever repaints in place never
+// scrolls a row into historyAppended, so flushTerminalFrame's report path
+// never fires for the life of the session. This debounce fires once a
+// terminal has gone quiet for SETTLE_MS — no new PTY bytes — and asks the
+// screen model for whatever changed since the last report (deduped there).
+// 900ms is long enough that an actively-streaming response (new bytes every
+// frame) never fires mid-stream, and short enough that the stored record
+// lags live output by roughly one thinking-pause, not minutes.
+const settleTimers = new Map<string, NodeJS.Timeout>();
+const SETTLE_MS = 900;
+
+function scheduleSettleReport(terminalId: string): void {
+  const existing = settleTimers.get(terminalId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    settleTimers.delete(terminalId);
+    const screen = terminalScreens.get(terminalId);
+    if (!screen) return;
+    const rows = screen.takeSettleSnapshot();
+    if (rows && rows.length > 0) reportTerminalRows(terminalId, rows);
+  }, SETTLE_MS);
+  // Never hold the app open just to flush a settle report.
+  timer.unref?.();
+  settleTimers.set(terminalId, timer);
+}
+
+// --- Fail-loud watchdog (117107 fix leg c) -------------------------------
+// A telemetry pipeline whose success path silently stops running is
+// indistinguishable from an idle team. Track the last time each live
+// terminal actually got rows onto the cloud record (not merely "PTY is
+// alive") and alarm once a terminal has gone dark past the threshold —
+// exactly the collapse this card describes (60s of ingestion per respawn,
+// then nothing for a full sprint day).
+const lastReportedRowsAt = new Map<string, number>();
+const alarmedTerminals = new Set<string>();
+const TERMINAL_OUTPUT_ALARM_MS = 5 * 60 * 1000; // 5 minutes of zero reported rows
+const TERMINAL_WATCHDOG_INTERVAL_MS = 60 * 1000;
+let watchdogStarted = false;
+
+function startOutputWatchdog(): void {
+  if (watchdogStarted) return;
+  watchdogStarted = true;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, managed] of terminals) {
+      const baseline = lastReportedRowsAt.get(id) ?? managed.spawnedAt;
+      const silentMs = now - baseline;
+      const isAlarmed = alarmedTerminals.has(id);
+      if (silentMs >= TERMINAL_OUTPUT_ALARM_MS) {
+        if (!isAlarmed) {
+          alarmedTerminals.add(id);
+          const minutes = Math.round(silentMs / 60000);
+          console.error(
+            `[PTY] OUTPUT STALLED agent=${managed.agentName} terminal=${id} — ` +
+            `zero rows reported to the cloud record in ${minutes}m. A dead reporting ` +
+            `pipeline looks identical to an idle agent; this is the alarm that tells them apart.`,
+          );
+          safeSend(IPC_CHANNELS.TERMINAL_OUTPUT_STALLED, {
+            agentName: managed.agentName,
+            terminalId: id,
+            minutesSinceLastOutput: minutes,
+          });
+        }
+      } else if (isAlarmed) {
+        alarmedTerminals.delete(id);
+        console.log(`[PTY] Output resumed for agent=${managed.agentName} terminal=${id}`);
+        safeSend(IPC_CHANNELS.TERMINAL_OUTPUT_STALLED, {
+          agentName: managed.agentName,
+          terminalId: id,
+          minutesSinceLastOutput: 0,
+          recovered: true,
+        });
+      }
+    }
+  }, TERMINAL_WATCHDOG_INTERVAL_MS);
+  timer.unref?.();
+}
 
 function flushTerminalFrame(terminalId: string): void {
   const timer = frameFlushTimers.get(terminalId);
@@ -80,6 +159,13 @@ function reportTerminalRows(terminalId: string, rows: string[]): void {
   const MAX_REPORT_BYTES = 8192;
   const send = (batch: string[]) => {
     if (batch.length === 0) return;
+    // Fail-loud bookkeeping (117107 leg c): a batch actually being handed to
+    // the reporter is the definition of "not stalled", independent of
+    // whether the HTTP POST itself later succeeds — retries/spill in
+    // ptyOutputReporter already cover delivery; this watchdog covers the
+    // pipeline never being fed at all, which is the failure mode that was
+    // actually invisible.
+    lastReportedRowsAt.set(terminalId, Date.now());
     reportPtyOutput(
       managed.agentName,
       terminalId,
@@ -119,16 +205,26 @@ function scheduleTerminalFrameFlush(terminalId: string): void {
 function disposeTerminalScreen(terminalId: string): void {
   // Drains and reports any rows that had already scrolled off.
   flushTerminalFrame(terminalId);
+  const settleTimer = settleTimers.get(terminalId);
+  if (settleTimer) {
+    clearTimeout(settleTimer);
+    settleTimers.delete(terminalId);
+  }
   // Rows still on the visible screen never scroll into `historyAppended`, so
   // without this the final screenful of every session is missing from the
   // stored record. Must run before `terminals.delete(terminalId)` — the
   // reporter reads agentName/provider/sessionToken from the ManagedPty.
+  // takeSettleSnapshot (not the raw snapshot()) so this dedupes against
+  // whatever a settle-report or pre-wipe capture already sent — the exit
+  // path should only ever add what's genuinely new.
   const screen = terminalScreens.get(terminalId);
   if (screen) {
-    const finalRows = screen.snapshot();
-    if (finalRows.length > 0) reportTerminalRows(terminalId, finalRows);
+    const finalRows = screen.takeSettleSnapshot();
+    if (finalRows && finalRows.length > 0) reportTerminalRows(terminalId, finalRows);
   }
   terminalScreens.delete(terminalId);
+  lastReportedRowsAt.delete(terminalId);
+  alarmedTerminals.delete(terminalId);
 }
 
 
@@ -178,6 +274,9 @@ interface ManagedPty {
    * exit report. Undefined = a genuine unexpected exit, i.e. a real crash.
    */
   intentionalExit?: import('./agentSessionLifecycle').AgentSessionEndReason;
+  /** Spawn time — the fail-loud watchdog's baseline for "silent since when"
+   *  before this terminal has ever reported a single row (117107 leg c). */
+  spawnedAt: number;
 }
 
 export type AgentRuntime = TerminalProvider;
@@ -577,7 +676,19 @@ function startInboxPoller(managed: ManagedPty): void {
       // indistinguishable from one with nothing to deliver.
       mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
       const n = mailPollFailures.get(agentName)!;
-      if (n === 1 || n === 5 || n % 20 === 0) {
+      if (n === 1) {
+        // Attempt 1 is the boot window, not a fault. The poller starts at spawn
+        // while the bearer is still being established, so the first poll
+        // routinely fails and the next one succeeds — every agent, every boot.
+        // Declaring "NOT working" here conflated a transient startup condition
+        // with a permanent one, which is the same defect ptyOutputReporter
+        // split out as `session-pending` rather than burying under a generic
+        // failure. Escalate only once it is genuinely a streak.
+        console.log(
+          `[PTY] Mail poll for ${agentName} failed on first attempt ` +
+          `(HTTP ${statusCode ?? 'network'}) — auth may still be settling; retrying.`,
+        );
+      } else if (n === 5 || n % 20 === 0) {
         console.warn(
           `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
           `(${n} consecutive). Mail delivery to this pane is NOT working.`,
@@ -986,6 +1097,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     bootPromptTmpPath,
     writeBuf: '',
     writeDraining: false,
+    spawnedAt: Date.now(),
   };
   terminals.set(id, managed);
   terminalScreens.set(id, new TerminalScreen(id, agentName, 120, 30));
@@ -1028,7 +1140,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     scheduleTerminalFrameFlush(id);
     // NOT reported here. Raw chunks carry cursor addressing, so posting them
     // turned every in-place repaint into a stored line and a POST. Reporting
-    // happens in flushTerminalFrame once rows settle. See reportTerminalRows.
+    // happens in flushTerminalFrame once rows scroll off, PLUS the settle-report
+    // debounce below for the steady-state case where they never do (117107).
+    scheduleSettleReport(id);
 
     const buf = Buffer.from(data);
     if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {
@@ -1148,7 +1262,18 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         resume: resumeSession,
       });
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      // Report the EFFECTIVE model, not the requested one. buildClaudeSpawnCommand
+      // drops a foreign-runtime override (e.g. a kimi `k3` on a claude placement)
+      // and warns; echoing opts.modelOverride here undid that warning one line
+      // later and is what made the UI badge look truthful while the process ran
+      // on the default. Same predicate as the spawn path — never a second copy.
+      const rejectedModel = opts?.modelOverride && isForeignRuntimeModel(opts.modelOverride);
+      const modelNote = !opts?.modelOverride
+        ? ''
+        : rejectedModel
+          ? `, model: default (override '${opts.modelOverride}' rejected — foreign runtime)`
+          : `, model: ${opts.modelOverride}`;
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -1370,6 +1495,7 @@ export function getActiveTerminals(): Array<{ id: string; agentName: string; pro
 
 export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   mainWindowRef = mainWindow;
+  startOutputWatchdog();
 
   // NOTE: the renderer-facing PTY_SPAWN IPC handler was DELETED (SPEC-team-
   // runtime §3.3 FLAG 6). It was the phantom !backendAvailable spawn fallback

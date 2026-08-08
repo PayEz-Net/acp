@@ -146,4 +146,74 @@ describe('TerminalScreen', () => {
     // re-report rows that were already sent.
     expect(s.takeUpdate()).toBeNull();
   });
+
+  // --- 117107: settle-report + pre-wipe capture ------------------------------
+  // A full-screen TUI (Claude Code) that only ever repaints in place never
+  // scrolls a row into historyAppended, so the above "in-place repaints
+  // produce NO history rows" behavior is exactly the starvation bug. These
+  // pin the two new paths that get steady-state content onto the record
+  // without reintroducing the per-repaint POST flood.
+
+  it('takeSettleSnapshot reports in-place content that never scrolled', () => {
+    const s = make(40, 10);
+    s.feed('Claude is thinking...\r\n');
+    s.takeUpdate(); // drains the frame update; historyAppended is empty here
+    expect(s.takeSettleSnapshot()).toEqual(['Claude is thinking...']);
+  });
+
+  it('takeSettleSnapshot returns null when nothing changed since the last report', () => {
+    const s = make(40, 10);
+    s.feed('steady state\r\n');
+    expect(s.takeSettleSnapshot()).toEqual(['steady state']);
+    // Same content, no new bytes: a second settle tick must not re-report.
+    expect(s.takeSettleSnapshot()).toBeNull();
+  });
+
+  it('takeSettleSnapshot reports again once content actually changes', () => {
+    const s = make(40, 10);
+    s.feed('first\r\n');
+    expect(s.takeSettleSnapshot()).toEqual(['first']);
+    s.feed('\x1b[1;1Hsecond');
+    expect(s.takeSettleSnapshot()).toEqual(['second']);
+  });
+
+  it('captureBeforeWipe pushes pre-erase content into historyAppended instead of losing it', () => {
+    const s = make(40, 10);
+    s.feed('important line\r\n');
+    s.takeUpdate();
+    // Resize-repaint prelude: ESC[2J wipes the screen before ESC[3J marks
+    // historyCleared. Without the pre-wipe capture, "important line" is
+    // destroyed with zero trace once ED3 discards history on the renderer.
+    s.feed('\x1b[2J\x1b[H\x1b[3Jnew content\r\n');
+    const u = s.takeUpdate()!;
+    expect(u.historyAppended).toEqual(['important line']);
+    expect(u.historyCleared).toBe(true);
+    expect(u.screen).toEqual(['new content']);
+  });
+
+  it('captureBeforeWipe does not re-capture identical content across repeated erases', () => {
+    const s = make(40, 10);
+    s.feed('same frame\r\n');
+    s.feed('\x1b[2J\x1b[H\x1b[3Jsame frame\r\n');
+    const first = s.takeUpdate()!;
+    expect(first.historyAppended).toEqual(['same frame']);
+    // A second identical repaint cycle must not re-append the same content —
+    // this is the dedup that keeps a spinner-driven full-clear TUI from
+    // reintroducing the f1e5725 per-frame POST flood.
+    s.feed('\x1b[2J\x1b[H\x1b[3Jsame frame\r\n');
+    const second = s.takeUpdate()!;
+    expect(second.historyAppended).toEqual([]);
+  });
+
+  it('settle-report and pre-wipe capture share one dedup key (no double-report)', () => {
+    const s = make(40, 10);
+    s.feed('shared content\r\n');
+    // Settle fires first (as pty.ts's debounce would on a quiet period)...
+    expect(s.takeSettleSnapshot()).toEqual(['shared content']);
+    // ...then a resize-repaint prelude erases the now-already-reported screen.
+    s.feed('\x1b[2J\x1b[H\x1b[3J');
+    const u = s.takeUpdate()!;
+    expect(u.historyAppended).toEqual([]);
+    expect(u.historyCleared).toBe(true);
+  });
 });

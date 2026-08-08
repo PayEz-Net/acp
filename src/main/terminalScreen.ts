@@ -28,6 +28,21 @@
  *
  * The class is pure (no timers): callers `feed()` raw chunks and periodically
  * `takeUpdate()` to drain the coalesced frame update.
+ *
+ * ===== 117107 =====
+ * `historyAppended`/`takeUpdate` alone report NOTHING for a full-screen TUI
+ * that repaints in place and never scrolls (Claude Code — proven by
+ * DotNetPert-Scout via live repro 2026-08-08). Two more paths feed the same
+ * cloud-output pipeline, both deduped through `lastReportedSnapshot` so
+ * neither reintroduces the per-repaint POST flood f1e5725 was written to
+ * stop:
+ *   - `takeSettleSnapshot()`: caller-debounced (pty.ts fires it after a quiet
+ *     period with no new bytes) capture of the current visible rows once
+ *     they've stopped changing — covers ordinary in-place repaints.
+ *   - `captureBeforeWipe()` (private, called from `eraseDisplay` mode 2):
+ *     grabs the screen immediately before a full-screen erase destroys it —
+ *     covers the ESC[2J ESC[H ESC[3J resize-repaint prelude, where mode 2
+ *     wipes `lines` before mode 3 ever sets `cleared`.
  */
 
 export interface TerminalFrameUpdate {
@@ -44,6 +59,17 @@ export interface TerminalFrameUpdate {
 const ESC = '\x1b';
 const BEL = '\x07';
 
+/**
+ * Floor on captureBeforeWipe's report rate. Some TUIs redraw a spinner via a
+ * full ESC[2J every animation frame rather than an in-place glyph overwrite
+ * — content then differs by one character each tick, which defeats the
+ * equality dedup in `lastReportedSnapshot` and would reintroduce the
+ * per-frame POST flood f1e5725 fixed. Matches pty.ts's SETTLE_MS: capturing
+ * at most once per window still means nothing on screen goes more than one
+ * window without a chance to be recorded, without reporting every tick.
+ */
+const WIPE_CAPTURE_MIN_INTERVAL_MS = 900;
+
 export class TerminalScreen {
   private lines: string[] = [''];
   private row = 0;
@@ -57,6 +83,15 @@ export class TerminalScreen {
   private dirty = false;
   /** Incomplete escape-sequence tail carried across feed() chunk boundaries. */
   private pending = '';
+  /** Last set of rows actually handed off for cloud reporting — via
+   *  historyAppended (scroll), pre-wipe capture, or a settle snapshot. The
+   *  single dedup key shared by all three paths (117107): without it, a
+   *  full-screen TUI that repaints identical content on every tick would
+   *  re-report that content every tick, reintroducing the f1e5725 POST
+   *  flood the historyAppended gate was built to stop. */
+  private lastReportedSnapshot: string[] = [];
+  /** Rate-limit gate for captureBeforeWipe — see WIPE_CAPTURE_MIN_INTERVAL_MS. */
+  private lastWipeCaptureAt = 0;
 
   constructor(
     private readonly terminalId: string,
@@ -189,6 +224,52 @@ export class TerminalScreen {
     return this.visibleRows();
   }
 
+  /**
+   * Settle-report snapshot (117107 fix leg a). The caller (pty.ts) debounces
+   * this on a quiet-period timer — no new bytes for N ms — so a full-screen
+   * TUI that only ever repaints in place (Claude Code: never scrolls,
+   * historyAppended never fires) still gets its steady-state content onto
+   * the record instead of only the boot banner and the final exit snapshot.
+   *
+   * Deduped against `lastReportedSnapshot` so an idle pane whose content
+   * hasn't changed since the last report — settle or otherwise — produces
+   * NO output and therefore no POST. That dedup is what makes debounced
+   * reporting safe: without it this reintroduces the per-tick flood
+   * f1e5725 was written to stop.
+   *
+   * Returns null when there is nothing new to report.
+   */
+  takeSettleSnapshot(): string[] | null {
+    const rows = this.visibleRows();
+    if (rows.length === 0) return null;
+    if (this.snapshotEquals(rows, this.lastReportedSnapshot)) return null;
+    this.lastReportedSnapshot = rows;
+    return rows;
+  }
+
+  /** Pre-wipe capture for ED 2 (see eraseDisplay). Same dedup key as
+   *  takeSettleSnapshot so the two paths never double-report the same
+   *  content — whichever fires first "claims" it. */
+  private captureBeforeWipe(): void {
+    const rows = this.visibleRows();
+    if (rows.length === 0) return;
+    if (this.snapshotEquals(rows, this.lastReportedSnapshot)) return;
+    const now = Date.now();
+    if (now - this.lastWipeCaptureAt < WIPE_CAPTURE_MIN_INTERVAL_MS) return;
+    this.lastWipeCaptureAt = now;
+    this.lastReportedSnapshot = rows;
+    this.appended.push(...rows);
+    this.dirty = true;
+  }
+
+  private snapshotEquals(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
   private visibleRows(): string[] {
     let end = this.lines.length;
     while (end > 1 && this.lines[end - 1].trim() === '') end--;
@@ -288,6 +369,12 @@ export class TerminalScreen {
 
   private eraseDisplay(mode: number): void {
     if (mode === 2) {
+      // Capture whatever is on screen BEFORE it is wiped (117107 fix leg b).
+      // ED 2 is the clear half of the repaint prelude ESC[2J ESC[H ESC[3J —
+      // by the time mode 3 sets `cleared`, mode 2 has already erased `lines`
+      // with nothing pushed into `appended`, so a full-screen TUI's content
+      // vanished here with zero trace whenever it never scrolled first.
+      this.captureBeforeWipe();
       for (let r = 0; r < this.lines.length; r++) this.lines[r] = '';
     } else if (mode === 0) {
       this.eraseLine(0);
