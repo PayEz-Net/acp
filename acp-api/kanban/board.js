@@ -18,6 +18,19 @@ const TRANSITIONS = {
 
 // G1: PATCH touches FREE-FORM fields only. status + assignedTo are excluded —
 // they keep their guarded endpoints so transitions/assignment-lock are unbypassable.
+//
+// ⚠ THIS RULE EXISTS TWICE, IN TWO LANGUAGES. Fixing it here does NOT fix it for
+// callers who reach the .NET path, and vice versa. The twin lives in PayEz-Core:
+//     PayEz.Vibe.Public.Api/Controllers/V1/ProjectController.cs
+//     PayEz.Infrastructure/Repositories/Vibe/KanbanRepository.cs
+// PayEz-Core commit 7974a9773 ("persist `archived` + reject unknown fields") fixed the
+// .NET side on 2026-08-05 and shipped as vibe-api:archive-persist-7974a9773. THIS array
+// was not updated, so the defect stayed live on the Node path — five agents spent an
+// evening rediscovering it as cards 189672 and 189807 while the fix sat deployed.
+//
+// This is 31-WO-H1 §T4 verbatim: "ONE shared validation library, consumed by every
+// resource server — never per-service parsing (N implementations become N dialects)".
+// Before editing this array, change the .NET twin in the same work, or record why not.
 const EDITABLE_FIELDS = ['title', 'description', 'priority', 'milestone', 'blockers', 'specPath', 'filesChanged'];
 
 export { VALID_STATUSES, VALID_PRIORITIES, TRANSITIONS, EDITABLE_FIELDS };
