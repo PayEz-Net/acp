@@ -12,7 +12,6 @@ import {
   IDP_CLIENT_APP_HEADER,
 } from '@shared/idp-config';
 import { getIdpUrl } from './endpoints';
-import { createPkcePair } from './pkce';
 
 // No IDP_URL literal here (WO #292) — the IDP base URL comes from the
 // main-process env authority via the cloud:endpoints IPC (resolved per call).
@@ -162,15 +161,9 @@ function generateState(): string {
 }
 
 /**
- * Store OAuth state for verification.
- *
- * codeVerifier is REQUIRED, not optional, as of 175295 — every authorization
- * attempt generates one and it is the only thing that lets the IDP-exchange
- * leg (exchangeCodeWithIdp) prove this callback belongs to the request that
- * started it, now that the desktop never sees a provider client_secret to
- * prove anything else.
+ * Store OAuth state for verification
  */
-let pendingOAuthState: { state: string; provider: string; codeVerifier: string } | null = null;
+let pendingOAuthState: { state: string; provider: string; codeVerifier?: string } | null = null;
 
 export function getPendingOAuthState() {
   return pendingOAuthState;
@@ -201,16 +194,8 @@ export async function buildOAuthUrl(providerName: string): Promise<string> {
   const state = generateState();
   const scopes = provider.scopes || DEFAULT_SCOPES[providerName.toLowerCase()] || 'openid email profile';
 
-  // 175295 — PKCE (RFC 7636). See pkce.ts header for the full design rationale
-  // (BAPert 21218): the token EXCHANGE moves server-side to the IDP (which
-  // already holds the provider's client_secret), so the desktop never needs
-  // one. This code_challenge is what lets the IDP redeem this SPECIFIC
-  // authorization attempt — without it, whoever's holding the callback
-  // request's `code` could redeem it on their own, secret or no secret.
-  const { codeVerifier, codeChallenge, codeChallengeMethod } = await createPkcePair();
-
   // Store state for verification
-  pendingOAuthState = { state, provider: providerName, codeVerifier };
+  pendingOAuthState = { state, provider: providerName };
 
   // Build authorize URL
   let authorizeUrl = endpoints.authorize;
@@ -227,8 +212,6 @@ export async function buildOAuthUrl(providerName: string): Promise<string> {
     response_type: 'code',
     scope: scopes,
     state,
-    code_challenge: codeChallenge,
-    code_challenge_method: codeChallengeMethod,
   });
 
   // Provider-specific params
@@ -243,38 +226,168 @@ export async function buildOAuthUrl(providerName: string): Promise<string> {
 }
 
 // ============================================================================
-// IDP-MEDIATED TOKEN EXCHANGE (175295)
+// OAUTH TOKEN EXCHANGE
 // ============================================================================
-//
-// REMOVED FROM THIS FILE, ON PURPOSE: exchangeCodeForTokens (POSTed
-// client_secret straight to the provider's token endpoint) and fetchUserInfo
-// (called the provider's userinfo endpoint with the resulting access token).
-// Both required the renderer to hold a provider client_secret in memory,
-// fetched via getIDPClientConfig — a secret shipped to and readable on every
-// fielded desktop machine (175295, confirmed from source 3x). Deleted rather
-// than left dead: a working-but-unused client_secret path is a loaded gun
-// someone could re-wire back in, and OAuthProviderConfig.clientSecret exists
-// only because the IDP's /client-config response still includes it (a
-// separate IDP-side cleanup, tracked with DotNetPert on the same card).
-//
-// REPLACEMENT: the desktop now only ever gets an authorization `code` back
-// (via the local callback server) and hands it, plus the PKCE code_verifier
-// generated in buildOAuthUrl, to the IDP. The IDP — which already holds every
-// provider's client_secret server-side — performs the actual provider token
-// exchange, fetches user info, and runs the same registration/mint logic
-// oauth-callback used to receive pre-fetched tokens for. The desktop never
-// talks to a provider's token or userinfo endpoint again.
-//
-// CONTRACT (proposed to DotNetPert for the IDP side, not yet built —
-// see kanban 175295): POST /api/ExternalAuth/oauth-exchange
-//   body: { provider, code, code_verifier, redirect_uri, app }
-//   success: identical shape to the old oauth-callback response
-//            { data: { accessToken, refreshToken, user } } (or bare)
-//   failure: identical error envelope { error: { code, message } }
-// This function is written against that contract now so the desktop half is
-// ready the moment the IDP half lands; until then this call 404s/501s and
-// login is non-functional by design rather than by falling back to the
-// vulnerable path.
+
+interface OAuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  expiresIn?: number;
+}
+
+/**
+ * Exchange authorization code for tokens
+ */
+export async function exchangeCodeForTokens(
+  providerName: string,
+  code: string
+): Promise<OAuthTokens> {
+  const config = await getIDPClientConfig();
+  const provider = config.oauthProviders.find(
+    p => p.provider.toLowerCase() === providerName.toLowerCase()
+  );
+
+  if (!provider) {
+    throw new Error(`Provider ${providerName} not found`);
+  }
+
+  const endpoints = OAUTH_ENDPOINTS[providerName.toLowerCase()];
+  if (!endpoints) {
+    throw new Error(`Unknown provider: ${providerName}`);
+  }
+
+  let tokenUrl = endpoints.token;
+
+  // Handle Microsoft tenant
+  if (providerName.toLowerCase() === 'microsoft') {
+    const tenant = provider.additionalParams?.tenantId || 'common';
+    tokenUrl = tokenUrl.replace('{tenant}', tenant);
+  }
+
+  const params = new URLSearchParams({
+    client_id: provider.clientId,
+    client_secret: provider.clientSecret,
+    code,
+    redirect_uri: OAUTH_REDIRECT_URI,
+    grant_type: 'authorization_code',
+  });
+
+  const response = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: params.toString(),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    console.error('[OAuth] Token exchange failed:', error);
+    throw new Error(`Token exchange failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    idToken: data.id_token,
+    expiresIn: data.expires_in,
+  };
+}
+
+// ============================================================================
+// USER INFO FETCHING
+// ============================================================================
+
+interface OAuthUserInfo {
+  id: string;
+  email: string;
+  name?: string;
+  picture?: string;
+}
+
+/**
+ * Fetch user info from OAuth provider
+ */
+export async function fetchUserInfo(
+  providerName: string,
+  accessToken: string
+): Promise<OAuthUserInfo> {
+  const provider = providerName.toLowerCase();
+
+  let userInfoUrl: string;
+  let headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+  };
+
+  switch (provider) {
+    case 'google':
+      userInfoUrl = 'https://www.googleapis.com/oauth2/v2/userinfo';
+      break;
+    case 'microsoft':
+      userInfoUrl = 'https://graph.microsoft.com/v1.0/me';
+      break;
+    case 'github':
+      userInfoUrl = 'https://api.github.com/user';
+      headers['Accept'] = 'application/vnd.github+json';
+      break;
+    case 'facebook':
+      userInfoUrl = `https://graph.facebook.com/me?fields=id,email,name,picture&access_token=${accessToken}`;
+      headers = {}; // Token in URL for Facebook
+      break;
+    default:
+      throw new Error(`User info not supported for: ${provider}`);
+  }
+
+  const response = await fetch(userInfoUrl, { headers });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch user info: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  // Normalize response
+  switch (provider) {
+    case 'google':
+      return {
+        id: data.id,
+        email: data.email,
+        name: data.name,
+        picture: data.picture,
+      };
+    case 'microsoft':
+      return {
+        id: data.id,
+        email: data.mail || data.userPrincipalName,
+        name: data.displayName,
+      };
+    case 'github':
+      // GitHub might not return email in main response
+      return {
+        id: String(data.id),
+        email: data.email || '',
+        name: data.name || data.login,
+        picture: data.avatar_url,
+      };
+    case 'facebook':
+      return {
+        id: data.id,
+        email: data.email,
+        name: data.name,
+        picture: data.picture?.data?.url,
+      };
+    default:
+      return { id: data.id || data.sub, email: data.email, name: data.name };
+  }
+}
+
+// ============================================================================
+// IDP OAUTH CALLBACK
+// ============================================================================
 
 interface IDPOAuthResult {
   success: boolean;
@@ -290,18 +403,22 @@ interface IDPOAuthResult {
 }
 
 /**
- * Redeem an authorization code via the IDP (never the provider directly).
- * See the section header above for the full 175295 rationale and contract.
+ * Register OAuth user with IDP and get IDP tokens
  */
-export async function exchangeCodeWithIdp(
+export async function registerWithIDP(
   providerName: string,
-  code: string,
-  codeVerifier: string
+  providerAccountId: string,
+  email: string,
+  name: string,
+  picture?: string,
+  providerAccessToken?: string,
+  providerRefreshToken?: string,
+  providerIdToken?: string
 ): Promise<IDPOAuthResult> {
-  console.log('[OAuth] Exchanging code via IDP:', { provider: providerName });
+  console.log('[OAuth] Registering with IDP:', { provider: providerName, email });
 
   const idpUrl = await getIdpUrl(); // env authority (IPC), no literal
-  const response = await fetch(`${idpUrl}/api/ExternalAuth/oauth-exchange`, {
+  const response = await fetch(`${idpUrl}/api/ExternalAuth/oauth-callback`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -310,31 +427,41 @@ export async function exchangeCodeWithIdp(
     },
     body: JSON.stringify({
       provider: providerName,
-      code,
-      code_verifier: codeVerifier,
-      redirect_uri: OAUTH_REDIRECT_URI,
+      provider_account_id: providerAccountId,
+      email,
+      name: name || '',
+      image: picture || '',
+      access_token: providerAccessToken || '',
+      refresh_token: providerRefreshToken || '',
+      // The ONLY field the IDP can verify: it checks this JWT's signature
+      // against the provider JWKS and treats its email as authoritative
+      // (OAuthCallbackRequest.IdToken, #170003). provider / email /
+      // provider_account_id are unverified assertions. The mint fails closed
+      // when this is absent — omitting it is a 401 UNVERIFIED_ASSERTION, not a
+      // degraded success. Sent only when the provider returned one.
+      ...(providerIdToken ? { id_token: providerIdToken } : {}),
       app: IDP_CLIENT_APP,
     }),
   });
 
   if (!response.ok) {
     const error = await response.text();
-    console.error('[OAuth] IDP exchange failed:', error);
+    console.error('[OAuth] IDP registration failed:', error);
     // Surface the IDP's own code/message. A generic "OAuth registration failed"
     // in the UI hid UNVERIFIED_ASSERTION behind a string that named neither the
     // cause nor where to look; the request_id is what ties this to Graylog.
-    let code2 = `HTTP_${response.status}`;
-    let message = 'OAuth exchange failed';
+    let code = `HTTP_${response.status}`;
+    let message = 'OAuth registration failed';
     try {
       const parsed = JSON.parse(error);
-      if (parsed?.error?.code) code2 = parsed.error.code;
+      if (parsed?.error?.code) code = parsed.error.code;
       if (parsed?.error?.message) message = parsed.error.message;
       const requestId = parsed?.request_id ?? parsed?.error?.support?.request_id;
       if (requestId) message += ` (request_id ${requestId})`;
     } catch {
       /* non-JSON body — keep the status-derived code */
     }
-    return { success: false, error: { code: code2, message } };
+    return { success: false, error: { code, message } };
   }
 
   const data = await response.json();
@@ -379,17 +506,29 @@ export async function completeOAuthFlow(
   }
 
   const providerName = pendingOAuthState.provider;
-  const codeVerifier = pendingOAuthState.codeVerifier;
   clearPendingOAuthState();
 
   try {
-    // 175295: one call. The desktop never sees a provider access/refresh/id
-    // token or a client_secret — the IDP redeems the code (with the
-    // code_verifier proving this callback belongs to the attempt that
-    // started it), fetches the provider's user info, and mints IDP tokens,
-    // all server-side.
-    console.log('[OAuth] Exchanging code via IDP...');
-    const result = await exchangeCodeWithIdp(providerName, code, codeVerifier);
+    // Exchange code for tokens
+    console.log('[OAuth] Exchanging code for tokens...');
+    const tokens = await exchangeCodeForTokens(providerName, code);
+
+    // Fetch user info
+    console.log('[OAuth] Fetching user info...');
+    const userInfo = await fetchUserInfo(providerName, tokens.accessToken);
+
+    // Register with IDP
+    console.log('[OAuth] Registering with IDP...');
+    const result = await registerWithIDP(
+      providerName,
+      userInfo.id,
+      userInfo.email,
+      userInfo.name || '',
+      userInfo.picture,
+      tokens.accessToken,
+      tokens.refreshToken,
+      tokens.idToken
+    );
 
     return result;
   } catch (error) {
