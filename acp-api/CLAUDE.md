@@ -11,17 +11,12 @@ ACP is one product with two halves:
 
 ## Engineering doctrine — read this before writing code
 
-**The five rules live in `../CLAUDE.md`** (repo root) and apply to this directory unchanged. They
-are held in one place on purpose: a second copy is a second thing to drift, which is rule 2.
+**The doctrine — five rules and their corollaries — lives in [`../CLAUDE.md`](../CLAUDE.md) (repo
+root) and applies to this directory unchanged. Read it before writing code.**
 
-Short form, so the headline survives even if you never open it:
-
-1. **No fallbacks** — a fallback converts a failure into a plausible wrong answer.
-2. **Config is data**, not a default with a config-shaped name.
-3. **Verify at the source, and know which instrument you used** — source, disk and wire disagree.
-   Two people reading the same file is one measurement, twice.
-4. **Check the package first** — does `@payez/next-mvp` already do this?
-5. **Decision-relevance** — "if I learn this, what do I do differently?" If nothing, stop.
+It is deliberately **not summarised here.** A summary is a second copy, a second copy drifts, and
+this one did: the version that sat here for 26 minutes was already missing two corollaries added
+to the root. That is rule 2 catching its own documentation. One file, no excerpt.
 
 ## What This Repo Contains
 
