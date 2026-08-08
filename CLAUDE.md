@@ -41,26 +41,25 @@ If the answer is *nothing*, **stop.** Do not measure it, do not argue about it, 
   and the next refactor re-arms it silently. Fix it, or assert the guard — a comment is deleted by
   the same refactor it warns about.
 - **Attribution is not verification.** Citing whose measurement it is does not make acting on it safe.
-- **An accident is not a control.** Ask of anything you are relying on: **"if it stopped being true,
-  would anything tell us?"** If nothing would, it is not a protection — it is a condition that
-  happens to hold, and it will stop holding without notice. A cold cache, a path that does not
-  resolve, a missing `--watch`, a field that happens to be present, a tree that is clean right now,
-  a remote that turns out to be private — each one protected us once and none of them would have
-  announced its own removal.
-- **A check that cannot fail tells you nothing.** Before trusting a green, ask whether this
-  instrument could ever have gone red. A guard whose pattern matches nothing passes forever; a
-  probe searched for in the wrong field is absent forever; an absence-grep passes on a fix, on a
-  stale build, and on a file that moved. **Prove the check can fail — run it against a known-bad
-  input — before its success counts as evidence.** Corroboration needs a *different* instrument;
-  running the same one twice is one measurement, twice.
-- **Read past the confirmation.** The reader-side version of the above: stopping at the sentence
-  that agrees with you is how a check that cannot fail survives review. The file that said "a
-  second copy drifts" made the copy three lines later, and two readers stopped at the first half.
+- **If it cannot report its own failure, it is not evidence.** Ask of any check or protection:
+  **"if it stopped being true, would anything tell us?"** A guard whose pattern matches nothing
+  passes forever; an absence-grep passes on a fix, a stale build and a moved file alike; a cold
+  cache, an unresolvable path, a missing `--watch` and a clean-right-now tree each protected us
+  once and none would announce its removal. **Prove it can fail — run it against known-bad input —
+  before a pass counts.** Corroboration needs a *different* instrument, not a second run.
+- **Read past the confirmation.** The reader-side of the above, and how the rest survive review:
+  stopping at the sentence that agrees with you. The file that said "a second copy drifts" made the
+  copy three lines later, and two readers stopped at the first half.
 - **If a fact must survive the conversation, it does not go in mail.** It goes in the code or the record.
 
-> Canonical source: `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` @ `e987342`. The rules above are
-> reproduced verbatim so they load with this repo; if the two ever disagree, the canonical file wins
-> and this copy is the defect.
+> **This file is authoritative, because it is the file that loads.** The five rules originate in
+> `payez-PI-mono/docs/ENGINEERING-DOCTRINE.md` (@ `73e069f`, 1 Aug) and are reproduced verbatim; the
+> corollaries here are a superset, and the last two were earned in this repo and are **not upstream
+> yet**. If the two disagree, **this one wins and the upstream file is the one to reconcile** — do
+> not sync in the other direction, it would silently delete work that only exists here.
+>
+> **Budget: this section is one screen (~50 lines), a hard limit.** The next addition displaces
+> something — merge, do not append. An unfinished doctrine is a mail thread with better formatting.
 
 ## What This Repo Contains
 
