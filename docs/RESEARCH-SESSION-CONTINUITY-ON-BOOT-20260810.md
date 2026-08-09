@@ -51,23 +51,21 @@ is known, which makes it the earliest correct insertion point.
 has no hooks and would get nothing from a hook-based design. Both runtimes call the
 profile endpoint.
 
-## 3. The blocker: acp-api cannot reach `kb`
+## 3. The blocker that turned out not to be one — SOLVED 2026-08-09
 
-Every existing tool in this system (`kb_recall.py`, `kb_remember.py`, `kb-ask.py`) reaches
-the store the same way:
+The original reading: acp-api cannot reach `kb` (the password is not in any repo), so the
+read path is gated on a config decision.
 
-```
-ssh dotnetpert@10.0.0.93 → sudo docker exec -i kb-postgres → psql
-```
+**That was true and irrelevant.** It assumed the injection had to come from the profile
+endpoint. The `kb_recall.py` hook ALREADY reaches `kb` on every prompt, already runs in
+every ACP pane, and already knows the session. Nothing needed a new connection — the read
+path was one `if` away in a file that was already deployed.
 
-That is fine for a local script and **wrong for the API**. acp-api would need a real
-connection to `10.0.0.93:54320`, and the `kb` password is deliberately not in any repo
-(see `reference_acp_shared_knowledge_rag_93`).
+**Kept as a lesson:** a blocker attached to one design is not a blocker on the goal. The
+question that dissolved it was "what already talks to kb?", not "how do we get acp-api to".
 
-**So the read path is gated on a config decision, not on code.** A `KB_URL` /
-`KB_PASSWORD` in acp-api config, sourced the same way its other secrets are. Until that
-exists, the read path cannot be built honestly — and shelling out to ssh from the API to
-avoid the conversation would be the wrong kind of clever.
+The profile-endpoint route is still the right home for KIMI, which has no hook. That
+remains blocked on the connection, and only for Kimi.
 
 ## 4. The write path is independently useful and unblocked
 
@@ -185,6 +183,31 @@ Claude and unproven for Kimi.
 5. **Revisit the briefing.** It is already a cache of the `agent-memory` skill and
    drifted twice in ninety minutes on 2026-08-10.
 
+## 8. AS BUILT — and how to do it again
+
+**Landing summaries at boot is live for Claude panes.** Verified 2026-08-09 on a real
+restart: 6 of 7 agents received their own summary and the 7th correctly received nothing.
+
+**Runbook — repeating a restart with continuity:**
+
+1. **Before shutdown, nothing is required.** Transcripts are files on disk and survive the
+   restart, so summaries can be produced after the fact just as well as before. This was
+   the point of reading transcripts rather than hooking a runtime.
+2. **After the rig is down, summarise:** for each agent, run
+   `acp-api/scripts/kb_summarize_transcript.py --agent <Name> --session <id> --project-dir E--Repos`
+   and pipe into `kb_session_summary.py --agent <Name> --session <id> --stamp <iso> --ttl-days 14`.
+   The summariser exits non-zero and prints NOTHING when it cannot verify what it wrote, so
+   a refusal stores nothing without the caller checking.
+3. **Attribute transcripts by counting `X-ACP-Agent:` / `/v1/agents/<name>/profile` hits**
+   per file and taking the mode. Do NOT use the `report as` prompt — it matches "report as
+   me". Do NOT use it for the HOOK's identity either (see §9).
+4. **Bring the rig up.** `npm run dev:prod` in `acp-desktop`. Wait for `PREDICATE_PASS`.
+5. **Verify by result, not by assumption:** grep the fresh transcripts for
+   `left off. This is a stored summary`. Anything else is a claim, not a check.
+
+**Still not built:** the profile-endpoint route for Kimi (no hook, so no automatic
+injection — Kimi agents must search manually). Everything else in this document is done.
+
 ## 8. Open questions
 
 - **What is a "session summary"?** State + next action + open blockers is the useful
@@ -208,3 +231,24 @@ Claude and unproven for Kimi.
   `withMemoryBriefing()`
 - `project_be_jon_observer` (kb) — the "knowledge half rides RAG + onboarding profile"
   idea this is a concrete instance of
+
+## 9. Identity: ask the runtime — the three failures worth not repeating
+
+Boot injection needed the agent's name. Three inferences were tried before the right one,
+and **every one produced a confident wrong answer rather than a failure**, which is what
+makes this class expensive:
+
+| Inference | Why it failed |
+|---|---|
+| `report as <Agent>` as the prompt | The shell's first prompt is `Begin.` — no name, and six characters, **below the hook's own MIN_CHARS floor**, so it returned before doing anything |
+| `X-ACP-Agent:` from the transcript | Says who the session is CALLING AS, not who it IS — my own transcript had 18 BAPert hits and would have been resolved as BAPert |
+| `✓ <Agent> initialized` banner | Absent from every RESUMED session; resuming does not re-onboard. Zero matches on a real transcript, so the "safe" version silently injected nothing for everyone |
+
+**`pty.ts:1301` sets `ACP_AGENT_NAME` per pane at spawn, and hooks inherit the
+environment.** The runtime knew the whole time.
+
+Two rules out of it, both in `kb` as standard/feedback:
+- **Grep the spawner for a value that already carries the answer before writing a resolver.**
+- **An unresolved identity must inject NOTHING.** Guessing hands one principal another's
+  private state — which is exactly what happened when `report as QAPert` returned
+  QAPert-NightHawk's summary.
