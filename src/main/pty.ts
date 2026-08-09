@@ -570,13 +570,22 @@ const MAIL_POLL_BACKOFF_MAX_MS = 300000; // 5 min cap
 // The fix is `page` support below plus a stop-at-known-id loop, which makes
 // correctness independent of this number — it is a pure cost/latency knob now.
 const MAIL_POLL_PAGE_SIZE = 20;
-// Safety cap on pages paged through in one poll cycle (100 messages at the
-// size above — QAPert spec, msg 24496, approved as written BAPert msg 24498).
-// A burst bigger than this in one interval still degrades to "picked up next
-// cycle" rather than the old silent loss, and it is logged loudly (see
-// startInboxPoller) naming what may have been dropped, rather than assumed
-// complete — a silent cap would reintroduce exactly the loss this exists to remove.
-const MAIL_POLL_MAX_PAGES = 5;
+// Safety cap on pages paged through in one poll cycle. QAPert's re-review of
+// the first cut (msg 24545) found that a capped cycle does NOT degrade to
+// "picked up next cycle" as the warning claimed: the watermark advance below
+// is unconditional, so it jumps to the newest message collected regardless of
+// whether the cap was hit, and the next cycle's page 1 (the newest N overall)
+// then reads as already-known and stops immediately — anything older than the
+// cap boundary is never paged to again. Genuinely draining an arbitrarily deep
+// backlog within one cycle (QAPert's preferred option) trades against real
+// per-page cost (~1.7-2s observed) compounding into tens of seconds; instead
+// this raises the ceiling far past anything this team has produced (500
+// messages/cycle, versus a team-wide RECORD of 201 sends across ALL agents in
+// one entire night) so hitting it is an abnormal-load event, not a routine
+// bad-morning occurrence — and the warning below (see startInboxPoller) says
+// plainly that the remainder is NOT auto-recovered when it does happen, rather
+// than asserting a retry the code does not perform.
+const MAIL_POLL_MAX_PAGES = 25;
 
 function fetchUnreadInbox(agentName: string, projectId?: number, page = 1): Promise<{ response: any; statusCode?: number }> {
   return new Promise((resolve) => {
@@ -865,11 +874,13 @@ function startInboxPoller(managed: ManagedPty): void {
     }
 
     if (cappedOut) {
-      // Loud, not silent (QAPert msg 24496 / BAPert msg 24498): a silent cap
-      // would reintroduce exactly the loss this guard exists to remove — a
-      // confident green while mail is still dropped. Name what may be missing:
-      // the oldest timestamp actually collected this cycle is the boundary;
-      // anything older than it may not have been injected.
+      // Loud, not silent (QAPert msg 24496 / BAPert msg 24498) — AND accurate
+      // about the consequence (QAPert re-review, msg 24545: the first version
+      // of this line claimed "will be retried next cycle", which is false. The
+      // watermark advance below is unconditional, so it moves to the newest
+      // message collected regardless of the cap; the next cycle's page 1 then
+      // reads as already-known and stops immediately. Anything older than this
+      // boundary is NOT automatically retried — it requires attention.
       let oldestCollectedAt = 'unknown';
       for (const m of collected) {
         const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
@@ -880,14 +891,21 @@ function startInboxPoller(managed: ManagedPty): void {
       }
       console.warn(
         `[PTY] Mail paging cap hit for ${agentName}: ${MAIL_POLL_MAX_PAGES} pages at pageSize ` +
-        `${MAIL_POLL_PAGE_SIZE} (${collected.length} messages this cycle). Mail older than ` +
-        `${oldestCollectedAt} on this cycle may not have been injected — will be retried next cycle.`,
+        `${MAIL_POLL_PAGE_SIZE} (${collected.length} messages this cycle, an abnormal volume). ` +
+        `Mail older than ${oldestCollectedAt} on this cycle will NOT be automatically retried — ` +
+        `the watermark advances past it regardless. This needs investigation, not a wait-and-see.`,
       );
     }
 
     // Advance the watermark to the newest timestamp actually seen this cycle
     // BEFORE using it below, so a later poll's paging stops at what this
-    // cycle actually collected, not at boot time forever.
+    // cycle actually collected, not at boot time forever. Unconditional even
+    // on a capped cycle (see the warning above) — the alternative, holding the
+    // watermark, does not drain either: paging always restarts at page 1, so
+    // an unmoved watermark just re-walks and re-caps on the same top pages
+    // forever without ever reaching deeper (QAPert msg 24545). Advancing at
+    // least keeps steady state correct; a cap this large (see
+    // MAIL_POLL_MAX_PAGES) hitting at all means the volume is already abnormal.
     for (const m of collected) {
       const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
       if (!Number.isNaN(ts) && ts > newestKnownAt) newestKnownAt = ts;
