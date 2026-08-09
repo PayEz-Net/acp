@@ -187,6 +187,66 @@ function stripSelfManagedStatus(profile: string): string {
     .trim();
 }
 
+// Appended to EVERY profile this API serves, regardless of runtime.
+//
+// Why it lives here and not in each persona doc: every agent carries a standing
+// harness instruction to save memories as files under memory/ and index them in
+// MEMORY.md. That store is retired and sits at its hard size cap, so writes to it
+// now land past the cap and are DROPPED SILENTLY — no error, agent believes it
+// worked. A correction has to reach every agent, so it goes on the one surface
+// they all read: the profile.
+//
+// Runtime asymmetry, stated rather than papered over: automatic recall is a
+// Claude Code UserPromptSubmit hook. Kimi and any other runtime hit this same
+// endpoint but have NO hook, so for them recall is manual. Telling every agent
+// "memories arrive automatically" would be false for half the team.
+const MEMORY_BRIEFING = `
+
+---
+
+## Memory — the shared vector store on 93 (NOT MEMORY.md)
+
+**\`MEMORY.md\` is retired. Do not write to it.** It is a flat index at its hard size
+cap; anything appended is dropped silently, so a write there looks like it worked and
+is simply lost.
+
+**To store a memory** (works from any runtime):
+\`\`\`
+python "E:\\Repos\\.claude\\hooks\\kb_remember.py" --title "<the fact, as a sentence>" \\
+  --scope agent|project|standard --id <AgentName|projectId|feedback> \\
+  --source "<who, when, measured how>"   # body on stdin — --source is REQUIRED
+\`\`\`
+Write the chunk to stand alone: it is retrieved without its neighbours, so put the
+identifiers, file names, env vars and error strings in it VERBATIM. No credentials —
+the store is readable by every agent.
+
+**To recall:**
+- **Claude Code:** automatic. Relevant memories are injected each turn by a
+  UserPromptSubmit hook. You do nothing.
+- **Kimi / other runtimes:** NOT automatic — there is no hook. Search explicitly with
+  \`python "E:\\Repos\\_tmp\\kb-ask.py" "<question>" 5\` when you need prior context.
+
+Retrieved memories are point-in-time notes, not live state. Verify any \`file:line\`
+claim against current code before asserting it as fact.
+
+Detail: the \`agent-memory\` skill. Background: \`E:\\Repos\\about_acp_vector_project.md\`.`;
+
+/**
+ * Append the memory briefing to a profile payload on its way out.
+ *
+ * Applied at EVERY return path — the cloud mapper and all four thin-shape
+ * fallbacks. Appending in one place and not the others is the twin-drift
+ * failure this file already documents: the fallbacks are exactly the paths
+ * taken when something is wrong, which is when an agent most needs to not
+ * write into a dead store.
+ */
+function withMemoryBriefing<T>(profile: T): T {
+  if (!profile || typeof profile !== 'object') return profile;
+  const p = profile as Record<string, unknown>;
+  const existing = typeof p.profile === 'string' ? p.profile : '';
+  return { ...p, profile: existing + MEMORY_BRIEFING } as T;
+}
+
 function mapCloudProfile(
   cloudProfile: CloudProfileShape,
   meta: { name: string; displayName?: string; role?: string },
@@ -559,7 +619,7 @@ export default function agentRoutes(_storage: any): Router {
           console.warn(`[agent_profile] Could not resolve name "${identifier}" to id via cloud /v1/agentmail/agents — falling back to SessionManager thin shape`);
           const basic = await _storage.getAgentProfileFromGlobal(identifier);
           if (basic) {
-            res.json(success(basic, 'agent_profile', (req as any).requestId));
+            res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
             return;
           }
           res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
@@ -589,7 +649,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud unreachable for /v1/agents/${agentId}/profile (${profileResult.error}) — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(503).json(error('UPSTREAM_UNAVAILABLE', `Cloud unreachable: ${profileResult.error}`, 'agent_profile', (req as any).requestId));
@@ -605,7 +665,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud returned HTTP ${profileResult.status} for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(profileResult.status).json(error('UPSTREAM_ERROR', `Cloud returned HTTP ${profileResult.status}`, 'agent_profile', (req as any).requestId));
@@ -618,7 +678,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud response missing data.profile for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(502).json(error('UPSTREAM_BAD_SHAPE', 'Cloud response missing profile data', 'agent_profile', (req as any).requestId));
@@ -630,7 +690,7 @@ export default function agentRoutes(_storage: any): Router {
         displayName: displayName,
       });
 
-      res.json(success(profile, 'agent_profile', (req as any).requestId));
+      res.json(success(withMemoryBriefing(profile), 'agent_profile', (req as any).requestId));
     } catch (err: any) {
       if (err instanceof ProjectNotEngagedError) {
         res.status(err.status).json(error(err.code, err.message, 'agent_profile', (req as any).requestId));
