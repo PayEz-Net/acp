@@ -483,14 +483,16 @@ export function UnifiedTerminal({
     return () => clearTimeout(t);
   }, [filteredLines, computeStats]);
 
-  const { lineCount, thinkingCount, isThinkingLive } = debouncedStats;
+  const { thinkingCount, isThinkingLive } = debouncedStats;
   const activeProject = useProjectStore((s) => s.activeProject);
   const repoPath = activeProject?.repo_path ?? '';
   // runtime_choice is the single authority for the team runtime; agent.provider
   // may be stale from the legacy agentProvider field.
   const effectiveProvider = activeProject?.runtime_choice ?? agent?.provider ?? null;
   const agentStatus = useAgentStatusStore((s) => s.statuses[agentName]);
-  const contextUsage = agentStatus?.contextUsage ?? 0;
+  // No `?? 0`: undefined means the runtime never reported it, and the footer
+  // renders that as UNKNOWN rather than a green 0%-used bar.
+  const contextUsage = agentStatus?.contextUsage;
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agentName));
   // ACP transcript is authoritative once the session has been initialized
   // (sessionId assigned by the runtime). Until then, fall back to the PTY/bridge
@@ -503,7 +505,6 @@ export function UnifiedTerminal({
     ? (acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId) ?? null)
     : null;
   const acpIsThinkingLive = acpActiveTurn?.status === 'thinking';
-  const footerLineCount = isAcpMode ? (acpSession?.turns.length ?? 0) : lineCount;
   const footerThinkingCount = isAcpMode ? 0 : thinkingCount;
 
   const computeDimensions = useCallback(() => {
@@ -1455,7 +1456,6 @@ export function UnifiedTerminal({
           agent={agent}
           provider={effectiveProvider}
           repoPath={repoPath}
-          lineCount={footerLineCount}
           thinkingCount={footerThinkingCount}
           contextUsage={contextUsage}
         />

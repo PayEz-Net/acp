@@ -27,7 +27,22 @@ export function getStatusPill(status: AgentState['status']): StatusPill {
   }
 }
 
-export function ContextBar({ usage }: { usage: number }) {
+export function ContextBar({ usage }: { usage?: number }) {
+  // UNKNOWN is not 0. contextUsage is screen-scraped out of terminal text
+  // (terminalStream.ts STATUS_EXTRACTORS, /context: N%/), and that string only
+  // shows up once the runtime is nearly out of room — so for the whole useful
+  // range there is no reading at all. Painting that as 0% drew a full-width
+  // GREEN bar meaning "plenty of headroom" on every pane, which is a confident
+  // wrong answer rather than a missing one. Absence prompts the question; a
+  // green bar answers it wrongly.
+  if (usage === undefined || Number.isNaN(usage)) {
+    return (
+      <div
+        className="w-16 h-1.5 rounded-full border border-dashed border-acp-border"
+        title="Context usage: unknown — this runtime does not report it until it is nearly full"
+      />
+    );
+  }
   const clamped = Math.max(0, Math.min(100, usage));
   let color = 'bg-emerald-500';
   if (clamped > 70) color = 'bg-red-500';
@@ -51,16 +66,14 @@ export function TerminalFooter({
   agent,
   provider,
   repoPath,
-  lineCount,
   thinkingCount,
   contextUsage,
 }: {
   agent: AgentState;
   provider: string | null;
   repoPath: string;
-  lineCount: number;
   thinkingCount: number;
-  contextUsage: number;
+  contextUsage?: number;
 }) {
   const status = useAgentStatusStore((s) => s.statuses[agent.name]);
   const acpSession = useAcpSessionStore((s) => s.sessions.get(agent.name));
@@ -76,7 +89,7 @@ export function TerminalFooter({
       : acpSession?.agentInfo?.name
     : status?.model;
   const effectiveCwd = status?.cwd ?? repoPath;
-  const effectiveContext = status?.contextUsage ?? contextUsage;
+  const effectiveContext = status?.contextUsage ?? contextUsage;  // may be undefined = never reported
   const effectiveTokenUsed = status?.tokenUsed;
   const effectiveTokenMax = status?.tokenMax;
   const composing = status?.composing;
@@ -122,7 +135,6 @@ export function TerminalFooter({
         {tokenLabel && (
           <span title="Token usage">{tokenLabel}</span>
         )}
-        <span title={`${lineCount} output line(s)`}>{lineCount} lines</span>
         <ContextBar usage={effectiveContext} />
       </div>
     </div>
