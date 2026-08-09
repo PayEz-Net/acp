@@ -17,7 +17,16 @@ const TRANSITIONS = {
 };
 
 // G1: PATCH touches FREE-FORM fields only. status + assignedTo are excluded —
-// they keep their guarded endpoints so transitions/assignment-lock are unbypassable.
+// they keep their guarded endpoints, so transitions/assignment-lock are unbypassable
+// ⚠ THROUGH THIS PROXY ONLY. That clause used to read "unbypassable" full stop, and it
+// was measured false on 2026-08-08: the .NET PATCH
+// (PayEz.Vibe.Public.Api ProjectController.UpdateKanbanTask) does a project-access check
+// and then passes Status and AssignedTo straight through ToWrite to the repository. It
+// enforces no transition graph and no assignment lock, because neither exists on that
+// side — they are defined here and nowhere else. Anything reaching the cloud endpoint
+// directly can move a task backlog -> done in one call.
+// Ruled 2026-08-08: the .NET API is to become authoritative for both. Until that lands,
+// this file is the ONLY enforcement and it binds only callers who come through it.
 //
 // ⚠ THIS RULE EXISTS TWICE, IN TWO LANGUAGES. Fixing it here does NOT fix it for
 // callers who reach the .NET path, and vice versa. The twin lives in PayEz-Core:
