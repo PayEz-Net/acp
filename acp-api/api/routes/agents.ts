@@ -9,6 +9,82 @@ import { fileURLToPath } from 'url';
 import * as path from 'path';
 import * as fs from 'fs';
 
+
+// ===========================================================================
+// DISABLED - agent memory briefing (pgvector handoff). Uncomment to enable.
+//
+// WHY IT IS HERE AND OFF: this block lives on `main`. This branch does not have
+// it, so agents spawned from this branch receive NO memory briefing - they get
+// only the one-line agent-memory skill pointer and never learn that MEMORY.md
+// is retired. Measured 2026-08-09 on a full team ramp-up: all 7 transcripts had
+// 0 hits for "MEMORY.md is retired". It was delivered by mail (message 26053)
+// as a one-off, which fixes THAT team and not the next restart. Parked here so
+// the gap stops being re-discovered on every ramp-up.
+//
+// TO ENABLE - both steps, or it compiles and does nothing:
+//   1. Uncomment MEMORY_BRIEFING and withMemoryBriefing below.
+//   2. Wrap EVERY profile return with withMemoryBriefing(...). On main there are
+//      FIVE - the four `basic` returns and the full `profile` return in the
+//      agent-profile route. Missing one is invisible: that agent simply never
+//      gets briefed and nothing errors.
+//
+// VERIFY BY RESULT, not by reading the diff. The briefing renders MEMORY.md in
+// backticks, so grepping a live response for "MEMORY.md is retired" returns 0
+// even when it IS deployed. Grep the served profile for: shared vector store on 93
+// ===========================================================================
+// const MEMORY_BRIEFING = `
+//
+// ---
+//
+// ## Memory — the shared vector store on 93 (NOT MEMORY.md)
+//
+// **\`MEMORY.md\` is retired. Do not write to it.** It is a flat index at its hard size
+// cap; anything appended is dropped silently, so a write there looks like it worked and
+// is simply lost.
+//
+// **To store a memory** (works from any runtime):
+// \`\`\`
+// python "E:\\Repos\\.claude\\hooks\\kb_remember.py" --title "<the fact, as a sentence>" \\
+//   --scope agent|project|standard --id <AgentName|projectId|feedback> \\
+//   --source "<who, when, measured how>" [--ttl 7d]   # body on stdin
+// \`\`\`
+// Write the chunk to stand alone: it is retrieved without its neighbours, so put the
+// identifiers, file names, env vars and error strings in it VERBATIM. No credentials —
+// the store is readable by every agent. \`--source\` is REQUIRED: a memory with no
+// provenance is a rumour.
+//
+// **Decide permanent vs note AT WRITE TIME, while you still know which it is:**
+// - **omit \`--ttl\`** → PERMANENT. Doctrine, references, facts you paid to learn.
+// - **\`--ttl 7d\` / \`48h\`** → a QUICK NOTE. Stops being retrieved once it passes. Use it
+//   for anything with a shelf life — a pending task, a checklist for a window, "X is
+//   mid-flight". Without it, that note outranks nothing and outlives everything: it keeps
+//   surfacing beside doctrine long after it went stale.
+//
+// Nobody ever goes back and retro-classifies, so there is no "mark it stale later".
+// Expired is NOT deleted — the row stays and stays queryable, it just stops being injected.
+//
+// **Superseding a memory is DELETE-then-write, not write.** Dedupe is keyed on content, so
+// an edited body inserts a NEW row and the stale one sits there forever, still retrievable,
+// still asserting the old thing.
+//
+// **To recall:**
+// - **Claude Code:** automatic. Relevant memories are injected each turn by a
+//   UserPromptSubmit hook. You do nothing.
+// - **Kimi / other runtimes:** NOT automatic — there is no hook. Search explicitly with
+//   \`python "E:\\Repos\\_tmp\\kb-ask.py" "<question>" 5\` when you need prior context.
+//
+// Retrieved memories are point-in-time notes, not live state. Verify any \`file:line\`
+// claim against current code before asserting it as fact.
+//
+// Detail: the \`agent-memory\` skill. Background: \`E:\\Repos\\about_acp_vector_project.md\`.`;
+//
+// function withMemoryBriefing<T>(profile: T): T {
+//   if (!profile || typeof profile !== 'object') return profile;
+//   const p = profile as Record<string, unknown>;
+//   const existing = typeof p.profile === 'string' ? p.profile : '';
+//   return { ...p, profile: existing + MEMORY_BRIEFING } as T;
+// }
+
 // Decision-C / no-unjustified-fallback: NO dev-box default in a public build (the off-LAN
 // Praveen-class hazard + the SOURCE==ARTIFACT residue gate scans for these literals). null
 // when unset -> queryVibeSql hard-fails with a surfaced error. The day-one read path (profile
