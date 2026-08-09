@@ -132,19 +132,58 @@ queryable for anyone reconstructing what happened.
 The 7 existing `handoff_*` memories should be retro-dated as part of this work, or they
 will keep surfacing beside fresh ones.
 
-## 7. Recommended sequence
+## 7. Who fills the summary in — BUILT 2026-08-10
 
-1. **Write path now** — unblocked, independently useful, no API change. Includes deciding
-   who writes (Stop hook for Claude; open question for Kimi) and the summary's shape.
-2. **Retro-date the 7 existing `handoff_*` memories.** They are the same object and
-   currently permanent.
+Nothing did, originally: `kb_session_summary.py` is a pipe. Producing the text is the
+half that decides whether any of this is useful. Three candidates were considered:
+
+- **The agent writes its own.** Highest quality — it alone knows intent, what it
+  abandoned, what it never reached. But **sessions die without warning**, and the
+  summaries most worth having come from sessions that ended badly.
+- **A `Stop` hook.** Reliable on Claude runtimes, but `Stop` fires when the agent
+  finishes *responding*, not when the session ends — a summary per turn. And Kimi has
+  no hooks.
+- **A local model reads the transcript.** Survives a session dying mid-thought, needs
+  no cooperation from the agent, and works for **Kimi and Claude alike** because it
+  reads jsonl off disk rather than hooking a runtime.
+
+**Built: `acp-api/scripts/kb_summarize_transcript.py`** — the third. `qwen2.5-coder:7b`
+on `10.0.0.220` (the ops-observer model, already running). Prints to stdout and stores
+nothing, so a human or caller decides whether it is worth keeping.
+
+**Measured on a real transcript:** it produced correct branch, commit `8745f333` and
+file paths, or left the field empty — it invented nothing. It is also visibly **thin**:
+a 7B yields a skeleton, not the judgement an agent would write.
+
+**So: both, with provenance marked.** Agent-authored when there is a chance; this as the
+floor. `--source` records which, because *"BAPert wrote this"* and *"a 7B inferred it
+from a transcript"* deserve different trust at boot and a reader cannot otherwise tell.
+
+**Do NOT trigger it on transcript quiet.** Claude Code writes a transcript entry when a
+turn COMPLETES, so a long tool sequence is byte-identical to a wedge. Quiet-triggered
+summarisation would summarise agents mid-thought. Session end, or explicit invocation.
+
+Remaining unknown: transcript discovery. Session state lives in at least five
+directories under `~/.claude` and the set has grown every time anyone looked, so
+"find this agent's transcript" is its own small problem. Today the script globs
+`~/.claude/projects/*/*.jsonl` and takes newest-or-by-session-id, which is adequate for
+Claude and unproven for Kimi.
+
+## 8. Recommended sequence
+
+1. ~~**Write path**~~ — **DONE** (`kb_session_summary.py`, `kb_summarize_transcript.py`).
+2. ~~**Retro-date the existing `handoff_*` memories**~~ — **DONE**, 8 expired (not
+   deleted). Note the near-miss: matching `%handoff%` also caught 3 memories that are
+   NOT session state — doctrine on where working docs live, the active onboarding
+   bundle, and the streamjson branch handoff with open issues. All 3 restored. **Match
+   on the dated session-summary shape, not the word.**
 3. **Read path when acp-api has a `kb` connection** — append the latest
    `scope=agent, scope_id=<name>, expires_at > now()` summary to the profile response,
    beside the briefing.
-4. **Revisit the briefing.** It is already a cache of the `agent-memory` skill and drifted
-   twice in ninety minutes on 2026-08-10. Adding continuity to the same response makes
-   that response the single most important boot surface in the system — worth a deliberate
-   look at what belongs there rather than accreting.
+4. **Decide the trigger.** Session end is the obvious one; the ACP shell knows when a
+   pane dies and the agent does not.
+5. **Revisit the briefing.** It is already a cache of the `agent-memory` skill and
+   drifted twice in ninety minutes on 2026-08-10.
 
 ## 8. Open questions
 
