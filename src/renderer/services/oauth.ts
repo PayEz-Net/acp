@@ -403,6 +403,71 @@ interface IDPOAuthResult {
 }
 
 /**
+ * 175295 — PKCE code redemption via the IDP, replacing the renderer-side Google call.
+ *
+ * WHY THIS EXISTS
+ * `exchangeCodeForTokens` below POSTs `client_secret` to the provider FROM THE RENDERER,
+ * which makes the secret extractable from a shipped Electron build. Jon accepted that
+ * knowingly and temporarily. This is the permanent fix: the code and the PKCE verifier go
+ * to our IDP, the IDP holds the secret and calls the provider server-side, and the renderer
+ * never sees a client secret again.
+ *
+ * THREE REQUIREMENTS, each verified against the live endpoint 2026-08-09:
+ *   1. `X-Client-Id` is MANDATORY. Omitting it returns 404, NOT 401 — a missing-header
+ *      failure is indistinguishable from a missing route, and it cost several hours of
+ *      "the endpoint is not deployed" tonight. Send it or the call silently looks absent.
+ *   2. The body is snake_case (`code_verifier`, `redirect_uri`), not camelCase.
+ *   3. The client is identified by SLUG, never a numeric id. CLIENT_ID is
+ *      'idealvibe_online' and the IDP resolves it; do not substitute a number.
+ *
+ * NOT WIRED IN YET. `handleOAuthCallback` still uses the renderer-side path below. Switching
+ * it is a one-line change at that call site, deliberately left for a reviewer who can run a
+ * real Google round-trip — the only thing that proves this end to end. A bogus code returns
+ * CODE_EXCHANGE_FAILED, which is reachable only AFTER the IDP calls the provider, so that
+ * response confirms plumbing but not a successful login.
+ */
+export async function exchangeCodeWithIDP(
+  providerName: string,
+  code: string,
+  codeVerifier: string,
+  redirectUri: string
+): Promise<IDPOAuthResult> {
+  console.log('[OAuth] Redeeming code via IDP (no client_secret in renderer):', { provider: providerName });
+
+  const idpUrl = await getIdpUrl(); // env authority (IPC), no literal
+  const response = await fetch(`${idpUrl}/api/ExternalAuth/oauth-exchange`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Client-Id': CLIENT_ID, // MANDATORY — omitting this 404s, see (1) above
+      [IDP_CLIENT_APP_HEADER]: IDP_CLIENT_APP,
+    },
+    body: JSON.stringify({
+      provider: providerName,
+      code,
+      code_verifier: codeVerifier, // snake_case — see (2) above
+      redirect_uri: redirectUri,
+      app: IDP_CLIENT_APP,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    // 404 here is ambiguous by construction: it is returned both for an unknown route and
+    // for a rejected redemption. Say so rather than reporting "endpoint missing".
+    console.error('[OAuth] IDP code exchange failed:', response.status, detail);
+    throw new Error(
+      `IDP code exchange failed: ${response.status}` +
+        (response.status === 404
+          ? ' — 404 from this endpoint means EITHER a missing X-Client-Id header OR a code the IDP refused. It does not mean the route is absent.'
+          : '')
+    );
+  }
+
+  return (await response.json()) as IDPOAuthResult;
+}
+
+/**
  * Register OAuth user with IDP and get IDP tokens
  */
 export async function registerWithIDP(
