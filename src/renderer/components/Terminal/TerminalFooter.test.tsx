@@ -49,14 +49,16 @@ describe('TerminalFooter', () => {
         agent={makeAgent()}
         provider="claude"
         repoPath="E:\\repos\\acp-desktop"
-        lineCount={42}
         thinkingCount={1}
         contextUsage={33.3}
       />,
     );
     expect(container.textContent).toContain('claude');
     expect(container.textContent).toContain('repos\\acp-desktop');
-    expect(container.textContent).toContain('42 lines');
+    // `N lines` was removed: it answered no question. There is no good value
+    // for it, which is the tell — a count of scrolled output says nothing about
+    // whether the agent is healthy, stuck, expensive, or nearly out of context.
+    expect(container.textContent).not.toContain('lines');
     cleanup(root, container);
   });
 
@@ -77,7 +79,6 @@ describe('TerminalFooter', () => {
         agent={makeAgent()}
         provider="claude"
         repoPath="E:\\repos"
-        lineCount={10}
         thinkingCount={0}
         contextUsage={0}
       />,
@@ -101,7 +102,6 @@ describe('TerminalFooter', () => {
         agent={makeAgent()}
         provider={null}
         repoPath=""
-        lineCount={0}
         thinkingCount={0}
         contextUsage={0}
       />,
@@ -117,7 +117,6 @@ describe('TerminalFooter', () => {
         agent={makeAgent()}
         provider={null}
         repoPath="E:\\repos\\fallback"
-        lineCount={0}
         thinkingCount={0}
         contextUsage={0}
       />,
@@ -159,7 +158,6 @@ describe('TerminalFooter', () => {
         agent={agent}
         provider="kimi"
         repoPath="E:\\repos\\acp-desktop"
-        lineCount={0}
         thinkingCount={0}
         contextUsage={0}
       />,
