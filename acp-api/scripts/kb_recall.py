@@ -91,7 +91,7 @@ def emit_boot_summary(agent):
         "and (expires_at is null or expires_at > now()) "
         "order by created_at desc limit 1;\n")
     if out is None:
-        return
+        return False
     rows = []
     for ln in out.splitlines():
         if ln.count(SEP) == 2:
@@ -100,13 +100,87 @@ def emit_boot_summary(agent):
             rows[-1][2] += "\n" + ln
     if not rows:
         note(f"no stored session summary for {agent} — starting clean")
-        return
+        return False
     title, source, chunk = rows[0]
     print(f"Where {agent} left off. This is a stored summary of a PREVIOUS session, "
           f"not live state — the rig has restarted and other agents have moved since. "
           f"Verify anything here against the live system before acting on it.\n")
     print(f"<session-summary agent=\"{agent}\" source=\"{source}\">\n"
           f"{chunk.replace(chr(92) + 'n', chr(10)).strip()}\n</session-summary>\n")
+    return True
+
+
+# Identity markers, in confidence order. The agent's name is never in the hook
+# payload, so it is recovered from what the session has already done: the
+# onboarding banner, then the ACP calls it makes as itself.
+NOT_AN_AGENT = {"me", "agent", "name", "claude", "main", "test"}
+BOOT_STATE = os.path.join(os.path.expanduser("~"), ".claude", "kb-recall-boot")
+
+
+def resolve_agent():
+    """Who is this session? Ask the runtime, do not infer it.
+
+    ACP_AGENT_NAME is set per pane by the shell at spawn (pty.ts:1301) and hooks
+    inherit the process environment. It is authoritative: the shell decided who
+    this pane is before the agent said a word.
+
+    THREE INFERENCE ATTEMPTS FAILED FIRST, and each failed differently — worth
+    keeping, because each was plausible:
+
+      `report as <Agent>` in the prompt — the shell's first prompt is actually
+      `Begin.`, which carries no name and is below this hook's length floor, so
+      the trigger could never fire.
+
+      `X-ACP-Agent:` in the transcript — says who the session is CALLING AS, not
+      who it IS. My own transcript has 18 hits for BAPert; resolving on it would
+      have handed BAPert's state to a session that is not BAPert.
+
+      `✓ <Agent> initialized` onboarding banner — absent from every resumed
+      session, because resuming does not re-onboard. Zero matches on a real
+      BAPert transcript.
+
+    A value the runtime already knows beats three signals that only correlate
+    with it. Absent the variable, inject nothing: a session outside the ACP is
+    not an agent and has no summary to resume.
+    """
+    name = (os.environ.get("ACP_AGENT_NAME") or "").strip()
+    if not name or name.lower() in NOT_AN_AGENT:
+        return None
+    return name
+
+
+def try_boot_injection(payload):
+    """Inject this agent's own last summary ONCE per session. True if handled.
+
+    Not keyed on the prompt text. The shell's first prompt is `Begin.` — it
+    carries no agent name and is shorter than the hook's own length floor, so
+    anything triggered by matching it would never fire. Instead: on any prompt,
+    if this session has not yet been given its summary, work out who it is and
+    give it exactly one.
+    """
+    session = payload.get("session_id") or payload.get("sessionId")
+    if not session:
+        return False
+
+    marker = os.path.join(BOOT_STATE, str(session))
+    if os.path.exists(marker):
+        return False
+
+    agent = resolve_agent()
+    if not agent:
+        # Not an ACP pane (no ACP_AGENT_NAME). Not an error — this hook also
+        # runs in ordinary sessions, which have no agent identity and no
+        # summary to resume.
+        return False
+
+    try:
+        os.makedirs(BOOT_STATE, exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(agent)
+    except OSError:
+        pass  # marker is an optimisation; a repeat injection beats none
+
+    return emit_boot_summary(agent)
 
 
 def main():
@@ -117,6 +191,17 @@ def main():
     except Exception:
         return
     prompt = (payload.get("prompt") or "").strip()
+
+    # Boot injection runs BEFORE the length floor and regardless of the prompt
+    # text. MEASURED 2026-08-09: the shell's first prompt to a spawned agent is
+    # `Begin.` — six characters, under MIN_CHARS, so the hook returned before
+    # doing anything. My first attempt keyed on `report as <Agent>`, which is
+    # what pty.ts writes into the PTY, not what arrives as the hook's prompt.
+    # The agent's NAME is therefore not in the prompt at all, so identity has to
+    # come from the transcript.
+    if try_boot_injection(payload):
+        return
+
     if len(prompt) < MIN_CHARS:
         return
 
@@ -146,10 +231,6 @@ def main():
     #    left off inside someone else's work. kb_search's scope filter would
     #    have prevented it, but this hook passes NULL scope because in normal
     #    use it has no idea which agent it serves.
-    boot = re.match(r"^\s*report as ([A-Za-z][A-Za-z0-9_-]*)\s*$", prompt, re.I)
-    if boot:
-        emit_boot_summary(boot.group(1))
-        return
 
     q = prompt.replace("'", "''")
     # Two queries, because kb_search's rank SCALE still favours keywords:
