@@ -459,7 +459,7 @@ export async function exchangeCodeWithIDP(
     throw new Error(
       `IDP code exchange failed: ${response.status}` +
         (response.status === 404
-          ? ' — 404 from this endpoint means EITHER a missing X-Client-Id header OR a code the IDP refused. It does not mean the route is absent.'
+          ? ' — 404 here means the CLIENT could not be resolved: X-Client-Id absent, or a slug the IDP does not know. It is NOT a rejected code (that returns CODE_EXCHANGE_FAILED) and NOT a missing route (verified registered). All three answer 404 identically, which is why this message says which one it actually is.'
           : '')
     );
   }
