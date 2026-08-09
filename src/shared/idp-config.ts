@@ -15,7 +15,15 @@ export interface OAuthProviderConfig {
   provider: string;
   enabled: boolean;
   clientId: string;
-  clientSecret: string;
+  // clientSecret REMOVED (175295) — the desktop no longer performs a
+  // provider token exchange (that moved server-side to the IDP's
+  // oauth-exchange endpoint), so there is nothing here that should ever
+  // read a provider client_secret. The field previously existed only to be
+  // mapped in from the IDP's /client-config response and never used
+  // again — dead code that still captured a real secret into renderer
+  // memory. The IDP's /client-config response including a client_secret at
+  // all is a separate, tracked cleanup (BAPert, card 175295 follow-up); this
+  // type simply stops accepting it into the desktop's in-memory config.
   scopes?: string;
   additionalParams?: Record<string, string>;
 }

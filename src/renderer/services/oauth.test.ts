@@ -37,20 +37,10 @@ const SAMPLE_CONFIG_RESPONSE = {
   },
 };
 
-// TEMPORARILY SKIPPED 2026-08-08 — these assert the 175295 contract (desktop is a
-// PKCE public client posting code + code_verifier to /api/ExternalAuth/oauth-exchange).
-// That contract is CORRECT and is where we are going. It is not where we are today:
-// the IDP half was never built, so desktop OAuth login was dead all day and
-// oauth.ts was reverted to the working /oauth-callback path as a deliberate,
-// Jon-accepted temporary trade (it puts the provider client_secret back in the
-// renderer).
-//
-// Kept as .skip rather than rewritten to assert oauth-callback: rewriting them
-// would encode the temporary state as the expected one and quietly delete the
-// spec for the real fix. The endpoint now exists on branch
-// release/idp-oauth-exchange-tip in PayEz-Core (merged clean, builds, not yet
-// deployed). UNSKIP THE MOMENT THAT SHIPS — they should pass unchanged.
-describe.skip('oauth service (175295 — no client_secret in the desktop)', () => {
+// UNSKIPPED 2026-08-09 — oauth-exchange is deployed (external-id-api:oauth-exchange-1d5e75cf1,
+// verified reaching Google's token endpoint) and this file now implements the contract these
+// tests were written against. They pass unchanged, as promised when they were skipped.
+describe('oauth service (175295 — no client_secret in the desktop)', () => {
   let fetchSpy: MockInstance<Parameters<typeof fetch>, ReturnType<typeof fetch>>;
 
   beforeEach(() => {
