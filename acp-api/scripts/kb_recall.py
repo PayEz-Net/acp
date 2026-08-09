@@ -113,7 +113,7 @@ def emit_boot_summary(agent):
 # Identity markers, in confidence order. The agent's name is never in the hook
 # payload, so it is recovered from what the session has already done: the
 # onboarding banner, then the ACP calls it makes as itself.
-NOT_AN_AGENT = {"me", "agent", "name", "claude", "main", "test"}
+NOT_AN_AGENT = {"", "-", "unknown", "undefined", "null"}
 BOOT_STATE = os.path.join(os.path.expanduser("~"), ".claude", "kb-recall-boot")
 
 
