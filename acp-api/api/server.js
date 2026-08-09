@@ -42,6 +42,7 @@ import standupProxyRoutes from './routes/standupProxy.js';
 import documentRoutes from './routes/documents.js';
 import { AgentDocumentStore } from './storage/agentDocumentStore.js';
 import agentRoutes from './routes/agents.js';
+import sessionSummaryRoutes from './routes/sessionSummary.js';
 import teamRoutes from './routes/team.js';
 import teamsRoutes from './routes/teams.js';
 import cliProxyRoutes from './routes/cliProxy.js';
@@ -325,6 +326,9 @@ export async function createApp(cfg) {
   app.use('/v1/teams', teamsRoutes(appConfig));
   // Agent profile lookup (minimal - full management in acp-api-noaccount)
   app.use('/v1/agents', agentRoutes(storage));
+  // Boot continuity: serves an agent's last kb session summary to the boot
+  // prompt. Runtime-agnostic on purpose — Kimi has no kb_recall hook.
+  app.use('/v1/agents', sessionSummaryRoutes(storage));
 
   // Autonomy supervisor — single instance shared with routes and lifecycle hooks
   const supervisor = new Supervisor(storage, appConfig);
