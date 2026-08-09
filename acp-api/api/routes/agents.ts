@@ -214,11 +214,26 @@ is simply lost.
 \`\`\`
 python "E:\\Repos\\.claude\\hooks\\kb_remember.py" --title "<the fact, as a sentence>" \\
   --scope agent|project|standard --id <AgentName|projectId|feedback> \\
-  --source "<who, when, measured how>"   # body on stdin — --source is REQUIRED
+  --source "<who, when, measured how>" [--ttl 7d]   # body on stdin
 \`\`\`
 Write the chunk to stand alone: it is retrieved without its neighbours, so put the
 identifiers, file names, env vars and error strings in it VERBATIM. No credentials —
-the store is readable by every agent.
+the store is readable by every agent. \`--source\` is REQUIRED: a memory with no
+provenance is a rumour.
+
+**Decide permanent vs note AT WRITE TIME, while you still know which it is:**
+- **omit \`--ttl\`** → PERMANENT. Doctrine, references, facts you paid to learn.
+- **\`--ttl 7d\` / \`48h\`** → a QUICK NOTE. Stops being retrieved once it passes. Use it
+  for anything with a shelf life — a pending task, a checklist for a window, "X is
+  mid-flight". Without it, that note outranks nothing and outlives everything: it keeps
+  surfacing beside doctrine long after it went stale.
+
+Nobody ever goes back and retro-classifies, so there is no "mark it stale later".
+Expired is NOT deleted — the row stays and stays queryable, it just stops being injected.
+
+**Superseding a memory is DELETE-then-write, not write.** Dedupe is keyed on content, so
+an edited body inserts a NEW row and the stale one sits there forever, still retrievable,
+still asserting the old thing.
 
 **To recall:**
 - **Claude Code:** automatic. Relevant memories are injected each turn by a
