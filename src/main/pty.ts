@@ -419,7 +419,24 @@ const MAIL_POLL_INTERVAL_MS = 30000;
 const MAIL_POLL_JITTER_MAX_MS = 10000;
 const MAIL_POLL_BACKOFF_MAX_MS = 300000; // 5 min cap
 
-function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ response: any; statusCode?: number }> {
+// Card 193400: pageSize 50 measured at 85ms/message server-side (TOAST
+// detoast on the body column) — 50 x 85ms = 4250ms against a 5s VibeSQL
+// ceiling, observed maxima 4834-5114ms. Shrinking this alone was NOT SAFE:
+// the poller only ever read page 1 of a newest-first list, so a burst larger
+// than pageSize between two polls pushed the oldest of it off page 1 before
+// the poller ever looked — silent, permanent loss, not delay. The fix is
+// `page` support below plus a stop-at-watermark loop, which makes
+// correctness independent of this number — it is a pure cost/latency knob now.
+const MAIL_POLL_PAGE_SIZE = 20;
+// A page-count cap cannot be made safe by raising the number — the bound has
+// to be wall-clock/message-count so the loop genuinely keeps draining toward
+// the watermark instead of stopping arbitrarily. MAIL_POLL_CONTINUATION_PAGE_SIZE
+// widens subsequent fetches once genuinely paging past the steady-state page.
+const MAIL_POLL_CONTINUATION_PAGE_SIZE = 50;
+const MAIL_POLL_CYCLE_BUDGET_MS = 20000; // wall-clock ceiling for one poll cycle's paging, well under the 30s base interval
+const MAIL_POLL_MAX_MESSAGES_PER_CYCLE = 5000; // pure backstop against a pathological/degenerate response stream — should never bind given the wall-clock bound above
+
+function fetchUnreadInbox(agentName: string, projectId?: number, page = 1, pageSize = MAIL_POLL_PAGE_SIZE): Promise<{ response: any; statusCode?: number }> {
   return new Promise((resolve) => {
     const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
     const u = new URL(`/v1/mail/inbox/${encodeURIComponent(agentName)}`, apiBase);
@@ -433,7 +450,8 @@ function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ resp
     // We do not need the server's filter: this poller already de-dupes against its
     // own `seen` set, which is the authority on "not yet injected". Asking the
     // server to decide read-state was the dependency that broke us.
-    u.searchParams.set('pageSize', '50');
+    u.searchParams.set('pageSize', String(pageSize));
+    u.searchParams.set('page', String(page));
     if (projectId != null) {
       u.searchParams.set('project_id', String(projectId));
     }
@@ -457,7 +475,13 @@ function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ resp
       }
     );
     req.on('error', () => resolve({ response: null }));
-    req.setTimeout(3000, () => { req.destroy(); resolve({ response: null }); });
+    // Card 193400: server observed at 1732ms avg / 5114ms max against a 5s
+    // ceiling; a 3000ms client timeout was destroying in-flight requests the
+    // server went on to complete with 200 (0 server-side 5xx/timeouts, all
+    // failures client-side in the same window). 8000ms clears the observed
+    // server max with margin while staying well under the 30s+ poll interval,
+    // so a truly dead endpoint still gets caught promptly.
+    req.setTimeout(8000, () => { req.destroy(); resolve({ response: null }); });
   });
 }
 
@@ -537,6 +561,13 @@ function extractMessages(response: any): any[] {
 
 /** Consecutive inbox-poll failures per agent, so a dead delivery path is loud. */
 const mailPollFailures = new Map<string, number>();
+// Card 193400: `mailPollFailures` resets to 0 on every success, so n===1 meant
+// "first failure since the last success", not "first failure since boot" — a
+// timeout hours into a session printed a message asserting an auth-settling
+// cause that was never established. This tracks whether the poller has EVER
+// completed a 200 for this agent, so the boot-window message only fires when
+// that is actually true.
+const mailPollEverSucceeded = new Map<string, boolean>();
 
 function startInboxPoller(managed: ManagedPty): void {
   const { agentName, projectId } = managed;
@@ -544,6 +575,17 @@ function startInboxPoller(managed: ManagedPty): void {
   let firstPoll = true;
   // Cut-off between 'history to skip' and 'mail that arrived since we came up'.
   const pollerStartedAt = Date.now();
+  // Paging-stop watermark. THE TRAP: the obvious guard — "page while every id
+  // on the page is unseen" — walks the ENTIRE mailbox on every boot, because
+  // `seen` starts empty, so every page looks unseen and every full page keeps
+  // paging. The fix is to page on TIME, not set membership: page 1 is
+  // newest-first, so page while the page still contains messages newer than
+  // this watermark; stop the moment a page contains one at-or-older (or
+  // undateable) — everything past that point, on this page and every later
+  // one, is already known. Starts at pollerStartedAt and advances to the
+  // newest timestamp actually collected after every cycle, so later polls
+  // never re-walk history either.
+  let newestKnownAt = pollerStartedAt;
   const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
   let currentInterval = MAIL_POLL_INTERVAL_MS + Math.floor(Math.random() * MAIL_POLL_JITTER_MAX_MS);
   let consecutive429s = 0;
@@ -555,46 +597,165 @@ function startInboxPoller(managed: ManagedPty): void {
     managed.mailPollTimer = activeTimer;
   };
 
+  // Card 193400: page 1 alone is not safe at any pageSize, because page 1 of
+  // a newest-first list moves on. A burst larger than one page between two
+  // polls pushed the oldest of it off the page before this poller ever saw
+  // it — silently and permanently, not "delayed until next cycle". This
+  // pages forward while pages are still newer than `newestKnownAt`. In
+  // steady state this is exactly one request; it only pages further in the
+  // burst case that used to lose mail.
   const poll = async () => {
-    const { response, statusCode } = await fetchUnreadInbox(agentName, projectId);
+    const collected: any[] = [];
+    let page = 1;
+    let pageSizeForPage: number = MAIL_POLL_PAGE_SIZE;
+    let cappedOut = false;
+    const cycleStartedAt = Date.now();
 
-    // Back off on 429 so we don't DDoS the local API when many agents run.
-    if (statusCode === 429) {
-      consecutive429s++;
-      currentInterval = Math.min(
-        currentInterval * 2,
-        MAIL_POLL_BACKOFF_MAX_MS
-      );
-      console.warn(`[PTY] Mail poll 429 for ${agentName}, backing off to ${currentInterval}ms (streak: ${consecutive429s})`);
-      scheduleNext();
-      return;
-    }
+    while (true) {
+      const { response, statusCode } = await fetchUnreadInbox(agentName, projectId, page, pageSizeForPage);
 
-    if (statusCode !== 200) {
-      // LOUD. This used to return silently, so a permanently-failing inbox fetch
-      // looked identical to an empty inbox: pollers logged "Started" and then
-      // nothing, forever. A delivery path that cannot report its own failure is
-      // indistinguishable from one with nothing to deliver.
-      mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
-      const n = mailPollFailures.get(agentName)!;
-      if (n === 1 || n === 5 || n % 20 === 0) {
-        console.warn(
-          `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
-          `(${n} consecutive). Mail delivery to this pane is NOT working.`,
+      // Back off on 429 so we don't DDoS the local API when many agents run.
+      if (statusCode === 429) {
+        consecutive429s++;
+        currentInterval = Math.min(
+          currentInterval * 2,
+          MAIL_POLL_BACKOFF_MAX_MS
         );
+        console.warn(`[PTY] Mail poll 429 for ${agentName}, backing off to ${currentInterval}ms (streak: ${consecutive429s})`);
+        scheduleNext();
+        return;
       }
-      scheduleNext();
-      return;
-    }
-    mailPollFailures.set(agentName, 0);
 
-    // Success — gradually restore interval
-    consecutive429s = Math.max(0, consecutive429s - 1);
-    if (consecutive429s === 0 && currentInterval > MAIL_POLL_INTERVAL_MS) {
-      currentInterval = Math.max(MAIL_POLL_INTERVAL_MS, Math.floor(currentInterval / 2));
+      if (statusCode !== 200) {
+        if (page > 1) {
+          // Page 1 already succeeded this cycle — don't discard it or treat
+          // the cycle as failed. Log loudly (a burst this large plus a
+          // mid-paging failure is exactly the case the safety cap exists
+          // for) and process what was collected; the rest arrives next cycle.
+          console.warn(
+            `[PTY] Mail poll page ${page} failed for ${agentName} (HTTP ${statusCode ?? 'network'}) ` +
+            `— processing ${collected.length} message(s) collected before the failure.`,
+          );
+          break;
+        }
+        // LOUD. This used to return silently, so a permanently-failing inbox fetch
+        // looked identical to an empty inbox: pollers logged "Started" and then
+        // nothing, forever. A delivery path that cannot report its own failure is
+        // indistinguishable from one with nothing to deliver.
+        mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
+        const n = mailPollFailures.get(agentName)!;
+        const everSucceeded = mailPollEverSucceeded.get(agentName) ?? false;
+        if (n === 1 && !everSucceeded) {
+          // Attempt 1 is the boot window, not a fault. The poller starts at spawn
+          // while the bearer is still being established, so the first poll
+          // routinely fails and the next one succeeds — every agent, every boot.
+          // Declaring "NOT working" here conflated a transient startup condition
+          // with a permanent one. Escalate only once it is genuinely a streak.
+          console.log(
+            `[PTY] Mail poll for ${agentName} failed on first attempt ` +
+            `(HTTP ${statusCode ?? 'network'}) — auth may still be settling; retrying.`,
+          );
+        } else if (n === 1) {
+          // This agent has polled successfully before, so this is a
+          // mid-session transient (e.g. a slow-but-completing server response
+          // outrunning the client timeout), NOT a boot-auth condition. Do not
+          // assert a cause that was never established.
+          console.log(
+            `[PTY] Mail poll for ${agentName} failed (HTTP ${statusCode ?? 'network/timeout'}) ` +
+            `— transient, retrying next cycle.`,
+          );
+        } else if (n === 5 || n % 20 === 0) {
+          console.warn(
+            `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
+            `(${n} consecutive). Mail delivery to this pane is NOT working.`,
+          );
+        }
+        scheduleNext();
+        return;
+      }
+
+      if (page === 1) {
+        mailPollFailures.set(agentName, 0);
+        mailPollEverSucceeded.set(agentName, true);
+
+        // Success — gradually restore interval
+        consecutive429s = Math.max(0, consecutive429s - 1);
+        if (consecutive429s === 0 && currentInterval > MAIL_POLL_INTERVAL_MS) {
+          currentInterval = Math.max(MAIL_POLL_INTERVAL_MS, Math.floor(currentInterval / 2));
+        }
+      }
+
+      const pageMessages = extractMessages(response);
+      collected.push(...pageMessages);
+
+      // Strict '<' (not '<=') at the watermark: a message exactly at
+      // newestKnownAt is treated as still-possibly-new rather than a stop
+      // signal, so a tie at the boundary costs one extra page rather than a
+      // silently dropped sibling with an identical timestamp.
+      const reachedWatermark = pageMessages.some((m: any) => {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        return Number.isNaN(ts) || ts < newestKnownAt;
+      });
+
+      if (reachedWatermark || pageMessages.length < pageSizeForPage) break;
+
+      // The bound is WALL-CLOCK / total MESSAGE COUNT, not page count — a
+      // page-count cap cannot be made safe by raising the number. This keeps
+      // genuinely paging toward the watermark until either it arrives or one
+      // of these two backstops fires.
+      const elapsedMs = Date.now() - cycleStartedAt;
+      if (elapsedMs >= MAIL_POLL_CYCLE_BUDGET_MS || collected.length >= MAIL_POLL_MAX_MESSAGES_PER_CYCLE) {
+        cappedOut = true;
+        break;
+      }
+      page++;
+      // Once genuinely paging past the steady-state page, widen subsequent
+      // fetches — more ground covered per round trip before the
+      // wall-clock/count backstop can fire.
+      pageSizeForPage = MAIL_POLL_CONTINUATION_PAGE_SIZE;
     }
 
-    const messages = extractMessages(response);
+    if (cappedOut) {
+      // Loud AND accurate about the consequence: this does NOT retry
+      // automatically.
+      let oldestCollectedAt = 'unknown';
+      for (const m of collected) {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        if (!Number.isNaN(ts)) {
+          const iso = new Date(ts).toISOString();
+          if (oldestCollectedAt === 'unknown' || iso < oldestCollectedAt) oldestCollectedAt = iso;
+        }
+      }
+      console.warn(
+        `[PTY] Mail paging cycle budget hit for ${agentName}: ${Date.now() - cycleStartedAt}ms / ` +
+        `${MAIL_POLL_CYCLE_BUDGET_MS}ms wall-clock, ${collected.length} messages collected this cycle ` +
+        `(oldest at ${oldestCollectedAt}) — an abnormal burst. The watermark is intentionally left ` +
+        `UNCHANGED (newestKnownAt must never advance past it), so the next cycle resumes paging from the ` +
+        `same point rather than skipping past history it never fetched. This is NOT automatic and NOT ` +
+        `guaranteed to converge on a sustained flood — recurrence needs investigation.`,
+      );
+    } else {
+      // *** THE INVARIANT THAT MAKES ANY OF THIS CORRECT: *** THE WATERMARK
+      // MUST NEVER ADVANCE PAST THE OLDEST MESSAGE CONTIGUOUSLY COLLECTED.
+      // Only safe to advance here because `!cappedOut` means paging ended by
+      // genuinely reaching the watermark or a short page — i.e. every
+      // message back to the true prior boundary is accounted for, with no
+      // gap. Advancing on a capped cycle declares data "known" that was
+      // never fetched, which is how a bounded cap turns back into silent,
+      // permanent loss.
+      for (const m of collected) {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        if (!Number.isNaN(ts) && ts > newestKnownAt) newestKnownAt = ts;
+      }
+    }
+
+    // Page 1 is newest-first and pages are appended in that order, so
+    // `collected` is newest-to-oldest end-to-end. Injection below writes
+    // sequentially into the PTY, so left as-is a paginated batch would land
+    // newest-first — invisible at one or two messages, but an agent reading a
+    // large catch-up backwards can act on a reply before its question.
+    // Reverse once here so injection order is oldest-first.
+    const messages = collected.slice().reverse();
     if (firstPoll) {
       // Baseline HISTORY, not everything. Now that we fetch the full inbox (the
       // cloud's unread filter is broken — see fetchUnreadInbox), a blanket
