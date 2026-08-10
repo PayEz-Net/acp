@@ -9,6 +9,31 @@ import * as projectsCache from '../projects/cache.js';
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
 
+// Card 206003 (carried out of 193400 - the payload half never shipped):
+// GET /v1/mail/inbox measured at 51,739 bytes for 20 messages, 72% of it full
+// body text nobody reads in the list view. Truncate here, in the sidecar, so
+// the cloud contract stays untouched. has_more tells a consumer the body was
+// cut; anyone that needs the full text calls GET /v1/mail/messages/:id, which
+// this route does NOT touch (mail_read handler above stays full-body).
+const MAIL_LIST_BODY_PREVIEW_CHARS = 200;
+
+function previewInboxMessages(messages: unknown[]): unknown[] {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    const msg = m as Record<string, unknown>;
+    const body = msg.body;
+    if (typeof body !== 'string' || body.length <= MAIL_LIST_BODY_PREVIEW_CHARS) {
+      return { ...msg, has_more: false };
+    }
+    return {
+      ...msg,
+      body: body.slice(0, MAIL_LIST_BODY_PREVIEW_CHARS),
+      has_more: true,
+    };
+  });
+}
+
 export class NotAuthenticatedError extends Error {
   constructor() {
     super('No active IDP session — user must log in via POST /v1/auth/login');
@@ -234,6 +259,15 @@ export default function mailProxyRoutes(
         return;
       }
 
+      // Card 206003: truncate bodies for the list view; full text is a
+      // by-id fetch away (GET /v1/mail/messages/:id, untouched by this route).
+      if (result.status >= 200 && result.status < 300) {
+        const payload = result.data as any;
+        if (payload?.data && Array.isArray(payload.data.messages)) {
+          payload.data.messages = previewInboxMessages(payload.data.messages);
+        }
+      }
+
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_inbox');
@@ -299,8 +333,10 @@ export default function mailProxyRoutes(
 
             if (result.status >= 200 && result.status < 300) {
               const data = (result.data as any)?.data ?? {};
+              // Card 206003: same list-payload truncation as GET /inbox/:agent —
+              // this fan-out hits the identical upstream shape per agent.
               inboxes[agent] = {
-                messages: Array.isArray(data.messages) ? data.messages : [],
+                messages: Array.isArray(data.messages) ? previewInboxMessages(data.messages) : [],
                 unread_count: typeof data.unread_count === 'number' ? data.unread_count : 0,
               };
             } else {
