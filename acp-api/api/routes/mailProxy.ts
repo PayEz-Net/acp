@@ -335,9 +335,30 @@ export default function mailProxyRoutes(
     }
   });
 
-  // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
-  router.get('/messages/:message_id', async (req: Request, res: Response) => {
+  // GET /v1/mail/sent/:agent -> idealvibe.online/v1/agentmail/sent/:agent
+  // 170011 (design item 2): the sender's outbox. Until the cloud endpoint
+  // existed, no sender could audit its own delivery. Same project_id stamp as
+  // every other route here.
+  router.get('/sent/:agent', async (req: Request, res: Response) => {
     try {
+      const projectId = resolveCurrentProjectId();
+      const query: Record<string, any> = { ...(req.query as Record<string, any>) };
+      if (projectId != null && query.project_id == null) {
+        query.project_id = projectId;
+      }
+      const result = await proxyToCloud(cfg, `/sent/${encodeURIComponent(String(req.params.agent))}`, 'GET', query);
+      if (isSessionInactiveResult(result.status, result.data)) {
+        rewriteSessionInactive(res, req, 'mail_sent', `sent/${req.params.agent}`);
+        return;
+      }
+      res.status(result.status).json(result.data);
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'mail_sent');
+    }
+  });
+
+  // GET /v1/mail/messages/:message_id -> idealvibe.online/v1/agentmail/messages/:message_id
+  router.get('/messages/:message_id', async (req: Request, res: Response) => {    try {
       const projectId = resolveCurrentProjectId();
       const query: Record<string, any> = { ...(req.query as Record<string, any>) };
       if (projectId != null) {
