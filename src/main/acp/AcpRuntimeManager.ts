@@ -538,6 +538,19 @@ export class AcpRuntimeManager extends EventEmitter {
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
     if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
+    // Effort rides an ENV VAR, so it never appears in the spawn command line the
+    // way --model does. Until this line existed, the ONLY output was a warning on
+    // an INVALID value — which meant "no warning" read identically for "applied
+    // correctly" and "never set at all", and a whole session ran on unverified
+    // token settings. State it either way, so the pane and the log can be read
+    // as evidence instead of inference.
+    console.log(
+      `[ACP ${this.options.agentName}] thinking effort: ` +
+      (k3Effort
+        ? `${k3Effort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
+        : `NONE INJECTED (model=${this.options.modelOverride ?? 'inherit'}, effort_override=${this.options.effort ?? 'unset'})` +
+          ` — effort applies only to k3-family models explicitly overridden`),
+    );
     this.process = new AcpProcess({
       command,
       args,
