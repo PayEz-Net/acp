@@ -353,11 +353,19 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // "report as" skill kickoff.
     const cloudBootPrompt = await fetchBootPrompt(projectId, member.agent_id);
     const localBootPrompt = localBootPrompts.get(member.agent_name) ?? buildAgentBootPrompt(member.agent_name);
-    // Jon 2026-08-01: NO ONBOARDING. Boot bare — no cloud or synthesized
-    // onboarding prompt is injected at spawn. Each onboarding prompt was a
-    // turn-stack item multiplied by every agent on every boot; agents get
-    // their context from work, not from a welcome wall of text.
-    const bootPrompt = undefined;
+    // Jon 2026-08-10: THE NO-ONBOARDING RULING IS RESCINDED. It was made
+    // 2026-08-01 against a welcome WALL OF TEXT, and it was right then. What it
+    // silently also blocked was the session summary, which did not exist yet:
+    // under the fresh-session-per-launch rotation policy a Kimi agent has NO
+    // kb_recall hook and NO resumable session, so with the prompt suppressed it
+    // boots with literally no prior context. Jon hit this directly — he told the
+    // team to "resume session" and they had no idea what he meant, because there
+    // was nothing to resume and nothing had been handed to them.
+    //
+    // Prefer the LOCAL synthesized prompt: it is the only one carrying the
+    // session summary (buildAgentBootPrompt renders "Where you left off" from
+    // the prefetched summary). The cloud Wave-D prompt does not.
+    const bootPrompt = localBootPrompt?.trim() ? localBootPrompt : (cloudBootPrompt ?? undefined);
     if (cloudBootPrompt?.trim()) {
       console.log(`[SpawnOrch] using cloud boot-prompt for ${member.agent_name}`);
     } else {
