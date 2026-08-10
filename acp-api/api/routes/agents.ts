@@ -275,36 +275,67 @@ interface CloudProfileShape {
  */
 function withWorktreeHome<T>(profile: T, agentName: string): T {
   try {
+    // ===================== JONS-MACBOOK-SWITCH =====================
+    // Grep this token to find every machine-specific path decision when
+    // setting up or switching between the Windows box and jons-macbook.
+    //
+    // Windows box : C:\Users\jon-local\AgentRepos\<Agent>\<repo>
+    // jons-macbook: NOT DECIDED YET. Set ACP_AGENT_REPOS_ROOT in the Mac's
+    //               environment rather than editing this line, so the two
+    //               machines never need different code.
+    //
+    // The default below already resolves per-machine (os.homedir()), so a Mac
+    // with no env var lands on /Users/<you>/AgentRepos. That is a sane landing
+    // spot, NOT a decision - change it deliberately when you pick one.
+    // ===============================================================
     const root = process.env.ACP_AGENT_REPOS_ROOT
       || path.join(os.homedir(), 'AgentRepos');
     const mine = path.join(root, agentName);
-    if (!fs.existsSync(mine)) return profile;
-    const repos = fs.readdirSync(mine, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
-    if (!repos.length) return profile;
 
-    const lines = repos.map((r) => '- ' + path.join(mine, r)).join(String.fromCharCode(10));
-    const section = `
+    let existing: string[] = [];
+    try {
+      existing = fs.readdirSync(mine, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch { /* no folder yet — expected; the agent makes it */ }
 
----
+    const have = existing.length
+      ? 'You already have: ' + existing.map((r) => path.join(mine, r)).join(', ')
+      : 'You do not have one yet. Make it before you edit anything.';
 
-## Your git worktree — work HERE, not in the shared repo
+    const section = [
+      '',
+      '---',
+      '',
+      '## Work in YOUR OWN git worktree, never the shared repo',
+      '',
+      'Pattern:  ' + path.join(root, '<YourAgentName>', '<repo>'),
+      'Yours:    ' + path.join(mine, '<repo>'),
+      '',
+      have,
+      '',
+      'If it does not exist, create it yourself from the canonical repo:',
+      '',
+      '    cd <canonical repo, e.g. E:\Repos\PayEz-Core>',
+      '    git worktree add -b home/<youragentname> "' + path.join(mine, '<repo>') + '" <base-branch>',
+      '',
+      'A worktree shares the object store and refs with the canonical repo but has',
+      'its own working directory and its own checked-out branch. Commit in yours and',
+      'it is visible everywhere immediately. Switch branches in yours freely.',
+      '',
+      'DO NOT check out branches in the canonical trees under E:\Repos. They are shared,',
+      'and acp-desktop is the tree the ACP itself runs from — switching it has already',
+      'broken a live session. Read from them; never switch them.',
+      '',
+      'IF YOU ARE ON MORE THAN ONE PROJECT and they use the same repo, the path above',
+      'collides with itself. Suffix the project id — <repo>-<projectId> — and say so in',
+      'your next report so the convention gets settled rather than guessed at twice.',
+      '',
+    ].join(String.fromCharCode(10));
 
-${lines}
-
-This is a git worktree: same object store and refs as the canonical repo, but its
-own working directory and its own checked-out branch. Commit here and it is
-immediately visible everywhere else. Switch branches here freely — it affects
-nobody.
-
-**Do not check out branches in the canonical trees under \`E:\Repos\`.** Those are
-shared: \`acp-desktop\` is what the ACP itself runs from, and switching it has
-already broken a live session. Read from them if you must; never switch them.
-`;
     const p2 = profile as unknown as { profile?: string };
-    const existing = typeof p2?.profile === 'string' ? p2.profile : '';
-    return { ...(profile as object), profile: existing + section } as T;
+    const prev = typeof p2?.profile === 'string' ? p2.profile : '';
+    return { ...(profile as object), profile: prev + section } as T;
   } catch {
     return profile;
   }
