@@ -87,6 +87,10 @@ export const config = {
   vibeAuthMode: process.env.VIBE_AUTH_MODE || 'bearer',
   vibeSigningKey: process.env.VIBE_SIGNING_KEY || '',
   execTimeoutMs: parseInt(process.env.EXEC_TIMEOUT_MS ?? '', 10) || 5000,
+  // Shared kb (pgvector) store. Used ONLY to put an agent's last session
+  // summary into its boot prompt. Unset = agents boot with no prior context,
+  // which is logged loudly once rather than failing — see routes/sessionSummary.
+  kbDatabaseUrl: process.env.KB_DATABASE_URL || '',
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',

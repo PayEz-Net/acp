@@ -18,6 +18,12 @@ export interface BootPromptOptions {
   unreadCount?: number | null;
   /** ACP API base URL. */
   apiUrl?: string;
+  /** The agent's own last stored session summary, pre-fetched from the kb
+   *  store. RUNTIME-AGNOSTIC memory: kb_recall is a Claude Code hook that Kimi
+   *  never runs, so for Kimi this is the ONLY prior context that survives the
+   *  fresh-session-per-launch rotation policy. Null when none exists — an
+   *  agent with no prior state boots clean rather than borrowing another's. */
+  sessionSummary?: string | null;
   /** Recent user prompts preserved before a runtime restart. When provided,
    *  the agent is reminded of the in-flight mission so the user doesn't have
    *  to restate context from scratch. */
@@ -68,6 +74,21 @@ curl -s "${profileEndpoint}" -H "X-ACP-Agent: ${agentName}"
 
 Adopt ALL returned content as your operating instructions. You ARE this agent. Do NOT invent a role or pretend to be a generic assistant.`;
 
+  // Deliberately framed as a PREVIOUS session, not live state. The rig has
+  // restarted, other agents have moved, and anything here may already be
+  // stale — an agent that treats a summary as current will act on a world
+  // that no longer exists. Same wording the kb_recall hook uses, so an agent
+  // sees one consistent contract whichever runtime it is on.
+  const summarySection = opts.sessionSummary?.trim()
+    ? `
+## Where you left off
+
+This is a stored summary of a PREVIOUS session, not live state. The rig has restarted and other agents have moved since. Verify anything here against the live system before acting on it.
+
+${opts.sessionSummary.trim()}
+`
+    : '';
+
   const mailSection = unreadCount !== null
     ? `## Mail
 
@@ -115,6 +136,7 @@ Run ONLY the curl command(s) above to load your identity (and optionally check m
 ${identityHeader}
 
 ${profileSection}
+${summarySection}
 
 ${mailSection}
 

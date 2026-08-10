@@ -58,3 +58,34 @@ describe('session label (emergency-resume discoverability)', () => {
     expect(prompt).toMatch(/^\[ACP-NextPert — \d{4}-\d{2}-\d{2} \d{2}:\d{2}\]/);
   });
 });
+
+describe('buildAgentBootPrompt — session summary (boot continuity)', () => {
+  it('includes the summary when one is supplied', () => {
+    const out = buildAgentBootPrompt('BAPert', { sessionSummary: 'Ruled on the tenancy question; guards planted.' });
+    expect(out).toContain('Where you left off');
+    expect(out).toContain('Ruled on the tenancy question; guards planted.');
+  });
+
+  it('frames it as a PREVIOUS session, not live state', () => {
+    // An agent that reads a summary as current will act on a world that has
+    // moved. The framing is the safety property, not decoration.
+    const out = buildAgentBootPrompt('BAPert', { sessionSummary: 'anything' });
+    expect(out).toContain('PREVIOUS session');
+    expect(out).toContain('not live state');
+    expect(out).toMatch(/verify/i);
+  });
+
+  it('emits NOTHING when there is no summary — an agent with no prior state boots clean', () => {
+    for (const empty of [undefined, null, '', '   ']) {
+      const out = buildAgentBootPrompt('QAPert', { sessionSummary: empty as any });
+      expect(out).not.toContain('Where you left off');
+    }
+  });
+
+  it('does not leak another agent\'s summary through the name', () => {
+    // Scoping is enforced server-side by exact scope_id match; this asserts the
+    // prompt renders only what it was handed and invents nothing.
+    const out = buildAgentBootPrompt('QAPert', { sessionSummary: null as any });
+    expect(out).not.toContain('NightHawk');
+  });
+});

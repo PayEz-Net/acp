@@ -25,7 +25,8 @@ import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
-import { acpApiGetAgentProfile, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
+import { acpApiGetAgentProfile,
+  acpApiGetSessionSummary, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
 import { narrowClaudeEffort } from '../shared/types';
 
@@ -138,7 +139,12 @@ async function buildLocalBootPrompt(agentName: string): Promise<string> {
   // fire a tool call during its initial turn, which was the root cause of the
   // Kimi ACP state-machine race that left Nextpert-Scout (and any other
   // dynamically-named agent) unable to start.
-  const [profile, unreadCount] = await Promise.all([
+  // sessionSummary is fetched alongside, NOT after: it must not add latency to
+  // the spawn path. It is also the only one of the three that is runtime-
+  // agnostic memory — Kimi has no kb_recall hook, so without this a Kimi agent
+  // boots with no prior context at all under the fresh-session-per-launch
+  // rotation policy.
+  const [profile, unreadCount, sessionSummary] = await Promise.all([
     acpApiGetAgentProfile(agentName).catch((err) => {
       console.warn(`[SpawnOrch] profile fetch failed for ${agentName}:`, err);
       return null;
@@ -147,9 +153,13 @@ async function buildLocalBootPrompt(agentName: string): Promise<string> {
       console.warn(`[SpawnOrch] unread mail fetch failed for ${agentName}:`, err);
       return null;
     }),
+    acpApiGetSessionSummary(agentName).catch((err) => {
+      console.warn(`[SpawnOrch] session summary fetch failed for ${agentName}:`, err);
+      return null;
+    }),
   ]);
-  console.log(`[SpawnOrch] boot prompt data for ${agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'missing'}`);
-  return buildAgentBootPrompt(agentName, { profile, unreadCount });
+  console.log(`[SpawnOrch] boot prompt data for ${agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'missing'} summary=${sessionSummary ? `${sessionSummary.length}c` : 'none'}`);
+  return buildAgentBootPrompt(agentName, { profile, unreadCount, sessionSummary });
 }
 
 async function fetchBootPrompt(projectId: number, agentId: number): Promise<string | null> {
