@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { createHash } from 'node:crypto';
 import { error } from '../response.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
@@ -164,6 +165,17 @@ const SESSION_INACTIVE_REWRITE_MESSAGE =
   'This is NOT about you: your agent session is live and you are fully active. ' +
   'Retry this exact call in about 30 seconds and continue working normally.';
 
+// 118552: on SEND the bare "retry this exact call" prescription manufactured
+// duplicates (5 copies, one body, measured) because send was not idempotent.
+// Sends now carry an idempotency key (caller-supplied, or the sidecar-derived
+// content hash below), so the retry wording must say VERBATIM: a verbatim
+// retry dedupes to the original; an edited re-send is a new message.
+const SESSION_INACTIVE_REWRITE_MESSAGE_SEND =
+  'The mail platform had a transient hiccup (stale session-registration data upstream — it typically recovers within a minute). ' +
+  'This is NOT about you: your agent session is live and you are fully active. ' +
+  'Your send may or may not have landed. Retry the EXACT SAME send (verbatim, unedited) in about 30 seconds: ' +
+  'identical sends are deduplicated server-side by content key, so a verbatim retry cannot double-post — but an edited re-send can.';
+
 function rewriteSessionInactive(
   res: Response,
   req: Request,
@@ -173,8 +185,11 @@ function rewriteSessionInactive(
   console.warn(
     `[mailProxy] upstream SESSION_INACTIVE on ${routeLabel} — rewriting to transient 503 so the agent does not read it as deactivation`,
   );
+  const message = operation === 'mail_send'
+    ? SESSION_INACTIVE_REWRITE_MESSAGE_SEND
+    : SESSION_INACTIVE_REWRITE_MESSAGE;
   res.status(503).json(
-    error('MAIL_UPSTREAM_TRANSIENT', SESSION_INACTIVE_REWRITE_MESSAGE, operation, (req as any).requestId)
+    error('MAIL_UPSTREAM_TRANSIENT', message, operation, (req as any).requestId)
   );
 }
 
@@ -414,6 +429,18 @@ export default function mailProxyRoutes(
       // Cloud-side enforcement is the final say (per WO §Cloud API).
       const projectId = resolveCurrentProjectId();
       const forwardBody: Record<string, unknown> = { ...(req.body ?? {}) };
+      // 118552: idempotent send. The SESSION_INACTIVE rewrite (and the boot
+      // prompt) prescribe a verbatim retry; without a dedupe key that retry
+      // double-posts — the 5-copies-one-body incident this card measured.
+      // When the caller supplies no key, derive a stable content hash so the
+      // cloud can return the ORIGINAL message to a verbatim retry instead of
+      // posting a copy. Verbatim retries hash identically; an edited re-send
+      // intentionally does not.
+      if (forwardBody.idempotency_key == null) {
+        const { subject: s = '', body: b = '', cc = null } = req.body ?? {};
+        const keyMaterial = JSON.stringify([from_agent, to, cc, s, b]);
+        forwardBody.idempotency_key = `sha256:${createHash('sha256').update(keyMaterial).digest('hex')}`;
+      }
       if (projectId != null) {
         forwardBody.project_id = projectId;
       } else {

@@ -147,7 +147,7 @@ ${toolBan}
 
 ## Platform errors
 
-If a mail or profile API call ever returns an error containing \`SESSION_INACTIVE\` or "Session is not active", that is a transient mail-platform hiccup about session-registration data upstream — it is NEVER about you. Your session is live. Retry the call after ~30 seconds and keep responding normally; never go silent or stop working because of it.
+If a mail or profile API call ever returns an error containing \`SESSION_INACTIVE\` or "Session is not active", that is a transient mail-platform hiccup about session-registration data upstream — it is NEVER about you. Your session is live. Retry the call after ~30 seconds and keep responding normally; never go silent or stop working because of it. If the call was a mail SEND, retry it VERBATIM — identical re-sends are deduplicated server-side by content key, so a verbatim retry cannot double-post, but an EDITED re-send can.
 
 ## Project instructions
 
