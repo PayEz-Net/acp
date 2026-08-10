@@ -6,6 +6,7 @@ import * as projectsCache from '../projects/cache.js';
 import { requireStartedProjectId, ProjectNotEngagedError } from '../projects/startedProject.js';
 
 import { fileURLToPath } from 'url';
+import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -254,6 +255,61 @@ interface CloudProfileShape {
  * POST /v1/status instructions are no longer mounted and should not be
  * surfaced to avoid confusion.
  */
+/**
+ * Appends the agent's OWN git worktree location to its profile.
+ *
+ * WHY THIS IS SERVED, not documented: every agent shared ONE checkout per repo,
+ * and that produced measured collisions - NextPert branched/merged inside the
+ * tree the rig runs from and left it detached; DotNetPert's card-204368 commits
+ * landed on a branch belonging to someone else because the shared tree was on
+ * it. Telling agents once by mail fixes that day's team and nobody after.
+ *
+ * DERIVED, NOT HARDCODED. The root comes from ACP_AGENT_REPOS_ROOT, defaulting
+ * to <home>/AgentRepos, and the repos listed are the directories that ACTUALLY
+ * EXIST under <root>/<agent>/. An agent with no worktree gets no section rather
+ * than a promise of a path that isn't there — a wrong path is worse than none,
+ * because it sends someone to create work in a folder nobody reads.
+ *
+ * FAILS SOFT. Any error returns the profile untouched: a missing worktree is a
+ * degraded onboarding, an exception here is a dead agent.
+ */
+function withWorktreeHome<T>(profile: T, agentName: string): T {
+  try {
+    const root = process.env.ACP_AGENT_REPOS_ROOT
+      || path.join(os.homedir(), 'AgentRepos');
+    const mine = path.join(root, agentName);
+    if (!fs.existsSync(mine)) return profile;
+    const repos = fs.readdirSync(mine, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+    if (!repos.length) return profile;
+
+    const lines = repos.map((r) => '- ' + path.join(mine, r)).join(String.fromCharCode(10));
+    const section = `
+
+---
+
+## Your git worktree — work HERE, not in the shared repo
+
+${lines}
+
+This is a git worktree: same object store and refs as the canonical repo, but its
+own working directory and its own checked-out branch. Commit here and it is
+immediately visible everywhere else. Switch branches here freely — it affects
+nobody.
+
+**Do not check out branches in the canonical trees under \`E:\Repos\`.** Those are
+shared: \`acp-desktop\` is what the ACP itself runs from, and switching it has
+already broken a live session. Read from them if you must; never switch them.
+`;
+    const p2 = profile as unknown as { profile?: string };
+    const existing = typeof p2?.profile === 'string' ? p2.profile : '';
+    return { ...(profile as object), profile: existing + section } as T;
+  } catch {
+    return profile;
+  }
+}
+
 function stripSelfManagedStatus(profile: string): string {
   // Match the section from a `---` rule followed by `## Self-managed status`
   // up to the next `---` rule or end of string. Then tidy leftover whitespace.
@@ -635,7 +691,7 @@ export default function agentRoutes(_storage: any): Router {
           console.warn(`[agent_profile] Could not resolve name "${identifier}" to id via cloud /v1/agentmail/agents — falling back to SessionManager thin shape`);
           const basic = await _storage.getAgentProfileFromGlobal(identifier);
           if (basic) {
-            res.json(success(basic, 'agent_profile', (req as any).requestId));
+            res.json(success(withWorktreeHome(basic, identifier), 'agent_profile', (req as any).requestId));
             return;
           }
           res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
@@ -665,7 +721,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud unreachable for /v1/agents/${agentId}/profile (${profileResult.error}) — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withWorktreeHome(basic, identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(503).json(error('UPSTREAM_UNAVAILABLE', `Cloud unreachable: ${profileResult.error}`, 'agent_profile', (req as any).requestId));
@@ -681,7 +737,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud returned HTTP ${profileResult.status} for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withWorktreeHome(basic, identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(profileResult.status).json(error('UPSTREAM_ERROR', `Cloud returned HTTP ${profileResult.status}`, 'agent_profile', (req as any).requestId));
@@ -694,7 +750,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud response missing data.profile for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(basic, 'agent_profile', (req as any).requestId));
+          res.json(success(withWorktreeHome(basic, identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(502).json(error('UPSTREAM_BAD_SHAPE', 'Cloud response missing profile data', 'agent_profile', (req as any).requestId));
@@ -706,7 +762,7 @@ export default function agentRoutes(_storage: any): Router {
         displayName: displayName,
       });
 
-      res.json(success(profile, 'agent_profile', (req as any).requestId));
+      res.json(success(withWorktreeHome(profile, identifier), 'agent_profile', (req as any).requestId));
     } catch (err: any) {
       if (err instanceof ProjectNotEngagedError) {
         res.status(err.status).json(error(err.code, err.message, 'agent_profile', (req as any).requestId));
