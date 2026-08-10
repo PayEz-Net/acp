@@ -277,6 +277,77 @@ workaround: **the shape is right for the destination, not for today's sources.**
 
 ---
 
+## 7a. Kimi `--output-format stream-json` — read from source, and why it is NOT the rig's path
+
+Verified 2026-08-10 against `E:\Repos\kimi-code-reference` pulled to `0401ec42` (11 hours
+old at time of reading), not from documentation. Two claims in circulation about this
+flag are wrong in ways that would have shaped the design badly.
+
+**It is prompt-mode only, structurally.** `apps/kimi-code/src/cli/options.ts:26`:
+
+```ts
+if (opts.prompt === undefined) return 'text';
+```
+
+The `--output-format` flag and its `KIMI_MODEL_OUTPUT_FORMAT` env var resolve to `text`
+whenever `-p` is absent, and the file's own comment says the env var "is ignored outside
+prompt mode so an ambient value never affects interactive `kimi`". **There is no path by
+which an interactive session emits JSONL.**
+
+**Session continuity IS available with it** — `--session <id>` / `--continue` compose
+with `-p`, and `run-prompt.ts:215` writes a resume hint. So the achievable shape is:
+
+```
+kimi -p "<prompt>" --session <id> --output-format stream-json     → one turn, then exit
+```
+
+That is *a session*, but **one process per turn**. For the rig that is disqualifying, and
+not for performance reasons:
+
+- **Mail injection dies.** Kimi/Codex mail push works by writing `[ACP Mail] ...` into
+  PTY stdin of a live process. There is no live stdin between turns in this model.
+- **Cancel, permission requests and wait states die.** They are session-protocol
+  concepts; a one-shot process has no channel for them.
+- **Turn boundaries become process boundaries**, which is a downgrade — see below.
+
+**The vocabulary is strictly poorer than ACP for our purpose.** stream-json has five
+message shapes (`prompt-render.ts:77-100, 358, 366`):
+
+| stream-json | ACP `AcpSessionUpdate` |
+|---|---|
+| `assistant` (`content`, `tool_calls`) | `agent_message_chunk` + `tool_call` |
+| `tool` (`tool_call_id`, `content`) | `tool_call_update` |
+| `meta: turn.step.retrying` | **no equivalent — see gap below** |
+| `meta: resume`, `meta: version` | `initialized`, `spawn_info` |
+| — | **`turn_started` / `turn_complete` + `stopReason`** |
+| — | `agent_thought_chunk` (thinking is deliberately absent from JSONL) |
+| — | `permission_request`, `wait_state` |
+| — | `error`, `stderr` as stream events |
+
+**The two that matter most for lost-turn detection are the two stream-json lacks.**
+Explicit turn boundaries make turns countable directly; without them a consumer must
+infer a turn from process lifetime. And `wait_state` / `permission_request` are the
+"agent is blocked" signals — precisely the states worth catching early.
+
+**One genuine gap in the other direction, worth carding rather than burying:**
+stream-json surfaces **provider retries** (`turn.step.retrying` with attempt counts,
+delay, error name and status code). ACP appears to expose no equivalent. A model
+silently retrying three times is invisible to the rig today, and it is exactly the kind
+of thing that reads as "the agent is slow" while being a provider fault. *Inferred from
+the absence of a retry member in the `AcpSessionUpdate` union — not yet confirmed
+against the runtime, so treat as a lead, not a finding.*
+
+**Where stream-json IS the right tool:** headless, one-shot pipelines — a Kimi run on the
+MacBook, a CI-invoked agent, a batch job. Those want exactly this: no terminal, no
+session daemon, structured output, exit. That use case should adopt it, and this bridge
+is irrelevant to it.
+
+**Aside, no action needed:** kimi's JSONL is snake_case throughout — `tool_call_id`,
+`failed_attempt`, `delay_ms`, `status_code`. Consistent with the house law, so a consumer
+needs no per-field translation.
+
+---
+
 ## 8. Open questions
 
 1. **Does the scrubber cover ACP content?** `acp-api/api/contractors/outputScrubber.ts`
