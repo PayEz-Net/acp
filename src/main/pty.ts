@@ -341,6 +341,9 @@ export interface SpawnAgentOptions {
 
 const terminals: Map<string, ManagedPty> = new Map();
 const acpRuntimes: Map<string, AcpRuntimeManager> = new Map();
+/** Cancels each ACP agent's mail poller on teardown, keyed by terminal id.
+    Without this the poller outlives the pane and keeps injecting into a dead runtime. */
+const acpMailTimers = new Map<string, () => void>();
 let mainWindowRef: BrowserWindow | null = null;
 
 function getAcpRuntimeByAgent(agentName: string): AcpRuntimeManager | undefined {
@@ -728,8 +731,47 @@ const mailPollFailures = new Map<string, number>();
 // left as-is rather than fixed here.
 const mailPollEverSucceeded = new Map<string, boolean>();
 
-function startInboxPoller(managed: ManagedPty): void {
-  const { agentName, projectId } = managed;
+/**
+ * How a poller hands a mail line to its agent, and where it parks its timer.
+ *
+ * THE DEFECT THIS EXISTS TO FIX (2026-08-10): this poller was only ever started
+ * on the PTY path — `startInboxPoller(managed)` sits ~290 lines AFTER the ACP
+ * branch returns. Every Kimi agent takes the ACP branch, so NOTHING polled their
+ * inbox and NOTHING called `injectMail`. Mail landed in the store, the sidebar
+ * showed it, and no one ever handed it to the agent. Jon hand-relayed messages
+ * for a full session as a result.
+ *
+ * The capability was present the whole time (`AcpRuntimeManager.injectMail`,
+ * wired to an IPC handler) — only the caller was missing. So this generalises
+ * the ONE poller rather than growing a second: the paging watermark, the 429
+ * backoff and the dedupe are hard-won and must not be duplicated and drift.
+ */
+interface InboxDelivery {
+  agentName: string;
+  projectId?: number;
+  /** Deliver one mail line. PTY writes to stdin; ACP calls injectMail. */
+  deliver: (text: string) => void;
+  /** Park the pending timer so teardown can clear it. */
+  setTimer: (t: NodeJS.Timeout | null) => void;
+}
+
+function startInboxPoller(target: ManagedPty | InboxDelivery): void {
+  // A ManagedPty keeps the original behaviour verbatim; an InboxDelivery is the
+  // ACP shape. Normalising here keeps every caller below unchanged.
+  const isManaged = 'pty' in (target as ManagedPty);
+  const managed = isManaged ? (target as ManagedPty) : null;
+  const del = isManaged
+    ? {
+        agentName: (target as ManagedPty).agentName,
+        projectId: (target as ManagedPty).projectId,
+        deliver: (text: string) => {
+          queuePtyWrite(managed!, `${PASTE_START}${text}${PASTE_END}`);
+          setTimeout(() => queuePtyWrite(managed!, '\r'), 100);
+        },
+        setTimer: (t: NodeJS.Timeout | null) => { managed!.mailPollTimer = t; },
+      }
+    : (target as InboxDelivery);
+  const { agentName, projectId } = del;
   const seen = new Set<number>();
   // NIT (QAPert msg 24496): `seen` is never pruned — it grows for the life of
   // the pane, and paging fills it faster than the old single-page fetch did.
@@ -760,7 +802,7 @@ function startInboxPoller(managed: ManagedPty): void {
   const scheduleNext = () => {
     if (activeTimer) clearTimeout(activeTimer);
     activeTimer = setTimeout(poll, currentInterval);
-    managed.mailPollTimer = activeTimer;
+    del.setTimer(activeTimer);
   };
 
   // Card 193400 / QAPert review (msg 24486, corrected msg 24496) / BAPert
@@ -979,9 +1021,8 @@ function startInboxPoller(managed: ManagedPty): void {
       // the draft — the notice sat unsubmitted in the input box until a
       // human pressed Enter. Paste-close followed by a distinct Enter write
       // is processed as a real submit, so mail lands straight in context.
-      queuePtyWrite(managed, `${PASTE_START}${text}${PASTE_END}`);
-      setTimeout(() => queuePtyWrite(managed, '\r'), 100);
-      console.log(`[PTY] Pushed mail ${id} from ${from} into ${agentName} PTY`);
+      del.deliver(text);
+      console.log(`[MailPoll] pushed mail ${id} from ${from} into ${agentName}`);
     }
 
     scheduleNext();
@@ -1266,6 +1307,26 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         void endAgentSession(id, 'normal');
         acpRuntimes.delete(id);
       });
+
+    // THE MAIL PUSH — the defect this fixes. Without this line an ACP agent
+    // NEVER receives mail: startInboxPoller was only ever called on the PTY
+    // path, ~290 lines past this return, so every Kimi agent's inbox went
+    // unpolled. Mail reached the store and the sidebar; nothing handed it to
+    // the agent. injectMail is the ACP equivalent of the PTY stdin write, and
+    // it is the better one — it returns a result instead of assuming delivery
+    // the way a write at a TUI does.
+    let acpMailTimer: NodeJS.Timeout | null = null;
+    acpMailTimers.set(id, () => { if (acpMailTimer) clearTimeout(acpMailTimer); });
+    startInboxPoller({
+      agentName,
+      projectId: opts?.projectId,
+      deliver: (text: string) => {
+        void runtime.injectMail(text).catch((err: any) => {
+          console.warn(`[MailPoll] injectMail failed for ${agentName}:`, err?.message ?? err);
+        });
+      },
+      setTimer: (t) => { acpMailTimer = t; },
+    });
     return id;
   }
 
