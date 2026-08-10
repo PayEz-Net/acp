@@ -41,19 +41,42 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
  * §Sidecar + §Cloud). Both read and write paths carry the parameter so the
  * .NET backend can filter inbox, messages, search, and sidebar by project.
  *
- * Prefer fresh (60s TTL); fall back to stale for resilience inside a desktop
- * session. Project switches always relaunch the app (project-switch.ts), so a
- * stale entry within a single session is identical to fresh by construction.
+ * Prefer fresh (cache TTL — see projects/cache.ts TTL_MS); fall back to stale
+ * for resilience inside a desktop session. Project switches relaunch the app
+ * (project-switch.ts) — but the cloud-side setting is USER-scoped and can be
+ * changed by ANOTHER surface without any relaunch, so "stale == fresh within a
+ * session" does NOT hold against drift (that drift is 139077). Drift is
+ * detected and logged loudly below.
  * Returns null when no session or no cached current — the call site logs and
  * forwards without project_id; the cloud will respond per its enforcement
  * policy (400 if client-supplied is required, 401/403 if server-derived).
  */
+
+// 139077 (option 3 — make drift VISIBLE): the current project is a USER-scoped
+// setting whose effects are TEAM-wide: every agent's mail on this rig is
+// stamped with it and resolves against that project's team. When it drifts,
+// the whole team "not found"s at once, and the 2026-08 evening of
+// "deregistered agents / roster churn" was exactly this, misread downstream
+// because no error named it. `undefined` = not yet observed this process
+// (first observation is a baseline, not a drift).
+let lastStampedProjectId: number | null | undefined;
+
 function resolveCurrentProjectId(): number | null {
   const session = getSession();
   if (!session?.userId) return null;
   const entry = projectsCache.current.getFresh(session.userId)
     ?? projectsCache.current.getStale(session.userId);
-  return entry?.current_project_id ?? null;
+  const projectId = entry?.current_project_id ?? null;
+  if (lastStampedProjectId !== undefined && projectId !== lastStampedProjectId) {
+    console.error(
+      `[mailProxy] CURRENT-PROJECT DRIFT DETECTED: ${lastStampedProjectId} -> ${projectId}. ` +
+      `This setting is user-scoped but its effects are team-wide: every agent's mail on this rig now ` +
+      `resolves against project ${projectId}'s team. If agents start failing 'not found', THIS is why — ` +
+      `check the current-project setting before concluding anyone is deregistered (139077).`,
+    );
+  }
+  lastStampedProjectId = projectId;
+  return projectId;
 }
 
 /**
