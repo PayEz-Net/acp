@@ -380,10 +380,30 @@ export default function mailProxyRoutes(
     try {
       const { from_agent, to, subject } = req.body || {};
 
-      // Basic input validation before any upstream call
-      if (!from_agent || typeof from_agent !== 'string' || from_agent.trim().length === 0) {
+      // 119073: the sender does not get to assert its own identity. The
+      // transport-level identity (local-auth agentName / X-ACP-Agent header)
+      // is authoritative: a body from_agent that DISAGREES is rejected, a
+      // missing one is derived from it. Scope honesty (per the card): one OS
+      // user owns every agent on this rig, so this closes the MAIL-layer
+      // exposure of a condition that remains at other layers — it is not
+      // attribution generally. The cloud re-checks the same agreement against
+      // the claimed_identity stamp (defence in depth).
+      const claimedIdentity = (req as any).agentName ?? req.headers['x-acp-agent'];
+      let effectiveFromAgent: string | undefined =
+        typeof from_agent === 'string' && from_agent.trim().length > 0 ? from_agent : undefined;
+      if (claimedIdentity) {
+        const claimed = String(claimedIdentity);
+        if (effectiveFromAgent && effectiveFromAgent.toLowerCase() !== claimed.toLowerCase()) {
+          res.status(403).json(
+            error('IDENTITY_MISMATCH', `from_agent '${effectiveFromAgent}' does not match the transport identity '${claimed}'. Send as yourself, or omit from_agent and it will be derived from your transport identity. (119073)`, 'mail_send', (req as any).requestId)
+          );
+          return;
+        }
+        effectiveFromAgent = claimed;
+      }
+      if (!effectiveFromAgent) {
         res.status(400).json(
-          error('VALIDATION_ERROR', 'from_agent is required and must be a non-empty string', 'mail_send', (req as any).requestId)
+          error('VALIDATION_ERROR', 'from_agent is required when no X-ACP-Agent transport identity is present', 'mail_send', (req as any).requestId)
         );
         return;
       }
@@ -397,7 +417,7 @@ export default function mailProxyRoutes(
       // v2: validate recipients — reject unknown names (AC-11), pass existing agents (AC-12)
       if (contractorService) {
         for (const recipientName of to) {
-          const result = await contractorService.resolveRecipient(from_agent, recipientName);
+          const result = await contractorService.resolveRecipient(effectiveFromAgent, recipientName);
           if (result.action === 'rejected') {
             res.status(404).json(
               error('UNKNOWN_RECIPIENT', result.error!, 'mail_send', (req as any).requestId)
@@ -414,32 +434,31 @@ export default function mailProxyRoutes(
       // Cloud-side enforcement is the final say (per WO §Cloud API).
       const projectId = resolveCurrentProjectId();
       const forwardBody: Record<string, unknown> = { ...(req.body ?? {}) };
+      forwardBody.from_agent = effectiveFromAgent;
       if (projectId != null) {
         forwardBody.project_id = projectId;
       } else {
         console.warn(
-          `[mailProxy] POST /send: no current_project_id in cache — forwarding without it (cloud will enforce). from=${from_agent ?? '?'} to=${Array.isArray(to) ? to.join(',') : '?'}`,
+          `[mailProxy] POST /send: no current_project_id in cache — forwarding without it (cloud will enforce). from=${effectiveFromAgent} to=${Array.isArray(to) ? to.join(',') : '?'}`,
         );
       }
 
       // Provenance stamp: record the transport-level identity claimed by the
-      // caller (X-ACP-Agent header / local-auth agentName). This is separate
-      // from the body-supplied `from_agent` so the gateway can compare them and
-      // detect mismatches or spoof attempts. Unauthenticated paths cannot reach
-      // this handler, so a missing value here is logged but not fatal.
-      const claimedIdentity = (req as any).agentName ?? req.headers['x-acp-agent'];
+      // caller (X-ACP-Agent header / local-auth agentName). The cloud compares
+      // it against from_agent (119073) and rejects disagreement. When no
+      // transport identity exists the body value is all there is — logged.
       if (claimedIdentity) {
         forwardBody.claimed_identity = String(claimedIdentity);
       } else {
         console.warn(
-          `[mailProxy] POST /send: no X-ACP-Agent / req.agentName identity available — forwarding without claimed_identity. from=${from_agent ?? '?'}`,
+          `[mailProxy] POST /send: no X-ACP-Agent / req.agentName identity available — forwarding body-asserted identity only. from=${effectiveFromAgent}`,
         );
       }
 
       // Proxy to cloud
       const cloudResult = await proxyToCloud(cfg, '/send', 'POST', undefined, forwardBody);
       if (isSessionInactiveResult(cloudResult.status, cloudResult.data)) {
-        rewriteSessionInactive(res, req, 'mail_send', `send from=${from_agent}`);
+        rewriteSessionInactive(res, req, 'mail_send', `send from=${effectiveFromAgent}`);
         return;
       }
       res.status(cloudResult.status).json(cloudResult.data);
@@ -447,13 +466,13 @@ export default function mailProxyRoutes(
       // Post-send hooks
       if ((cloudResult.data as any)?.success) {
         // DONE: auto-completion — check if sender is a contractor completing work
-        if (contractorService && from_agent && subject && Array.isArray(to)) {
+        if (contractorService && subject && Array.isArray(to)) {
           try {
-            await contractorService.checkDoneAutoComplete(from_agent, subject, to);
+            await contractorService.checkDoneAutoComplete(effectiveFromAgent, subject, to);
           } catch { /* non-fatal — don't break mail delivery */ }
         }
-        if (onMailSent && from_agent && subject) {
-          try { onMailSent(from_agent, subject, to || []); } catch { /* non-fatal */ }
+        if (onMailSent && subject) {
+          try { onMailSent(effectiveFromAgent, subject, to || []); } catch { /* non-fatal */ }
         }
       }
     } catch (err: any) {
