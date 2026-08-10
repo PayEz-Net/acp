@@ -15,6 +15,7 @@ import {
 } from '../shared/types';
 import {
   type AcpEventPayload,
+  type AcpSessionUpdate,
   type AcpPromptPayload,
   type AcpInjectMailPayload,
   type AcpCancelPayload,
@@ -31,6 +32,7 @@ import { buildClaudeSpawnCommand, resolveClaudeEffort, isForeignRuntimeModel } f
 import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
+import { bridgeAcpEvent, resetStreamState } from './agentStreamBridge';
 import { TerminalScreen } from './terminalScreen';
 
 // Per-terminal screen models (see terminalScreen.ts). Raw PTY bytes are fed
@@ -1248,6 +1250,10 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     acpRuntimes.set(id, runtime);
     runtime.on('event', (payload: AcpEventPayload) => {
       safeSend(IPC_CHANNELS.ACP_EVENT, payload);
+      // Capture feed. The renderer send stays FIRST and unguarded-by-us: the UI
+      // is the thing a human is watching, and it must never wait on, or be lost
+      // to, telemetry. bridgeAcpEvent never throws (see its contract).
+      bridgeAcpEvent(agentName, id, provider, payload.update as AcpSessionUpdate);
     });
     // Reuse the PTY_SPAWNED channel so the renderer's agentName→terminalId
     // mapping works the same way for ACP sessions. Include the actual runtime
@@ -1265,6 +1271,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         });
         void endAgentSession(id, 'normal');
         acpRuntimes.delete(id);
+        resetStreamState(id);
       });
     return id;
   }
@@ -1687,6 +1694,7 @@ export function killTerminal(terminalId: string): boolean {
   if (runtime) {
     runtime.kill();
     acpRuntimes.delete(terminalId);
+    resetStreamState(terminalId);
     return true;
   }
   return false;
