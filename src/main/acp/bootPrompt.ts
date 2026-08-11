@@ -103,9 +103,19 @@ Report the unread count, then act on actionable messages.
 
 **You MAY run the curl command above to check mail.**`;
 
-  const readyMessage = unreadCount !== null
-    ? `${agentName} ready. ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}. What's the mission?`
-    : `${agentName} ready. What's the mission?`;
+  // A boot with a session summary is a RESUME, not a cold start: there is
+  // known work with this agent's name on it. Asking "What's the mission?" and
+  // waiting made every agent sit idle through a restart with a full board --
+  // measured 2026-08-10, all 7 silent after boot until a human mailed them.
+  // The mission is already on the kanban; the prompt should not ask for it.
+  const isResume = Boolean(opts.sessionSummary?.trim());
+  const readyMessage = isResume
+    ? (unreadCount !== null
+        ? `${agentName} ready. ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}. Resuming my cards now.`
+        : `${agentName} ready. Resuming my cards now.`)
+    : (unreadCount !== null
+        ? `${agentName} ready. ${unreadCount} unread message${unreadCount === 1 ? '' : 's'}. What's the mission?`
+        : `${agentName} ready. What's the mission?`);
 
   const recentContext = opts.recentContext?.filter((p) => p.trim()).slice(-6) ?? [];
   const hasContext = recentContext.length > 0;
@@ -117,13 +127,42 @@ The ACP runtime was restarted while you were working. The following recent user 
 ${recentContext.map((p, i) => `${i + 1}. ${p.trim()}`).join('\n')}`
     : '';
 
-  const toolBan = hasProfile
+  // NOTHING SENDS A FOLLOW-UP TURN. "Output the ready message and stop, wait
+  // for the next user message" therefore does not mean "pause" -- it means
+  // idle until a human notices. On a resume that is the wrong instruction and
+  // it cost a full restart's worth of rig time on 2026-08-10.
+  //
+  // So a resume says GO, in the same turn. A cold start (no summary, no prior
+  // work to resume) keeps the original wait-for-the-human discipline, because
+  // there an agent charging off has nothing to charge at.
+  const resumeDirective = `## Resume — do this now, in THIS turn
+
+You have a **Where you left off** section above. That is prior work with your name on it, so this is a RESUME, not a cold start. Do NOT wait for a human message — none is coming, and waiting is how a restart turns into an idle rig.
+
+After the ready line, immediately:
+
+1. Read your **Where you left off** section and your unread mail.
+2. Pick up your assigned **in_progress** and **review** cards first, then your backlog.
+3. Work them, and report by mail as you land things.
+
+Verify anything from the summary against the live system before acting on it — the rig restarted and teammates have moved since.
+
+**A summary is a SAVE POINT, NOT a stopping condition.** Neither is the ready line, nor finishing one card. Work stops when the kanban is clear or Jon says so — nobody else gets a say. If you are blocked, name WHO you are blocked on and move to your next card rather than idling.`;
+
+  const toolBan = isResume
+    ? resumeDirective
+    : hasProfile
     ? `## Tool discipline
 
 Your profile and mail status are already provided above. Do NOT run any additional tools, shell commands, curl calls, mail checks, or API requests during this first turn. ${hasContext ? 'You may briefly acknowledge the restart context after the ready message, then stop.' : 'Just output the ready message and stop.'} Wait for the next user message before doing any work.`
     : `## Tool discipline
 
-Run ONLY the curl command(s) above to load your identity (and optionally check mail). Once you have the real data, output the ready message and stop. ${hasContext ? 'You may briefly acknowledge the restart context after the ready message, then stop.' : ''} Do NOT run any other tools during this first turn. Wait for the next user message before doing any work.`;
+Run ONLY the curl command(s) above to load your identity (and optionally check mail). ${hasContext ? 'You may briefly acknowledge the restart context after the ready message.' : ''} Do NOT run any other unrelated tools during this first turn.
+
+Then decide from what the profile actually returned — this branch cannot know in advance, so READ IT rather than assuming:
+
+- **If your profile contains a section titled "Where you left off"**, this is a RESUME. Say the ready line, then GO: read that section and your unread mail, pick up your assigned in_progress and review cards first, then your backlog, and work them — reporting by mail as you land things. Do NOT wait for a human message; none is coming. Verify anything from the summary against the live system first, since the rig restarted and teammates have moved. A summary is a SAVE POINT, NOT a stopping condition; work stops when the kanban is clear or Jon says so.
+- **If it does not**, output the ready message and stop, and wait for the next user message before doing any work.`;
 
   // Jon 2026-08-07: the first line doubles as the session's human-readable
   // NAME. Kimi derives the session title from the first prompt (raw

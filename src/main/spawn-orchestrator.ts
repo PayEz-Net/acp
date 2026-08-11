@@ -19,6 +19,8 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed, emitNoTeamEngaged } from './pty';
 import { endAgentSession } from './agentSessionLifecycle';
 import { getLocalSecret } from './api-server';
@@ -379,10 +381,38 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
       `carriesSummary=${(bootPrompt ?? '').includes('Where you left off')}`,
     );
 
-    // Workspace root = the colonized PROJECT root, period. Per-agent
-    // work_dir_override is IGNORED (no per-agent editor yet → always null →
-    // pure landmine). One authority: the project.
-    const workDir = workspaceRoot;
+    // Jon 2026-08-10: "Just put them on their work tree folder."
+    //
+    // The project root for project 31 is `e:\repos` — the PARENT of every repo
+    // on the box: 64 top-level dirs, 81 .git dirs, 467 node_modules within four
+    // levels, and the same file in up to SIX copies (localAuth.ts x6,
+    // spawn-orchestrator.ts x5). Landing every agent there means every search
+    // returns N copies of every hit and the agent has to work out which tree is
+    // live. That is the wrong-artifact failure this codebase keeps paying for.
+    //
+    // So: each agent gets its own worktree home. Same convention as the profile
+    // briefing (acp-api routes/agents.ts withWorktreeHome) — one authority for
+    // the path, grep JONS-MACBOOK-SWITCH there when moving machines.
+    //
+    // NOT a silent fallback: if an agent has no home yet we use the project root
+    // and SAY SO, because quietly putting an agent back in the monorepo is
+    // exactly the kind of invisible regression that took all night to find.
+    // Skills still resolve — they are registered globally via extra_skill_dirs
+    // in ~/.kimi/config.toml, NOT discovered from cwd.
+    const agentReposRoot = process.env.ACP_AGENT_REPOS_ROOT
+      || path.join(os.homedir(), 'AgentRepos');
+    const agentHome = path.join(agentReposRoot, member.agent_name);
+    let workDir = workspaceRoot;
+    try {
+      if (fs.statSync(agentHome).isDirectory()) {
+        workDir = agentHome;
+      }
+    } catch { /* no home for this agent yet — reported below, never silent */ }
+    console.log(
+      workDir === agentHome
+        ? `[SpawnOrch] ${member.agent_name} workDir=${workDir} (own worktree home)`
+        : `[SpawnOrch] ${member.agent_name} workDir=${workDir} (PROJECT ROOT — no worktree home at ${agentHome}; searches will span the whole monorepo)`,
+    );
     // Project-driven runtime (feedback_runtime_choice_vs_platform_llm):
     // the WHOLE team runs the project's single runtime_choice. Per-member
     // runtime_override (mixed-mode: different runtimes within one project)
