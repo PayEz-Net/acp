@@ -998,23 +998,48 @@ function startInboxPoller(target: ManagedPty | InboxDelivery): void {
       // mail this pane has not seen.
     }
 
+    // ONE DELIVERY PER CYCLE, NOT ONE PER MESSAGE.
+    //
+    // A delivery is a TURN, and a turn is the billable unit. Measured over the
+    // 2026-08-10 leg: 156 pushes for 139 messages, and 92% of ALL agent turns
+    // were mail. QAPert took 60 and BAPert 56 of them. Delivering each message
+    // separately spent a whole turn on each.
+    //
+    // Bursts are the common case, not the exception: mail NEVER interrupts an
+    // active turn (see AcpRuntimeManager.injectMail — it defers and re-drives
+    // at turn end), so everything that arrives during a long turn queues and
+    // then landed here one-at-a-time. Batching collapses exactly that queue.
+    //
+    // Note this is NOT a latency change and does not depend on the poll
+    // interval: the upstream SignalR channel already carries `new_message`
+    // events the instant a message is sent, so knowledge is immediate either
+    // way. What changes is only how many turns the delivery costs.
+    const fresh: Array<{ id: number; from: string; subject: string }> = [];
     for (const m of messages) {
       const id = m.message_id ?? m.id;
       if (id == null || seen.has(Number(id))) continue;
       seen.add(Number(id));
-      const from = m.from_agent ?? 'unknown';
-      const subject = m.subject ?? '(no subject)';
-      // Per-mail notice is intentionally LEAN: who / subject / id + the body-fetch
-      // curl, nothing else. GET on a message does NOT stamp read (re-confirmed
-      // 2026-08-05 by controlled probe: GET by id, inbox count + entry unchanged),
-      // so there is no fetch-cost to warn about. The old notice carried a stale
-      // "fetching marks it read, fetch only when ready to action" lecture in EVERY
-      // push — false and a context clogger (Jon, 2026-08-05). Mail-read and
-      // autonomy discipline lives in agent onboarding, not here.
-      const text =
-        `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
-        `Act on it. If you need the body: curl -s ${apiBase}/v1/mail/messages/${id} ` +
-        `-H "X-ACP-Agent: ${agentName}".`;
+      fresh.push({
+        id: Number(id),
+        from: m.from_agent ?? 'unknown',
+        subject: String(m.subject ?? '(no subject)'),
+      });
+    }
+
+    if (fresh.length > 0) {
+      // The notice stays LEAN: who / subject / id + the body-fetch curl. GET on
+      // a message does NOT stamp read (controlled probe 2026-08-05: inbox count
+      // and entry unchanged), so there is no fetch-cost to warn about. The old
+      // notice carried a stale "fetching marks it read" lecture in EVERY push —
+      // false, and a context clogger (Jon, 2026-08-05).
+      const text = fresh.length === 1
+        ? `[ACP Mail] New message from ${fresh[0].from}: "${fresh[0].subject}" (id ${fresh[0].id}). ` +
+          `Act on it. If you need the body: curl -s ${apiBase}/v1/mail/messages/${fresh[0].id} ` +
+          `-H "X-ACP-Agent: ${agentName}".`
+        : `[ACP Mail] ${fresh.length} new messages, oldest first:\n` +
+          fresh.map((f) => `  - from ${f.from}: "${f.subject}" (id ${f.id})`).join('\n') +
+          `\nAct on them. For a body: curl -s ${apiBase}/v1/mail/messages/<id> ` +
+          `-H "X-ACP-Agent: ${agentName}".`;
       // Inject as bracketed paste + a SEPARATE Enter write. A raw
       // `write(text + '\r')` arrives as one input burst; the kimi TUI treats
       // the burst as pasted content and the trailing \r becomes a newline in
@@ -1022,7 +1047,10 @@ function startInboxPoller(target: ManagedPty | InboxDelivery): void {
       // human pressed Enter. Paste-close followed by a distinct Enter write
       // is processed as a real submit, so mail lands straight in context.
       del.deliver(text);
-      console.log(`[MailPoll] pushed mail ${id} from ${from} into ${agentName}`);
+      console.log(
+        `[MailPoll] pushed ${fresh.length} mail (${fresh.map((f) => f.id).join(',')}) ` +
+        `into ${agentName} in ONE delivery`,
+      );
     }
 
     scheduleNext();
