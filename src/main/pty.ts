@@ -1218,17 +1218,64 @@ function noteWorkDirSkip(agentName: string, requested: string, resolved: string)
   } catch { /* best-effort; resolveWorkDir's console.warn is the dev copy */ }
 }
 
+/**
+ * The agent's own worktree home, or null if it has none yet.
+ *
+ * Same convention as the profile briefing (acp-api routes/agents.ts
+ * withWorktreeHome) — grep JONS-MACBOOK-SWITCH there before changing paths,
+ * so the two never disagree about where an agent lives.
+ */
+function resolveAgentWorktreeHome(agentName: string): string | null {
+  try {
+    const root = process.env.ACP_AGENT_REPOS_ROOT
+      || path.join(os.homedir(), 'AgentRepos');
+    const home = path.join(root, agentName);
+    return fs.statSync(home).isDirectory() ? home : null;
+  } catch {
+    return null; // no home yet — the caller's workDir stands, and says so
+  }
+}
+
 export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgentOptions): string {
+  // Jon 2026-08-10: "Just put them on their work tree folder."
+  //
+  // THIS IS THE ONE AUTHORITY, deliberately here in spawnAgent rather than at
+  // the call sites. There are two live callers — lifecycle-server.ts (the
+  // sidecar path, which is what actually spawns the team) and
+  // spawn-orchestrator.ts — and the first attempt at this fix patched only the
+  // orchestrator. Every agent then booted through lifecycle-server and landed
+  // in the monorepo anyway, with the change looking applied. Two copies of one
+  // decision drift; one copy cannot.
+  //
+  // Why it matters: the project root for project 31 is `e:\repos`, the PARENT
+  // of every repo on the box — 64 top-level dirs, 81 .git dirs, 467
+  // node_modules within four levels, and the same file in up to SIX copies
+  // (localAuth.ts x6, spawn-orchestrator.ts x5, bootPrompt.ts x3). Every
+  // search returns N copies of every hit and the agent must then work out
+  // which tree is live. That is the wrong-artifact failure this codebase keeps
+  // paying for.
+  //
+  // Skills still resolve: they are registered globally via extra_skill_dirs in
+  // ~/.kimi/config.toml, NOT discovered from cwd. Without that, moving cwd
+  // silently strips every skill including agent-mail.
+  const worktreeHome = resolveAgentWorktreeHome(agentName);
+  const effectiveWorkDir = worktreeHome ?? workDir;
+  console.log(
+    worktreeHome
+      ? `[PTY] ${agentName} workDir=${worktreeHome} (own worktree home; caller asked for ${workDir || '<unset>'})`
+      : `[PTY] ${agentName} workDir=${workDir || '<unset>'} (NO worktree home — searches span the whole tree)`,
+  );
+
   // Guard BEFORE allocating any runtime — a non-existent cwd makes node-pty throw
   // Win32 267 asynchronously and crash the main process (see WorkDirError).
-  const resolvedWorkDir = resolveWorkDir(workDir);
+  const resolvedWorkDir = resolveWorkDir(effectiveWorkDir);
   if (!resolvedWorkDir) {
-    const tried = (workDir && workDir.trim()) || path.resolve(process.cwd(), '..');
+    const tried = (effectiveWorkDir && effectiveWorkDir.trim()) || path.resolve(process.cwd(), '..');
     const err = new WorkDirError(agentName, tried);
     console.error(`[PTY] ${err.message}`);
     throw err;
   }
-  const requested = workDir?.trim();
+  const requested = effectiveWorkDir?.trim();
   if (requested && requested !== resolvedWorkDir) {
     noteWorkDirSkip(agentName, requested, resolvedWorkDir);
   }
