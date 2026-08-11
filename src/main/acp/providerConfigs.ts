@@ -58,28 +58,46 @@ export function kimiSpawnArgs(baseArgs: string[], modelOverride?: string | null)
   return args;
 }
 
-/** k3 thinking efforts (reasoning_effort low/high/max per the model docs). */
-const K3_THINKING_EFFORTS: ReadonlySet<string> = new Set(['low', 'high', 'max']);
-
-/** k3-family ids that accept the thinking-effort channel (k3 + its 256k variant). */
-const K3_FAMILY_MODELS: ReadonlySet<string> = new Set(['k3', 'k3-256k']);
+/** kimi thinking efforts (reasoning_effort low/high/max per the model docs). */
+const KIMI_THINKING_EFFORTS: ReadonlySet<string> = new Set(['low', 'high', 'max']);
 
 /**
  * Env value for KIMI_MODEL_THINKING_EFFORT, or undefined when no injection
- * should happen: the effort channel is k3-family-only, and only when a k3-family
- * model is explicitly selected via override (an inherited default_model might not
- * be k3 — injecting blind would risk mis-applying effort to another model).
- * A set-but-invalid effort for k3 warns and skips (never silently spawns
- * with a wrong value).
+ * should happen.
+ *
+ * NOT k3-only. This used to gate on K3_FAMILY_MODELS = {k3, k3-256k}, on the
+ * reasoning that another model "might not" accept the channel. That was our
+ * invention. Measured in the shipped kimi.exe (2026-08-11):
+ *
+ *   function resolveKimiEnvThinkingEffort(thinkingEffort, kimiProvider, env) {
+ *     if (!kimiProvider || thinkingEffort === "off") return undefined;
+ *     return env["KIMI_MODEL_THINKING_EFFORT"]?.trim().toLowerCase() || undefined;
+ *   }
+ *
+ * The only gates are "is a Kimi provider" and "thinking is not off", and the
+ * vendor's own comment states the override "intentionally bypasses
+ * support_efforts". The var binds to `thinking.forcedEffort` — forced, hence
+ * no per-model catalogue check. kimi-for-coding also declares
+ * capabilities ['thinking'] with default_thinking = true.
+ *
+ * The cost of the wrong gate was not "no effort" — it was the MODEL DEFAULT,
+ * untunable, on every non-k3 agent. Effort maps to a thinking-token budget of
+ * 1024 (low) / 4096 (medium) / 32000 (high): a 31x spread per turn.
+ *
+ * A model override is still required. That part was right and is kept: an
+ * inherited default_model is not necessarily kimi at all, and effort is a
+ * kimi-provider concept.
+ *
+ * A set-but-invalid effort warns and skips — never a silent wrong value.
  */
-export function kimiK3ThinkingEffortEnv(
+export function kimiThinkingEffortEnv(
   modelOverride: string | null | undefined,
   effort: string | undefined,
   onWarn: (message: string) => void,
 ): string | undefined {
-  if (!modelOverride || !K3_FAMILY_MODELS.has(modelOverride) || !effort) return undefined;
-  if (K3_THINKING_EFFORTS.has(effort)) return effort;
-  onWarn(`effort_override '${effort}' is not a k3 thinking effort (low|high|max) — ignoring`);
+  if (!modelOverride || !effort) return undefined;
+  if (KIMI_THINKING_EFFORTS.has(effort)) return effort;
+  onWarn(`effort_override '${effort}' is not a kimi thinking effort (low|high|max) — ignoring`);
   return undefined;
 }
 

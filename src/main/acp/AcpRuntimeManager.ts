@@ -18,7 +18,7 @@ import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import {
   getProviderConfig,
-  kimiK3ThinkingEffortEnv,
+  kimiThinkingEffortEnv,
   kimiSpawnArgs,
   ModelNotRecognizedError,
   type ProviderConfig,
@@ -532,12 +532,12 @@ export class AcpRuntimeManager extends EventEmitter {
       CI: 'true',
     };
     // K3 thinking effort rides effort_override via env (no CLI flag exists).
-    const k3Effort = kimiK3ThinkingEffortEnv(
+    const kimiEffort = kimiThinkingEffortEnv(
       this.options.modelOverride ?? null,
       this.options.effort,
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
-    if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
+    if (kimiEffort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = kimiEffort;
     // Effort rides an ENV VAR, so it never appears in the spawn command line the
     // way --model does. Until this line existed, the ONLY output was a warning on
     // an INVALID value — which meant "no warning" read identically for "applied
@@ -546,10 +546,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // as evidence instead of inference.
     console.log(
       `[ACP ${this.options.agentName}] thinking effort: ` +
-      (k3Effort
-        ? `${k3Effort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
+      (kimiEffort
+        ? `${kimiEffort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
         : `NONE INJECTED (model=${this.options.modelOverride ?? 'inherit'}, effort_override=${this.options.effort ?? 'unset'})` +
-          ` — effort applies only to k3-family models explicitly overridden`),
+          ` — effort needs an explicit kimi model override to apply`),
     );
     this.process = new AcpProcess({
       command,
@@ -565,7 +565,7 @@ export class AcpRuntimeManager extends EventEmitter {
     // re-resolved overrides is visible too.
     this.emitAcpEvent({
       sessionUpdate: 'spawn_info',
-      command: `${command} ${args.join(' ')}${k3Effort ? `  KIMI_MODEL_THINKING_EFFORT=${k3Effort}` : ''}`,
+      command: `${command} ${args.join(' ')}${kimiEffort ? `  KIMI_MODEL_THINKING_EFFORT=${kimiEffort}` : ''}`,
     });
 
     if (this.provider.autoApprove) {
