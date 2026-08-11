@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
+import { getLatestSessionSummary } from './sessionSummary.js';
 import { config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
@@ -418,6 +419,55 @@ function withMemoryBriefing<T>(profile: T): T {
   return { ...p, profile: existing + MEMORY_BRIEFING } as T;
 }
 
+/**
+ * Append the agent's stored session summary to the ONBOARD RESPONSE.
+ *
+ * WHY HERE AND NOT IN THE BOOT PROMPT — the boot-prompt path cannot carry it
+ * reliably, and this is structural, not a bug to chase. `spawnAgent` in pty.ts
+ * is SYNCHRONOUS (`export function spawnAgent(...): string`), so when a caller
+ * does not supply a prompt it falls back to `buildAgentBootPrompt(agentName)`
+ * with no options — it CANNOT await a summary fetch. Measured 2026-08-10: only
+ * 1 of 7 agents came through orchestrateSpawn (the other 6 logged "already has
+ * ACP … skipping orchestrator spawn"), so six kickoffs were built by that
+ * synchronous fallback and arrived with `session-summary ABSENT` even though
+ * the orchestrator's own prompt had it (`localHasSummary=true`).
+ *
+ * The onboard response is PATH-INDEPENDENT: every agent fetches its profile
+ * however it was spawned, and `profile=present` is logged on every boot. So the
+ * summary rides a rail that is proven to arrive rather than one that depends on
+ * which caller won the race.
+ *
+ * FRAMED AS A PREVIOUS SESSION, in the same words the kb_recall hook uses: an
+ * agent that reads a summary as live state acts on a world that has moved.
+ *
+ * FAILS SOFT. A profile without a summary is degraded; a profile that never
+ * arrives is a dead agent.
+ */
+async function withSessionSummary<T>(profile: T, agentName: string): Promise<T> {
+  if (!profile || typeof profile !== 'object') return profile;
+  try {
+    const found = await getLatestSessionSummary(agentName);
+    const summary = found?.summary?.trim();
+    if (!summary) return profile;
+    const p = profile as Record<string, unknown>;
+    const existing = typeof p.profile === 'string' ? p.profile : '';
+    const section = [
+      '',
+      '',
+      '## Where you left off',
+      '',
+      'This is a stored summary of a PREVIOUS session, not live state. The rig has restarted and other agents have moved since. Verify anything here against the live system before acting on it.',
+      '',
+      summary,
+      '',
+    ].join('\n');
+    return { ...p, profile: existing + section } as T;
+  } catch (err: any) {
+    console.warn(`[agents] session summary append failed for ${agentName}:`, err?.message);
+    return profile;
+  }
+}
+
 function mapCloudProfile(
   cloudProfile: CloudProfileShape,
   meta: { name: string; displayName?: string; role?: string },
@@ -790,7 +840,7 @@ export default function agentRoutes(_storage: any): Router {
           console.warn(`[agent_profile] Could not resolve name "${identifier}" to id via cloud /v1/agentmail/agents — falling back to SessionManager thin shape`);
           const basic = await _storage.getAgentProfileFromGlobal(identifier);
           if (basic) {
-            res.json(success(withMemoryBriefing(withWorktreeHome(basic, identifier)), 'agent_profile', (req as any).requestId));
+            res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
             return;
           }
           res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
@@ -820,7 +870,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud unreachable for /v1/agents/${agentId}/profile (${profileResult.error}) — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(withWorktreeHome(basic, identifier)), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(503).json(error('UPSTREAM_UNAVAILABLE', `Cloud unreachable: ${profileResult.error}`, 'agent_profile', (req as any).requestId));
@@ -836,7 +886,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud returned HTTP ${profileResult.status} for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(withWorktreeHome(basic, identifier)), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(profileResult.status).json(error('UPSTREAM_ERROR', `Cloud returned HTTP ${profileResult.status}`, 'agent_profile', (req as any).requestId));
@@ -849,7 +899,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud response missing data.profile for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(withWorktreeHome(basic, identifier)), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(502).json(error('UPSTREAM_BAD_SHAPE', 'Cloud response missing profile data', 'agent_profile', (req as any).requestId));
@@ -861,7 +911,7 @@ export default function agentRoutes(_storage: any): Router {
         displayName: displayName,
       });
 
-      res.json(success(withMemoryBriefing(withWorktreeHome(profile, identifier)), 'agent_profile', (req as any).requestId));
+      res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(profile, identifier)), identifier), 'agent_profile', (req as any).requestId));
     } catch (err: any) {
       if (err instanceof ProjectNotEngagedError) {
         res.status(err.status).json(error(err.code, err.message, 'agent_profile', (req as any).requestId));

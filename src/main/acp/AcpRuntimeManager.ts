@@ -782,6 +782,20 @@ export class AcpRuntimeManager extends EventEmitter {
           });
         }
       }
+      // Say what was actually sent. Three separate verification attempts on this
+      // path measured the wrong artifact (the PTY temp file, which the ACP path
+      // never writes) and twice nearly reported a working feature as broken.
+      // The kickoff is the ONLY thing the agent receives, so log its shape.
+      console.log(
+        `[ACP ${this.options.agentName}] kickoff: ${kickoff.length} chars, ` +
+        `session-summary ${kickoff.includes('Where you left off') ? 'INCLUDED' : 'ABSENT'}, ` +
+        // NOT "source=orchestrator". A non-empty bootPrompt only proves SOMEONE
+        // supplied one — pty.ts's synchronous fallback supplies a non-empty
+        // prompt too. Labelling non-empty as "orchestrator" made all 7 agents
+        // look orchestrator-fed when in fact every one of them had taken the
+        // fallback. Report the property we can actually observe.
+        `bootPrompt=${this.options.bootPrompt?.trim() ? 'supplied-by-caller' : 'none (runtime built it)'}`,
+      );
       this.systemPrompt(kickoff).catch((err) => {
         console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
       });

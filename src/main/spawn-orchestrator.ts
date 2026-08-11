@@ -365,12 +365,19 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // Prefer the LOCAL synthesized prompt: it is the only one carrying the
     // session summary (buildAgentBootPrompt renders "Where you left off" from
     // the prefetched summary). The cloud Wave-D prompt does not.
+    console.log(`[SpawnOrch] ${member.agent_name} prompt choice: mapHit=${localBootPrompts.has(member.agent_name)} localHasSummary=${(localBootPrompts.get(member.agent_name) ?? '').includes('Where you left off')} cloudPresent=${Boolean(cloudBootPrompt?.trim())}`);
     const bootPrompt = localBootPrompt?.trim() ? localBootPrompt : (cloudBootPrompt ?? undefined);
-    if (cloudBootPrompt?.trim()) {
-      console.log(`[SpawnOrch] using cloud boot-prompt for ${member.agent_name}`);
-    } else {
-      console.log(`[SpawnOrch] using synthesized boot-prompt for ${member.agent_name}`);
-    }
+    // Report what was CHOSEN, not what was merely available. The previous
+    // version branched on `cloudBootPrompt?.trim()` while the selection above
+    // prefers local — so it logged "using cloud boot-prompt" on every run in
+    // which the cloud merely HAD one, including the runs that used local. That
+    // sent an investigation after a precedence bug that did not exist.
+    // (doctrine: know which instrument you used.)
+    const chosen = localBootPrompt?.trim() ? 'local-synthesized' : (cloudBootPrompt?.trim() ? 'cloud' : 'NONE');
+    console.log(
+      `[SpawnOrch] boot-prompt for ${member.agent_name}: chose=${chosen} ` +
+      `carriesSummary=${(bootPrompt ?? '').includes('Where you left off')}`,
+    );
 
     // Workspace root = the colonized PROJECT root, period. Per-agent
     // work_dir_override is IGNORED (no per-agent editor yet → always null →
