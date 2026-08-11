@@ -52,7 +52,7 @@ describe('buildMailDeliveryFailedText', () => {
 });
 
 describe('buildMailDeliveryDeferredText', () => {
-  it('says the true thing: push skipped by design mid-turn, message parked with its own link', () => {
+  it('says the true thing: push held by design mid-turn, message parked with its own link', () => {
     const text = buildMailDeliveryDeferredText('BAPert', 17372, 'NextPert', 'F2 block confirmed');
     expect(text).toContain('[ACP Mail] Delivery deferred');
     expect(text).toContain('BAPert is mid-turn');

@@ -1009,7 +1009,7 @@ describe('AcpRuntimeManager', () => {
       expect(getProcess()).toBe(process);
       expect(manager.getSessionId()).toBe('sess-stall');
       // The resume nudge drains as its own turn, telling the agent why its
-      // turn died — and nothing shows as a [Send failed] error.
+      // turn died — and nothing shows as a [Send queued] error.
       const texts = process.requests
         .filter((r) => r.method === 'session/prompt')
         .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);

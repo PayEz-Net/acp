@@ -213,8 +213,14 @@ export class AcpRuntimeManager extends EventEmitter {
   // Learned runtime capability. The kimi TUI has two distinct primitives for
   // input during a busy turn — Esc interrupts (cancel), Ctrl+S steers (pushes
   // up into the live turn) — but the ACP wire only has session/prompt, and
-  // kimi's adapter (≤0.31.x) busy-rejects it mid-turn (turn.agent_busy): the
-  // Ctrl+S equivalent does not exist on ACP. The FIRST busy-rejected steer
+  // kimi's ACP server busy-rejects a second model-bound prompt mid-turn
+  // (turn.agent_busy) PERMANENTLY, BY DESIGN: session.ts:627
+  // assertNoActiveTurn() refuses it locally, one driver per session, because
+  // accepting would leave the first turn unsettled with both turns' events
+  // unattributable (measured on kimi-code 0.34.0 — do NOT read this as a
+  // version bound that ages out; the queueing fallback below is permanent
+  // too). The Ctrl+S equivalent does not exist on ACP. The FIRST
+  // busy-rejected steer
   // flips this flag; afterwards human prompts queue directly instead of
   // attempting a doomed steer, the stage-1 warning steer is skipped (it could
   // only ever be rejected), and the grace-cancel nudge carries the queued
@@ -987,7 +993,8 @@ export class AcpRuntimeManager extends EventEmitter {
       .catch((err: unknown) => {
         if (isAgentBusyError(err)) {
           // The first busy rejection teaches the manager this runtime cannot
-          // steer (kimi ACP ≤0.31.x): later prompts queue directly and the
+          // steer (kimi ACP — permanent-by-design, session.ts:627, one driver
+          // per session): later prompts queue directly and the
           // human-reply backstop switches to its no-steer shape.
           this.steerUnsupported = true;
           if (opts?.queueOnBusy === false) {
@@ -1942,7 +1949,8 @@ const STALLED_TURN_NUDGE =
 /**
  * Build the reply-turn nudge. Steer-capable runtime: the human's steered
  * messages are already in the session's context, the plain nudge suffices.
- * No-steer runtime (kimi ACP ≤0.31.x): the messages sat in the manager's
+ * No-steer runtime (kimi ACP — the busy-reject is permanent-by-design,
+ * session.ts:627): the messages sat in the manager's
  * queue, so their text must ride inside the nudge — otherwise the agent is
  * told to answer a message it never received.
  */
