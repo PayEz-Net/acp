@@ -9,6 +9,7 @@ import { execSync } from 'child_process';
 import path from 'path';
 import { setupPtyHandlers, killAllPty, getSessionTokenForTerminal } from './pty';
 import { initOutputSpill, setLiveSessionTokenResolver } from './ptyOutputReporter';
+import { initMainLog } from './mainLog';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus, acpApiCall, ACP_API_URL } from './acp-api-client';
@@ -480,6 +481,18 @@ function setupIpcHandlers() {
 
 // App lifecycle
 app.whenReady().then(async () => {
+  // 185035: the main-process log file comes up FIRST, before anything else can
+  // emit a diagnostic worth keeping — every console.log/warn/error below this
+  // point is teed to <userData>/logs/main.log (append-only, capped, rotating).
+  // One instance only: the single-instance lock check immediately below means
+  // a lock-loser writes at most a line or two before quitting, and appends
+  // cannot corrupt each other.
+  const mainLogPath = initMainLog(app.getPath('userData'));
+  // 184949 discoverability half: this app has TWO candidate userData roots on
+  // one box (dev `name` vs packaged `productName`), so name the resolved one
+  // at boot — the log file itself is where you read it.
+  console.log(`[ACP] userData root: ${app.getPath('userData')} | main log: ${mainLogPath}`);
+
   // Collision check #1 — lock-loser: another instance with our app id is
   // alive. Tell the user plainly, then quit (the 1st instance's
   // second-instance handler focuses its window for the healthy case).
