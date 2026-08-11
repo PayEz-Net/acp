@@ -24,6 +24,7 @@ import {
   type AcpPermissionResponsePayload,
 } from '../shared/acpTypes';
 import { getSettings } from './store';
+import { parentEnvWithoutClaudeMarkers } from './claudeEnvMarkers';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
@@ -676,37 +677,6 @@ function startInboxPoller(managed: ManagedPty): void {
  *
  * Best-effort by contract: a prune failure must never block a spawn.
  */
-/**
- * Parent environment with the launching Claude session's markers removed.
- *
- * If the ACP is started from inside a Claude Code session, every pane inherits
- * that session's markers — including `CLAUDE_CODE_CHILD_SESSION`, which makes the
- * child treat itself as a sub-session and **disables transcript saving**.
- *
- * That is not cosmetic. No transcript means nothing for `--resume` to resume, so
- * session continuity silently degrades to a fresh conversation on every restart —
- * the pane reports `session: new` forever and the failure looks like a resume bug
- * rather than an inherited env var. Diagnosed the hard way on 2026-07-29: the
- * "Transcript saving is off" warning was dismissed as a launch artifact, then
- * turned out to be why resume never engaged.
- *
- * A pane is an INDEPENDENT agent session, not a child of whatever launched the
- * app, so the app must not inherit that identity regardless of how it was
- * started. `CLAUDE_CODE_GIT_BASH_PATH` is deliberately KEPT — it is machine
- * config, not session identity.
- */
-function parentEnvWithoutClaudeMarkers(): NodeJS.ProcessEnv {
-  const {
-    CLAUDE_CODE_CHILD_SESSION: _childSession,
-    CLAUDE_CODE_SESSION_ID: _sessionId,
-    CLAUDECODE: _claudeCode,
-    CLAUDE_PID: _claudePid,
-    CLAUDE_AGENTS_SELECT: _agentsSelect,
-    CLAUDE_EFFORT: _parentEffort,
-    ...rest
-  } = process.env;
-  return rest;
-}
 
 function pruneStaleTmpFiles(dir: string): void {
   const MAX_AGE_MS = 24 * 60 * 60 * 1000;
