@@ -417,16 +417,37 @@ export default function mailProxyRoutes(
         return;
       }
 
-      // v2: validate recipients — reject unknown names (AC-11), pass existing agents (AC-12)
+      // v2 + 170009: validate recipients PER RECIPIENT — never void the whole
+      // message over one unknown name. Locally-unknown names (AC-11: unknowns
+      // must not receive mail) are collected and reported; the cloud does the
+      // same for names it cannot resolve in scope. The send fails only when
+      // NO recipient resolves anywhere.
+      const locallyRejected: string[] = [];
+      let deliverableTo = to as string[];
       if (contractorService) {
-        for (const recipientName of to) {
-          const result = await contractorService.resolveRecipient(from_agent, recipientName);
-          if (result.action === 'rejected') {
-            res.status(404).json(
-              error('UNKNOWN_RECIPIENT', result.error!, 'mail_send', (req as any).requestId)
-            );
-            return;
-          }
+        const checks = await Promise.all(
+          (to as string[]).map((recipientName) => contractorService.resolveRecipient(from_agent, recipientName)),
+        );
+        deliverableTo = [];
+        (to as string[]).forEach((recipientName, i) => {
+          if (checks[i]!.action === 'rejected') locallyRejected.push(recipientName);
+          else deliverableTo.push(recipientName);
+        });
+        if (deliverableTo.length === 0) {
+          res.status(404).json(
+            error(
+              'UNKNOWN_RECIPIENT',
+              `No recipients resolved: ${locallyRejected.join(', ')}. Use POST /v1/contractors/hire to activate a contractor.`,
+              'mail_send',
+              (req as any).requestId,
+            )
+          );
+          return;
+        }
+        if (locallyRejected.length > 0) {
+          console.warn(
+            `[mailProxy] POST /send: partial local resolution — forwarding ${deliverableTo.length}, locally rejected: ${locallyRejected.join(', ')} (170009)`,
+          );
         }
       }
 
@@ -437,6 +458,9 @@ export default function mailProxyRoutes(
       // Cloud-side enforcement is the final say (per WO §Cloud API).
       const projectId = resolveCurrentProjectId();
       const forwardBody: Record<string, unknown> = { ...(req.body ?? {}) };
+      if (deliverableTo.length !== (to as string[]).length) {
+        forwardBody.to = deliverableTo;
+      }
       if (projectId != null) {
         forwardBody.project_id = projectId;
       } else {
@@ -465,7 +489,19 @@ export default function mailProxyRoutes(
         rewriteSessionInactive(res, req, 'mail_send', `send from=${from_agent}`);
         return;
       }
-      res.status(cloudResult.status).json(cloudResult.data);
+      // 170009: merge locally-rejected names into the cloud's rejected list so
+      // the caller sees ONE report — non-empty data.rejected means partial
+      // delivery regardless of which layer dropped the name.
+      let responseData = cloudResult.data;
+      if (locallyRejected.length > 0 && (cloudResult.data as any)?.success) {
+        const cloudData = (cloudResult.data as any).data ?? {};
+        const cloudRejected: string[] = Array.isArray(cloudData.rejected) ? cloudData.rejected : [];
+        responseData = {
+          ...(cloudResult.data as any),
+          data: { ...cloudData, rejected: [...cloudRejected, ...locallyRejected] },
+        };
+      }
+      res.status(cloudResult.status).json(responseData);
 
       // Post-send hooks
       if ((cloudResult.data as any)?.success) {
