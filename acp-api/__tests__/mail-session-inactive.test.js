@@ -106,16 +106,20 @@ describe('SESSION_INACTIVE rewrite', () => {
     expect(res.body.data.message_id).toBe(555);
   });
 
+  // 119073 rewrote this contract: a body from_agent DISAGREEING with the
+  // X-ACP-Agent transport identity is now a spoof and is rejected 403 — the
+  // old "stamp both, let the gateway compare" behaviour preserved the very
+  // hole the card closes. See mail-from-agent-trust.test.js for the full
+  // mismatch/derive/agree matrix.
   it('stamps claimed_identity from X-ACP-Agent header onto the upstream body', async () => {
     upstream = { status: 200, body: { success: true, data: { message_id: 777 } } };
     const res = await request(mountApp())
       .post('/v1/mail/send')
       .set('X-ACP-Agent', 'NextPert')
-      .send({ from_agent: 'DotNetPert-Scout', to: ['NextPert'], subject: 'S', body: 'B' });
+      .send({ from_agent: 'NextPert', to: ['DotNetPert-Scout'], subject: 'S', body: 'B' });
     expect(res.status).toBe(200);
     const forwarded = JSON.parse(lastRequest.init.body);
     expect(forwarded.claimed_identity).toBe('NextPert');
-    // body-supplied from_agent is still preserved for comparison
-    expect(forwarded.from_agent).toBe('DotNetPert-Scout');
+    expect(forwarded.from_agent).toBe('NextPert');
   });
 });
