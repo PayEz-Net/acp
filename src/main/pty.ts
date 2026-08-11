@@ -31,6 +31,7 @@ import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnComma
 import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
+import { extractDriftAlert, driftAlertKey, formatDriftAlertNotice } from './mailDriftAlert';
 import { TerminalScreen } from './terminalScreen';
 
 // Per-terminal screen models (see terminalScreen.ts). Raw PTY bytes are fed
@@ -590,6 +591,9 @@ function startInboxPoller(managed: ManagedPty): void {
   let currentInterval = MAIL_POLL_INTERVAL_MS + Math.floor(Math.random() * MAIL_POLL_JITTER_MAX_MS);
   let consecutive429s = 0;
   let activeTimer: NodeJS.Timeout | null = null;
+  // 209637: dedupe key for the drift alert injected into this pane — one
+  // injection per drift transition, not one per poll cycle.
+  let lastInjectedDriftKey: string | null = null;
 
   const scheduleNext = () => {
     if (activeTimer) clearTimeout(activeTimer);
@@ -677,6 +681,19 @@ function startInboxPoller(managed: ManagedPty): void {
       if (page === 1) {
         mailPollFailures.set(agentName, 0);
         mailPollEverSucceeded.set(agentName, true);
+
+        // 209637: a current-project drift alert stamped by the sidecar rides
+        // page 1 of the inbox response. Inject it into the pane ONCE per
+        // drift (dedupe by from->to) — the sidecar's console.error only
+        // reaches a log file; the pane is what a headless agent reads.
+        const driftAlert = extractDriftAlert(response);
+        if (driftAlert && driftAlertKey(driftAlert) !== lastInjectedDriftKey) {
+          lastInjectedDriftKey = driftAlertKey(driftAlert);
+          const text = formatDriftAlertNotice(driftAlert);
+          queuePtyWrite(managed, `\x1b[200~${text}\x1b[201~`);
+          setTimeout(() => queuePtyWrite(managed, '\r'), 100);
+          console.log(`[PTY] Injected current-project drift alert (${driftAlertKey(driftAlert)}) into ${agentName} PTY`);
+        }
 
         // Success — gradually restore interval
         consecutive429s = Math.max(0, consecutive429s - 1);

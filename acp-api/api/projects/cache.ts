@@ -11,6 +11,13 @@
  *   getFresh()  honors TTL — returns null past 60s.
  *   getStale()  ignores TTL — used as the cloud-unreachable fallback.
  *
+ * 209637: TTL_MS was 0 from the initial release (never touched since —
+ * verified via git -S across both repos), which made getFresh DEAD CODE:
+ * every read took the stale path. Restored to the documented 60s. Bounded
+ * staleness is safe here: project switches relaunch the app
+ * (project-switch.ts), PUT writebacks clear the slot, and the mail drift
+ * detector reads the entry on every stamp regardless of which path served it.
+ *
  * Cache invalidation:
  *   - PUT /v1/projects/current writeback → clear `current` for user
  *   - PUT /v1/projects/:id (project attrs) → clear `list` for user (if
@@ -27,7 +34,7 @@ import type {
   MappedProjectTeamMember,
 } from './mapper.js';
 
-const TTL_MS = 0;
+const TTL_MS = 60_000;
 
 export interface ProjectListEntry {
   projects: MappedProject[];

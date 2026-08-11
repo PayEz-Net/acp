@@ -62,6 +62,13 @@ function buildAuthHeaders(_cfg: Config, token: string): Record<string, string> {
 // (first observation is a baseline, not a drift).
 let lastStampedProjectId: number | null | undefined;
 
+// 209637: the console.error above reaches the sidecar LOG, which headless
+// agents never see. This record is the delivery source: GET /inbox/:agent
+// stamps it as `platform_alert` for a window after detection, and the pty
+// poller injects it into the agent's pane — the surface agents actually read.
+const DRIFT_ALERT_WINDOW_MS = 10 * 60 * 1000;
+let lastProjectDrift: { from: number | null; to: number | null; detectedAt: number } | null = null;
+
 function resolveCurrentProjectId(): number | null {
   const session = getSession();
   if (!session?.userId) return null;
@@ -75,9 +82,30 @@ function resolveCurrentProjectId(): number | null {
       `resolves against project ${projectId}'s team. If agents start failing 'not found', THIS is why — ` +
       `check the current-project setting before concluding anyone is deregistered (139077).`,
     );
+    lastProjectDrift = { from: lastStampedProjectId, to: projectId, detectedAt: Date.now() };
   }
   lastStampedProjectId = projectId;
   return projectId;
+}
+
+/**
+ * 209637: the drift alert payload stamped onto inbox responses for
+ * DRIFT_ALERT_WINDOW_MS after a detected drift, or null when there is nothing
+ * fresh to report.
+ */
+function currentDriftAlert(): Record<string, unknown> | null {
+  if (!lastProjectDrift) return null;
+  if (Date.now() - lastProjectDrift.detectedAt > DRIFT_ALERT_WINDOW_MS) return null;
+  return {
+    type: 'CURRENT_PROJECT_DRIFT',
+    from: lastProjectDrift.from,
+    to: lastProjectDrift.to,
+    detected_at: new Date(lastProjectDrift.detectedAt).toISOString(),
+    message:
+      `Current-project drift detected: ${lastProjectDrift.from} -> ${lastProjectDrift.to}. ` +
+      `Every agent's mail on this rig now resolves against project ${lastProjectDrift.to}'s team. ` +
+      `'Not found' errors on known agents are the drift, not deregistration (139077/209637).`,
+  };
 }
 
 /**
@@ -251,6 +279,13 @@ export default function mailProxyRoutes(
       }
       const result = await proxyToCloud(cfg, `/inbox/${req.params.agent}`, 'GET', query);
 
+      // 209637: a fresh project drift rides the inbox response as
+      // platform_alert so the pty poller can inject it into the agent's pane —
+      // the surface headless agents actually read. Stamped on EVERY non-error
+      // outcome within the window, including the TEMP-SHIM empty inbox (a
+      // drifted project is exactly when the shim fires).
+      const driftAlert = currentDriftAlert();
+
       // TEMP-SHIM(agent-identity-overhaul): the cloud agent registry is mid-rebuild.
       // Inbox identity resolves over (vibe_agents/agent_profiles ∪
       // vibe_projects.team_agent_instances) BY NAME, so known-broken seed data makes
@@ -268,10 +303,16 @@ export default function mailProxyRoutes(
           `(${upstreamErr?.code ?? '?'}: ${upstreamErr?.message ?? 'n/a'}) — returning empty inbox ` +
           `until agent-identity overhaul lands`,
         );
-        res.status(200).json({ success: true, data: { messages: [], unread_count: 0 } });
+        res.status(200).json({
+          success: true,
+          data: { messages: [], unread_count: 0, ...(driftAlert ? { platform_alert: driftAlert } : {}) },
+        });
         return;
       }
 
+      if (driftAlert && result.status >= 200 && result.status < 300 && (result.data as any)?.data) {
+        (result.data as any).data.platform_alert = driftAlert;
+      }
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_inbox');
