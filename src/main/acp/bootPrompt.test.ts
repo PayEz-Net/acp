@@ -75,10 +75,14 @@ describe('buildAgentBootPrompt — session summary (boot continuity)', () => {
     expect(out).toMatch(/verify/i);
   });
 
-  it('emits NOTHING when there is no summary — an agent with no prior state boots clean', () => {
+  it('emits NO summary section when there is no summary — an agent with no prior state boots clean', () => {
+    // Assert on the section HEADER, not the bare phrase: the static template
+    // legitimately mentions "Where you left off" when it teaches the resume
+    // branch ("If your profile contains a section titled ..."). What must not
+    // appear without a summary is the section itself.
     for (const empty of [undefined, null, '', '   ']) {
       const out = buildAgentBootPrompt('QAPert', { sessionSummary: empty as any });
-      expect(out).not.toContain('Where you left off');
+      expect(out).not.toContain('## Where you left off');
     }
   });
 
