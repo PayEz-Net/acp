@@ -1618,7 +1618,23 @@ export class AcpRuntimeManager extends EventEmitter {
     // per tool-progress tick and flood the terminal. One-shot lifecycle
     // updates (tool_call, turn_complete, plan, ...) stay logged.
     if (!NOISY_SESSION_UPDATES.has(sessionUpdate)) {
-      console.log(`[ACP ${this.options.agentName}] notification: ${sessionUpdate}`);
+      // Name the tool, don't just say "tool_call". Logging the bare update TYPE
+      // makes this line structurally unable to answer the questions we actually
+      // ask of it: on 2026-08-11 it was used to check whether agents spawn
+      // subagents (deciding whether kimi's secondary-model tiering is worth
+      // enabling) and it could only ever have returned "no" -- it never carried
+      // a tool name to match against. An absence-grep against an instrument
+      // that cannot record the thing passes forever.
+      // Cheap, and it is also the per-tool visibility any cost analysis needs.
+      const toolName = typeof (updateParams as Record<string, unknown>).title === 'string'
+        ? (updateParams as Record<string, unknown>).title as string
+        : typeof (updateParams as Record<string, unknown>).toolName === 'string'
+          ? (updateParams as Record<string, unknown>).toolName as string
+          : undefined;
+      console.log(
+        `[ACP ${this.options.agentName}] notification: ${sessionUpdate}` +
+        (toolName ? ` (${toolName})` : ''),
+      );
     }
 
     switch (sessionUpdate) {
