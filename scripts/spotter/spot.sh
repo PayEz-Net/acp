@@ -19,9 +19,23 @@ LASTRUN="$STATE/last-size.txt"
 SIZE=$(stat -c '%s' "$LOG")
 PREV=$(cat "$LASTRUN" 2>/dev/null || echo 0)
 if [ "$SIZE" = "$PREV" ]; then
-  echo "$(date '+%H:%M') OK: no new output since last check" >> "$STATUS"
+  QUIET=$(( $(cat "$STATE/quiet-count.txt" 2>/dev/null || echo 0) + 1 ))
+  echo "$QUIET" > "$STATE/quiet-count.txt"
+  if [ "$QUIET" -ge 3 ]; then
+    # App still listening but nothing moving = the team went idle (Jon's main
+    # ask: know when BAPert/project stalls). App down = just park.
+    if netstat -ano | grep -qE ':40030 .*LISTENING'; then
+      echo "$(date '+%H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$STATUS"
+      echo "$(date '+%F %H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$ALERTS"
+    else
+      echo "$(date '+%H:%M') OK: app down, watch parked" >> "$STATUS"
+    fi
+  else
+    echo "$(date '+%H:%M') OK: no new output since last check" >> "$STATUS"
+  fi
   exit 0
 fi
+echo 0 > "$STATE/quiet-count.txt"
 echo "$SIZE" > "$LASTRUN"
 
 # --- mechanical digest (last 300 lines, tool-call noise removed) ---
