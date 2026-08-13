@@ -27,6 +27,20 @@ if [ "$SIZE" = "$PREV" ]; then
     if netstat -ano | grep -qE ':40030 .*LISTENING'; then
       echo "$(date '+%H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$STATUS"
       echo "$(date '+%F %H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$ALERTS"
+      # Jon: "if I'm not around, mail BAPert and nudge him along." One self-mail
+      # per idle episode; the flag clears when output resumes.
+      if [ ! -f "$STATE/idle-nudged.flag" ]; then
+        NUDGE=$(curl -s -m 10 -X POST "http://127.0.0.1:3001/v1/mail/send" \
+          -H "Content-Type: application/json" -H "X-ACP-Agent: BAPert" \
+          -d '{"from_agent":"BAPert","to":["BAPert"],"subject":"SPOTTER NUDGE: project idle 15+ min","body":"No agent output for 15+ minutes while the app is up (local spotter noticing, Jon away). Check the board, deal the next card, and get the lanes moving.","priority":"high"}' 2>/dev/null)
+        if echo "$NUDGE" | grep -q '"success":true'; then
+          echo "$(date '+%H:%M') nudged BAPert via self-mail (idle episode)" >> "$STATUS"
+          touch "$STATE/idle-nudged.flag"
+        else
+          echo "$(date '+%H:%M') ALERT: nudge mail FAILED: $(echo "$NUDGE" | head -c 120)" >> "$STATUS"
+          echo "$(date '+%F %H:%M') ALERT: nudge mail FAILED: $(echo "$NUDGE" | head -c 120)" >> "$ALERTS"
+        fi
+      fi
     else
       echo "$(date '+%H:%M') OK: app down, watch parked" >> "$STATUS"
     fi
@@ -35,6 +49,7 @@ if [ "$SIZE" = "$PREV" ]; then
   fi
   exit 0
 fi
+rm -f "$STATE/idle-nudged.flag"
 echo 0 > "$STATE/quiet-count.txt"
 echo "$SIZE" > "$LASTRUN"
 
