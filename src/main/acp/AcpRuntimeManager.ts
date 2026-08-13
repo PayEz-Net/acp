@@ -1985,6 +1985,10 @@ function isAgentBusyError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
     /turn\.agent_busy/i.test(message) ||
-    /cannot launch a new turn while another turn/i.test(message)
+    /cannot launch a new turn while another turn/i.test(message) ||
+    // Newer adapter wording (kimi CLI ≥0.32.x-era): same -32600 busy reject,
+    // different text. Unmatched, every mid-turn human message hard-fails
+    // [Send failed] instead of queueing (Jon 2026-08-13).
+    /another turn is already in progress/i.test(message)
   );
 }
