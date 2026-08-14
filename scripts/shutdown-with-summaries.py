@@ -305,6 +305,47 @@ def distill_transcript(raw: str, max_chars: int = 24000) -> str:
     return convo
 
 
+def started_project_id() -> int | None:
+    """The project this rig was started on, or None.
+
+    A summary is read back at boot as RESUME context, so one stored without a
+    project is not merely untidy — it becomes the marching orders of whichever
+    project starts next. Agents sit on several project teams at once (18 and 31
+    share six of them today), so that is the ordinary case, not an edge case.
+
+    Returns None rather than guessing. Every caller must treat None as "store
+    nothing": an unscoped summary is worse than a missing one, because a missing
+    one costs a cold start and an unscoped one costs a wrong day.
+
+    SAME ORDERING TRAP AS live_roster(): this runs at shutdown, and the ACP API
+    is one of the things shutting down. The env override exists so a caller that
+    already knows the project can say so and not depend on the API outliving it.
+    """
+    override = os.environ.get("SUMMARY_PROJECT_ID", "").strip()
+    if override:
+        if not override.isdigit():
+            print(f"[warn] SUMMARY_PROJECT_ID={override!r} is not an integer — ignoring it")
+        else:
+            print(f"[project] {override} from SUMMARY_PROJECT_ID (API not consulted)")
+            return int(override)
+
+    try:
+        req = urllib.request.Request(f"{ACP_API}/v1/projects/current")
+        req.add_header("X-ACP-Agent", "BAPert")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            payload = json.load(r)
+        pid = ((payload.get("data") or {}).get("project") or {}).get("id")
+        if isinstance(pid, int) and pid > 0:
+            print(f"[project] {pid} from {ACP_API}/v1/projects/current")
+            return pid
+        print("[warn] no project started (nothing was engaged) — storing nothing")
+        return None
+    except Exception as e:
+        print(f"[warn] could not read the started project ({e}) — storing nothing. "
+              f"Re-run with SUMMARY_PROJECT_ID=<id> if you know it.")
+        return None
+
+
 def find_agent_transcripts() -> dict:
     """Find agent session transcripts in ~/.claude/projects/, keyed by AGENT NAME."""
     transcripts = {}
@@ -351,14 +392,21 @@ def find_agent_transcripts() -> dict:
     return {name: payload[0] for name, payload in transcripts.items()}
 
 
-def cleanup_old_summaries(agent_name: str) -> None:
-    """Remove old session summaries for this agent to avoid accumulation."""
+def cleanup_old_summaries(agent_name: str, project_id: int) -> None:
+    """Retire this agent's previous summary FOR THIS PROJECT ONLY.
+
+    THE project_id PREDICATE IS LOad-BEARING, not tidiness. Without it, shutting
+    down project 31 expires the agent's project-18 summary too — so the fix for
+    cross-project bleed would itself destroy the other project's continuity, and
+    silently, because expiry is invisible until the next boot comes up cold.
+    """
     ssh_cmd = ('ssh -i ~/.ssh/dotnetpert_93 dotnetpert@10.0.0.93 '
                '"sudo docker exec -i kb-postgres psql -U kb -d kb -v ON_ERROR_STOP=1 -tA"')
     # Mark old summaries as expired so they don't clutter queries
     sql = (
         f"UPDATE kb SET expires_at = now() "
         f"WHERE scope = 'agent' AND scope_id = '{agent_name}' "
+        f"AND project_id = {int(project_id)} "
         f"AND title LIKE '%session%' AND expires_at IS NULL "
         f"AND created_at < now() - interval '1 second';"
     )
@@ -374,19 +422,29 @@ def cleanup_old_summaries(agent_name: str) -> None:
         print(f"[warn] cleanup failed for {agent_name}: {e}")
 
 
-def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int) -> bool:
-    """
-    Store session summary in kb using kb_remember.py.
-    Creates TWO entries:
-    1. Full session dump (searchable, agents can query via RAG)
-    2. Short keyword summary (boot injection, ~300 tokens, all agents)
+def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int,
+                        project_id: int) -> bool:
+    """Store ONE session summary, scoped to the project it came from.
 
-    Rejects full summaries > 2000 tokens; short summary always stores.
-    Old summaries are marked as expired to keep the KB clean.
+    ONE ROW, NOT TWO (2026-08-14). This used to write a "(full)" dump and a
+    "(short)" boot summary. Measured on the 7-agent shutdown that day: the two
+    rows were the SAME TEXT, differing only by a 127-character trailer appended
+    to the short one telling the reader the full session was available in the kb
+    — a pointer to detail that did not exist. They diverged only when a summary
+    exceeded MAX_SHORT_TOKENS, which it never did.
+
+    The duplicate was not merely waste. Nothing ever read the "(full)" row —
+    sessionSummary.ts matches the short title only — while kb recall returns a
+    handful of slots per query, so two of them went to identical text for every
+    agent, permanently crowding out other memories.
+
+    SCOPED TO A PROJECT. An unscoped summary is read back as resume context by
+    whichever project starts next; see started_project_id().
     """
-    MAX_FULL_TOKENS = 4000
-    # Was 300. See the boot-summary note below for why that ceiling is obsolete.
-    MAX_SHORT_TOKENS = 1200
+    # One tier now, so one ceiling. Trim from the END on a line boundary: the
+    # "what to do next" lives at the end of the handoff, and the old lines[:10]
+    # chop threw exactly that away.
+    MAX_SUMMARY_TOKENS = 1200
 
     if not full_summary or not full_summary.strip():
         print(f"[skip] Empty summary for {agent_name}")
@@ -400,34 +458,8 @@ def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int)
         print(f"[error] kb_remember.py not found at {KB_REMEMBER}")
         return False
 
-    # Cleanup: expire old summaries for this agent
-    cleanup_old_summaries(agent_name)
-
-    # Store FULL summary in KB (searchable for agents via RAG)
-    # Only store if under size limit (otherwise it balloons RAG query costs)
-    if token_estimate <= MAX_FULL_TOKENS:
-        try:
-            cmd = [
-                "python", str(KB_REMEMBER),
-                "--title", f"{agent_name} session dump (full)",
-                "--scope", "agent",
-                "--id", agent_name,
-                "--source", "shutdown-with-summaries.py (Qwen 2.5 full dump)",
-            ]
-            proc = subprocess.run(
-                cmd,
-                input=full_summary.encode(),
-                capture_output=True,
-                timeout=30
-            )
-            if proc.returncode == 0:
-                print(f"[stored] {agent_name} full session dump in kb ({token_estimate} tokens)")
-            else:
-                print(f"[warn] kb_remember failed for full dump: {proc.stderr.decode()}")
-        except Exception as e:
-            print(f"[warn] Storing full dump for {agent_name}: {e}")
-    else:
-        print(f"[skip] {agent_name} full summary too large ({token_estimate} tokens), storing short only")
+    # Retire this agent's previous summary FOR THIS PROJECT ONLY.
+    cleanup_old_summaries(agent_name, project_id)
 
     # Boot summary. This used to keep `lines[:10]` — the first ten lines of the
     # handoff — which sliced BAPert's mid-sentence at "In-Progress Tasks:" and
@@ -441,23 +473,26 @@ def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int)
     # handoff when it fits; trim from the END on a line boundary when it does
     # not, because the "what next" lives at the end.
     short_summary = full_summary.strip()
-    if estimate_tokens(short_summary) > MAX_SHORT_TOKENS:
-        limit = MAX_SHORT_TOKENS * 4  # ~4 chars/token
+    if estimate_tokens(short_summary) > MAX_SUMMARY_TOKENS:
+        limit = MAX_SUMMARY_TOKENS * 4  # ~4 chars/token
         cut = short_summary[:limit]
         nl = cut.rfind('\n')
         short_summary = (cut[:nl] if nl > limit // 2 else cut) + "\n[… trimmed]"
 
-    # Add RAG query note
-    short_summary += "\n\n[The full session is available in the KB for detailed reference — query it if you need context on specific work items.]"
+    # NO "the full session is in the kb" TRAILER. There is no second row to
+    # point at any more, and there never usefully was — the pointer sent agents
+    # to spend a turn fetching text identical to what they were already holding.
 
-    # Store SHORT summary in KB (all agents get this at boot)
+    # The ONE row. Title carries no tier word: there is one summary per agent
+    # per project, and sessionSummary.ts matches this title exactly.
     try:
         cmd = [
             "python", str(KB_REMEMBER),
-            "--title", f"{agent_name} session summary (short)",
+            "--title", f"{agent_name} session summary",
             "--scope", "agent",
             "--id", agent_name,
-            "--source", "shutdown-with-summaries.py (Qwen 2.5 short for boot)",
+            "--project", str(int(project_id)),
+            "--source", f"shutdown-with-summaries.py (Qwen 2.5, project {project_id})",
         ]
         proc = subprocess.run(
             cmd,
@@ -467,10 +502,10 @@ def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int)
         )
         if proc.returncode == 0:
             short_tokens = estimate_tokens(short_summary)
-            print(f"[stored] {agent_name} short summary in kb ({short_tokens} tokens)")
+            print(f"[stored] {agent_name} summary in kb ({short_tokens} tokens, project {project_id})")
             return True
         else:
-            print(f"[error] kb_remember failed for short summary: {proc.stderr.decode()}")
+            print(f"[error] kb_remember failed for {agent_name}: {proc.stderr.decode()}")
             return False
     except Exception as e:
         print(f"[error] Storing short summary for {agent_name}: {e}")
@@ -522,7 +557,18 @@ def main():
             print("[skip] Ollama unavailable — agents will boot fresh")
         else:
             print("[step] Generating session summaries via Qwen...")
-            transcripts = find_agent_transcripts()
+
+            # Resolve the project BEFORE spending minutes of local-model time on
+            # summaries we would then have to throw away. An unscoped summary is
+            # not a lesser summary, it is a hazard: the next project to start
+            # reads it as its own resume context.
+            project_id = started_project_id()
+            if project_id is None:
+                print("[abort] no project id — refusing to store unscoped summaries. "
+                      "Agents will boot cold, which is the safe failure.")
+                transcripts = {}
+            else:
+                transcripts = find_agent_transcripts()
 
             if transcripts:
                 stored = 0
@@ -531,7 +577,7 @@ def main():
                     print(f"[summarize] {agent_name}...")
                     summary, token_estimate = summarize_with_qwen(transcript, agent_name)
                     if summary:
-                        if store_summary_in_kb(agent_name, summary, token_estimate):
+                        if store_summary_in_kb(agent_name, summary, token_estimate, project_id):
                             stored += 1
                         else:
                             rejected += 1

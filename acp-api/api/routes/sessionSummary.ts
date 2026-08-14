@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { Pool } from 'pg';
 import { config } from '../../config.js';
 import { success } from '../response.js';
+import { getStartedProjectId } from '../projects/startedProject.js';
 
 /**
  * GET /v1/agents/:agent/session-summary
@@ -70,21 +71,45 @@ export async function getLatestSessionSummary(
 ): Promise<{ summary: string; source: string | null; createdAt: string } | null> {
   const p = getPool();
   if (!p) return null;
+
+  // THE PROJECT IS RESOLVED HERE, not passed in. This function exists to answer
+  // "what was this agent doing", and the answer is meaningless without saying
+  // WHICH PROJECT it was doing it on. Making it a parameter would let a future
+  // caller omit it — and omitting it is precisely the defect being fixed
+  // (2026-08-14): summaries were keyed by agent alone, so starting project B
+  // handed its agents project A's next-actions list, and because a present
+  // summary IS the resume signal, they began executing it without pausing.
+  //
+  // No engaged project => no summary => cold start. That is the safe failure:
+  // a cold start costs an agent some orientation, a wrong resume costs a day.
+  const projectId = getStartedProjectId();
+  if (projectId === null) {
+    console.warn(`[session-summary] ${agent}: no project engaged — booting without a summary`);
+    return null;
+  }
+
   try {
     // EXACT scope_id match, never a prefix. `QAPert` must not be handed
     // `QAPert-NightHawk`'s state — that bleed happened once (2026-08-09) and
     // an agent resumed believing it left off inside another agent's work.
     // Parameterised, so an agent name cannot alter the query.
+    //
+    // Title is now an EQUALITY too, not a LIKE: there is one summary per agent
+    // per project, so there is nothing to pattern-match against.
+    // project_id has NO `or project_id = 0` escape here. Globals are right for
+    // doctrine; a session summary that claims to belong to every project is the
+    // bug, so an unscoped row must stay unreadable rather than universally read.
     const { rows } = await p.query(
       `select chunk, source, created_at
          from kb
         where scope = 'agent'
           and scope_id = $1
-          and title like '%session summary (short)%'
+          and project_id = $2
+          and title = $3
           and (expires_at is null or expires_at > now())
         order by created_at desc
         limit 1`,
-      [agent],
+      [agent, projectId, `${agent} session summary`],
     );
     if (!rows.length) return null;
 
