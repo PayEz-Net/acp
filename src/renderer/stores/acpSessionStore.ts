@@ -430,7 +430,7 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
           ? {
               ...turn,
               status: 'error' as AcpTurnStatus,
-              contentText: update.error ? `[Send failed] ${update.error}` : turn.contentText,
+              contentText: update.error ? `[Send queued] ${update.error}` : turn.contentText,
               // Mark any still-running tools as failed so their spinners stop.
               toolCalls: turn.toolCalls.map((t) =>
                 t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,
@@ -522,7 +522,7 @@ export const useAcpSessionStore = create<AcpSessionStoreState & AcpSessionStoreA
             ? {
                 ...turn,
                 status: 'error' as AcpTurnStatus,
-                contentText: error ? `[Send failed] ${error}` : turn.contentText,
+                contentText: error ? `[Send queued] ${error}` : turn.contentText,
                 // Mark any still-running tools as failed so their spinners stop.
                 toolCalls: turn.toolCalls.map((t) =>
                   t.status === 'in_progress' ? { ...t, status: 'failed' as const } : t,

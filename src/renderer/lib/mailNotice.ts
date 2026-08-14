@@ -77,7 +77,7 @@ export function buildMailDeliveryDeferredText(
   subject: string,
 ): string {
   return (
-    `[ACP Mail] Delivery deferred — ${agentName} is mid-turn; push skipped to avoid interrupting ${agentName}. ` +
+    `[ACP Mail] Delivery deferred — ${agentName} is mid-turn; push held to avoid interrupting ${agentName}. ` +
     `Message ${id} from ${from} ("${subject}") is parked and will be pushed when the turn ends — ` +
     `or read it now: ${ACP_API_BASE}/v1/mail/messages/${id}.`
   );
