@@ -29,6 +29,15 @@ import type {
 } from '../shared/types';
 import { colonizeWorkspace } from './colonize';
 import { VIBE_API_URL, cloudEndpointsSnapshot } from './env';
+import { ensureSingleUserDataRoot } from './userDataRoot';
+
+// 184949: ONE userData root. Pin userData to <appData>/ACP and migrate any
+// legacy dev-named root's state into it BEFORE anything reads
+// app.getPath('userData') — including requestSingleInstanceLock below, whose
+// lock file lives under userData. setPath is only valid pre-ready, so this
+// runs at module scope. The result's log lines are re-emitted after
+// initMainLog installs the console tee (they predate the sink otherwise).
+const userDataRootInfo = ensureSingleUserDataRoot(app);
 
 
 // --- Install-time / headless colonization (NSIS customInstall) -------------
@@ -492,6 +501,10 @@ app.whenReady().then(async () => {
   // one box (dev `name` vs packaged `productName`), so name the resolved one
   // at boot — the log file itself is where you read it.
   console.log(`[ACP] userData root: ${app.getPath('userData')} | main log: ${mainLogPath}`);
+  // 184949 full fix: the single-root resolution/migration ran at module scope
+  // (pre-lock, pre-ready) — before the log sink existed. Re-emit its lines now
+  // so the migration record lands in main.log, not just the console.
+  for (const line of userDataRootInfo.lines) console.log(line);
 
   // Collision check #1 — lock-loser: another instance with our app id is
   // alive. Tell the user plainly, then quit (the 1st instance's
