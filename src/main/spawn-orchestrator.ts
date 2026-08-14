@@ -30,6 +30,7 @@ import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { acpApiGetAgentProfile,
   acpApiGetSessionSummary, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
+import { computeSpawnStaggerMs } from './spawnStagger';
 import { narrowClaudeEffort } from '../shared/types';
 
 const ACP_API_BASE = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
@@ -339,6 +340,9 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
   const records: SpawnedAgentRecord[] = [];
 
   for (const member of team) {
+    // 177737: set true only when this iteration actually starts a process —
+    // the post-iteration stagger keys off it so dedup-skips cost no delay.
+    let spawnedThisTurn = false;
     // Skip if this agent already has a live session (PTY or ACP) in this
     // project. The dedup guard is scoped by (projectId, agentName) so two
     // projects can each have their own BAPert without collision.
@@ -450,12 +454,13 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // id and throws ModelNotRecognizedError on anything unknown — narrowing
     // here would be exactly the silent-fallback-to-inherit the WO forbids.
     const modelOverride = member.model_override || undefined;
-    // Effective runtime — used ONLY to decide the non-claude spawn stagger
-    // below. SPEC-team-runtime §3.3 (Jon re-scope): NO global agentProvider
+    // Effective runtime — used ONLY to decide the spawn stagger below
+    // (177737; the non-claude config-init floor lives in spawnStagger.ts).
+    // SPEC-team-runtime §3.3 (Jon re-scope): NO global agentProvider
     // fallback here — the team runtime is the single authority. If runtime is
     // unset, spawnAgent throws RuntimeNotSetError (surfaced below), so this
-    // value is moot in that case; treating undefined as non-kimi just skips
-    // an unnecessary stagger before the block fires.
+    // value is moot in that case; treating undefined as non-claude just keeps
+    // the ≥3000ms floor before the block fires.
     const effectiveProvider = runtime;
 
     // Re-check the dedup guard immediately before spawning. The check at the
@@ -478,6 +483,7 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
 
     try {
       const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, modelOverride, projectId, agentId: member.agent_id });
+      spawnedThisTurn = true;
       records.push({
         projectId,
         agentId: member.agent_id,
@@ -536,14 +542,18 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
       }
     }
 
-    // Kimi/Codex first-run init writes the SHARED user-global config
-    // (~/.kimi/kimi.json) via temp→atomic-rename. N near-simultaneous
-    // starts race on that one file and one loses with WinError 5
-    // (Access denied) — exactly the DotNetPert kimi failure. Claude has
-    // no such shared init. Space non-claude spawns so each initializes
-    // its config before the next starts.
-    if (effectiveProvider !== 'claude') {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+    // 177737: stagger spawns for EVERY provider, not just non-claude. The
+    // restart herd (7 agents hitting the provider API in the same instant)
+    // drew a Claude 429 on boot; spacing is now base (ACP_SPAWN_STAGGER_MS,
+    // default 4000) + ≤2s jitter after each successful spawn, with the
+    // pre-existing ≥3000ms non-claude floor kept for the kimi/codex
+    // shared-config init race (~/.kimi/kimi.json temp→atomic-rename loses
+    // with WinError 5 under concurrent first-runs). Only actual spawns are
+    // spaced — dedup-skipped members cost no delay.
+    if (spawnedThisTurn) {
+      const staggerMs = computeSpawnStaggerMs(effectiveProvider);
+      console.log(`[SpawnOrch] stagger: waiting ${staggerMs}ms before next spawn (177737)`);
+      await new Promise((resolve) => setTimeout(resolve, staggerMs));
     }
   }
 
