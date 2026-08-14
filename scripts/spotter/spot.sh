@@ -18,7 +18,13 @@ LASTRUN="$STATE/last-size.txt"
 
 SIZE=$(stat -c '%s' "$LOG")
 PREV=$(cat "$LASTRUN" 2>/dev/null || echo 0)
-if [ "$SIZE" = "$PREV" ]; then
+# Noise lines (available_commands_update / usage_update floods) keep the byte
+# count moving while nothing real happens — treat growth that is ONLY noise as
+# quiet, else the idle detector never fires (Jon 2026-08-13).
+NEWBYTES=""
+[ "$SIZE" != "$PREV" ] && NEWBYTES=$(tail -c $((SIZE - PREV)) "$LOG" 2>/dev/null | grep -avE 'notification: (available_commands_update|usage_update)' | grep -av '^$' || true)
+if [ "$SIZE" = "$PREV" ] || [ -z "$NEWBYTES" ]; then
+  echo "$SIZE" > "$LASTRUN"
   QUIET=$(( $(cat "$STATE/quiet-count.txt" 2>/dev/null || echo 0) + 1 ))
   echo "$QUIET" > "$STATE/quiet-count.txt"
   if [ "$QUIET" -ge 3 ]; then

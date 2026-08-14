@@ -176,6 +176,13 @@ export class AcpRuntimeManager extends EventEmitter {
   // fresh CLI straight into the same wall (the restart churn IS the bog-down).
   private cancelGraceTicksLeft: number | null = null;
   private stalledTurnNudgePending = false;
+  // Consecutive watchdog-stalled turns whose session/cancel WAS honored. That
+  // pattern means the runtime answers cancels but never produces output (QAPert
+  // 2026-08-13: 4+ cancel→nudge→silent loops overnight) — the unanswered-cancel
+  // restart path never fires, so the streak escalates to a restart instead.
+  // Any settle that is NOT a stalled-cancel (normal end_turn, human-backstop
+  // cancel) proves the runtime responds and resets the streak.
+  private silentCancelStreak = 0;
   private lastThrottleAt: number | null = null;
   private throttleExtensions = 0;
 
@@ -1215,6 +1222,22 @@ export class AcpRuntimeManager extends EventEmitter {
         if (this.stalledTurnNudgePending) {
           this.stalledTurnNudgePending = false;
           this.cancelGraceTicksLeft = null;
+          this.silentCancelStreak++;
+          if (this.silentCancelStreak >= MAX_SILENT_CANCELS) {
+            // The runtime keeps HONORING cancels but never producing output:
+            // cancel → nudge → 5 min silence → cancel, forever (QAPert's
+            // overnight loop, 2026-08-13). The unanswered-cancel restart path
+            // never fires for this wedge, so the streak escalates instead.
+            // skipResumeOnce: a session that hangs on every turn is likely
+            // poisoned — fall back to session/new for this start.
+            const message = `${this.options.agentName} honored ${this.silentCancelStreak} consecutive stall cancels without producing output; restarting runtime with a fresh session`;
+            console.warn(`[ACP ${this.options.agentName}] ${message}`);
+            this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: message });
+            this.silentCancelStreak = 0;
+            this.skipResumeOnce = true;
+            void this.restart();
+            return;
+          }
           // The stall honored the cancel: same process, session and context
           // intact — NO restart. Tell the agent its turn was cut and to
           // report + continue (Jon's rule: never let an agent wonder why its
@@ -1224,6 +1247,11 @@ export class AcpRuntimeManager extends EventEmitter {
             resolve: () => {},
             kind: 'system',
           });
+        } else {
+          // A settle that is not a stalled-cancel (normal end_turn, or a
+          // human-backstop cancel that produced a reply) proves the runtime
+          // answers — the silent-stall streak resets.
+          this.silentCancelStreak = 0;
         }
         this.drainPromptQueue();
       })
@@ -1935,6 +1963,13 @@ const HUMAN_WAITING_NUDGE =
  */
 /** Ticks (× the 15s watchdog interval) a cancelled stall gets to settle before the kill+restart escalates. */
 const WATCHDOG_CANCEL_GRACE_TICKS = 2;
+/**
+ * Consecutive honored-but-silent stall cancels before the ladder restarts
+ * anyway: the runtime answers session/cancel yet never emits output, so the
+ * unanswered-cancel path (above) never fires. 3 strikes ≈ 15+ min of a wedge
+ * that otherwise loops cancel→nudge→silence forever (QAPert 2026-08-13).
+ */
+const MAX_SILENT_CANCELS = 3;
 /** How long stderr throttle evidence (429/quota/backoff) stays fresh enough to extend grace. */
 const THROTTLE_EVIDENCE_FRESH_MS = 10 * 60_000;
 /**
