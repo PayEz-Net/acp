@@ -1,6 +1,25 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 
+/**
+ * The process surface AcpRuntimeManager drives. AcpProcess (ACP/JSON-RPC
+ * stdio) and ClaudeStreamJsonTransport (Claude stream-json NDJSON adapted to
+ * the same calls — WO-G4) both satisfy it; the manager stays
+ * protocol-agnostic.
+ */
+export interface AcpTransport {
+  start(): void;
+  request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+  notify(method: string, params?: unknown): void;
+  respond(id: number | string, result: unknown): void;
+  kill(signal?: NodeJS.Signals): void;
+  isRunning(): boolean;
+  on(event: 'notification', listener: (method: string, params: unknown, id?: number | string) => void): this;
+  on(event: 'stderr', listener: (text: string) => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'exit', listener: (code: number | null, signal: string | null) => void): this;
+}
+
 export interface AcpJsonRpcMessage {
   jsonrpc: '2.0';
   id?: number | string;

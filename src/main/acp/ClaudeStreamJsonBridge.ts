@@ -47,6 +47,10 @@ export interface ClaudeStreamJsonBridgeOptions {
   eventStoreDir: string;
   /** Claude session id to resume (`--resume <id>`), if the caller has one. */
   resumeSessionId?: string | null;
+  /** Client-chosen session id for a NEW session (`--session-id <uuid>`).
+   * 2.1.231 defers system/init until the first turn, so a fresh session's id
+   *  is known only because WE chose it — wire-verified 2026-08-14. */
+  newSessionId?: string | null;
   /** Command override for tests (default 'claude'). */
   command?: string;
   /** Args prepended before the stream-json flags (tests inject a fixture). */
@@ -61,7 +65,7 @@ export class ClaudeStreamJsonBridge extends EventEmitter {
 
   constructor(private readonly options: ClaudeStreamJsonBridgeOptions) {
     super();
-    this.sessionId = options.resumeSessionId ?? null;
+    this.sessionId = options.resumeSessionId ?? options.newSessionId ?? null;
   }
 
   getSessionId(): string | null {
@@ -77,7 +81,8 @@ export class ClaudeStreamJsonBridge extends EventEmitter {
     const args = [
       ...(this.options.commandArgsPrefix ?? []),
       ...CLAUDE_STREAM_JSON_ARGS,
-      ...(this.sessionId ? ['--resume', this.sessionId] : []),
+      ...(this.options.resumeSessionId ? ['--resume', this.options.resumeSessionId] : []),
+      ...(this.options.resumeSessionId ? [] : this.options.newSessionId ? ['--session-id', this.options.newSessionId] : []),
     ];
     const child = spawn(this.options.command ?? 'claude', args, {
       cwd: this.options.workDir,
@@ -92,6 +97,9 @@ export class ClaudeStreamJsonBridge extends EventEmitter {
     child.stdout?.on('data', (chunk: string) => this.onStdout(chunk));
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => this.emit('stderr', chunk));
+    // EPIPE when a write lands as the child is dying (kill/interrupt races) —
+    // the exit path settles pending work; don't let it surface unhandled.
+    child.stdin?.on('error', () => { /* dying child — handled via exit */ });
     child.on('error', (err) => this.emit('error', err));
     child.on('exit', (code, signal) => {
       this.child = null;
@@ -105,6 +113,44 @@ export class ClaudeStreamJsonBridge extends EventEmitter {
       throw new Error(`[Bridge ${this.options.agentName}] prompt on a dead bridge`);
     }
     this.child.stdin.write(encodeUserTurn(text));
+  }
+
+  /**
+   * Readiness handshake (2.1.231 defers system/init until the first turn, so
+   * init-on-start is NOT a readiness signal). Claude answers with a
+   * control_response whose response.request_id echoes ours. Throws if the
+   * process is not running.
+   */
+  initializeHandshake(requestId: string): void {
+    if (!this.child?.stdin?.writable) {
+      throw new Error(`[Bridge ${this.options.agentName}] handshake on a dead bridge`);
+    }
+    this.child.stdin.write(
+      `${JSON.stringify({
+        type: 'control_request',
+        request_id: requestId,
+        request: { subtype: 'initialize' },
+      })}\n`,
+    );
+  }
+
+  /**
+   * Interrupt a running turn (ESC semantics). Claude answers with a
+   * control_response and settles the turn with result/error_during_execution
+   * (wire-verified 2026-08-14 on claude 2.1.231) — the process SURVIVES, so
+   * this preempts instead of killing. Throws if the process is not running.
+   */
+  interrupt(): void {
+    if (!this.child?.stdin?.writable) {
+      throw new Error(`[Bridge ${this.options.agentName}] interrupt on a dead bridge`);
+    }
+    this.child.stdin.write(
+      `${JSON.stringify({
+        type: 'control_request',
+        request_id: `interrupt-${Date.now()}`,
+        request: { subtype: 'interrupt' },
+      })}\n`,
+    );
   }
 
   /**

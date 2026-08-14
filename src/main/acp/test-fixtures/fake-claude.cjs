@@ -8,6 +8,12 @@
 // Extra scripted behaviors (real-CLI semantics, wire-verified 2026-08-14 on
 // claude 2.1.231):
 // - `--resume BOGUS`        → exit 1 immediately (unknown session id).
+// - `--session-id <uuid>`   → accepted; the session keeps the handed id.
+// - DEFERRED INIT: no system/init at startup. It arrives with the FIRST user
+//   turn (re-verified 2026-08-14: an idle -p stream-json process emits zero
+//   bytes for 60s+). Readiness is the control handshake below.
+// - control_request initialize → control_response success (the real
+//   readiness handshake; carries a commands payload, no session_id).
 // - prompt text `SLOW:*`    → a turn that never finishes on its own; only an
 //                             interrupt control_request ends it.
 // - prompt text `STREAM:*`  → token-level stream_event deltas followed by the
@@ -20,9 +26,16 @@
 //                             turn is interrupted mid-stream.
 const readline = require('readline');
 
-// Mirror real --resume semantics: a resumed session keeps its id.
+// Mirror real --resume / --session-id semantics: the session keeps the handed
+// id either way.
 const resumeIdx = process.argv.indexOf('--resume');
-const SESSION = resumeIdx >= 0 ? process.argv[resumeIdx + 1] : 'fake-fixture-session-0001';
+const newIdx = process.argv.indexOf('--session-id');
+const SESSION =
+  resumeIdx >= 0
+    ? process.argv[resumeIdx + 1]
+    : newIdx >= 0
+      ? process.argv[newIdx + 1]
+      : 'fake-fixture-session-0001';
 
 if (resumeIdx >= 0 && SESSION === 'BOGUS') {
   process.stderr.write('No conversation found with session ID: BOGUS\n');
@@ -31,14 +44,20 @@ if (resumeIdx >= 0 && SESSION === 'BOGUS') {
 
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
-send({
-  type: 'system',
-  subtype: 'init',
-  session_id: SESSION,
-  cwd: process.cwd(),
-  child_session_marker: process.env.CLAUDE_CODE_CHILD_SESSION ?? null,
-  git_bash_path_kept: process.env.CLAUDE_CODE_GIT_BASH_PATH ?? null,
-});
+// Deferred init (2.1.231): emitted with the FIRST user turn, not at startup.
+let initSent = false;
+const sendInitOnce = () => {
+  if (initSent) return;
+  initSent = true;
+  send({
+    type: 'system',
+    subtype: 'init',
+    session_id: SESSION,
+    cwd: process.cwd(),
+    child_session_marker: process.env.CLAUDE_CODE_CHILD_SESSION ?? null,
+    git_bash_path_kept: process.env.CLAUDE_CODE_GIT_BASH_PATH ?? null,
+  });
+};
 
 let slowTurnPending = false;
 
@@ -47,9 +66,21 @@ rl.on('line', (line) => {
   let parsed = null;
   try { parsed = JSON.parse(line); } catch { /* malformed: still answer below */ }
 
-  // Control channel: interrupt a running turn (real CLI answers with a
-  // control_response and ends the turn with result/error_during_execution).
+  // Control channel: initialize = readiness handshake (no init side effect);
+  // interrupt = end a running turn (real CLI answers with a control_response
+  // and ends the turn with result/error_during_execution).
   if (parsed && parsed.type === 'control_request') {
+    if (parsed.request?.subtype === 'initialize') {
+      send({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: parsed.request_id ?? null,
+          response: { commands: [] },
+        },
+      });
+      return;
+    }
     send({
       type: 'control_response',
       session_id: SESSION,
@@ -67,6 +98,8 @@ rl.on('line', (line) => {
     }
     return;
   }
+
+  sendInitOnce();
 
   let text = '';
   try { text = parsed.message.content[0].text; } catch { /* malformed turn: still answer so tests don't hang */ }

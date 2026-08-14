@@ -1186,7 +1186,11 @@ export function UnifiedTerminal({
             window.electronAPI.writeTerminal(tid, '\u0003');
             setInterruptFlash('Interrupted — stopping current turn…');
           } else {
+            // WO-G4 §5: ESC was already delivered and honoured on this path —
+            // the defect was missing FEEDBACK (the TUI repaints interrupted
+            // state and the pane reads as still running). Flash like kimi.
             window.electronAPI.writeTerminal(tid, '\u001b');
+            setInterruptFlash('Interrupted — stopping current turn…');
           }
         }
         return;

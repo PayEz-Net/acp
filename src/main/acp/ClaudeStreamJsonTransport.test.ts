@@ -81,7 +81,9 @@ describe('ClaudeStreamJsonTransport', () => {
   it('runs the manager handshake: initialize advertises loadSession, session/new yields a session id', async () => {
     const t = makeTransport();
     const sessionId = await startSession(t);
-    expect(sessionId).toBe('fake-fixture-session-0001');
+    // Fresh sessions get a client-chosen UUID (--session-id): 2.1.231 defers
+    // system/init to the first turn, so the id is knowable only because we chose it.
+    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(t.isRunning()).toBe(true);
   });
 
@@ -204,7 +206,8 @@ describe('ClaudeStreamJsonTransport', () => {
     const session = (await t.request('session/new', { mcpServers: [], cwd: dir })) as {
       sessionId: string;
     };
-    expect(session.sessionId).toBe('fake-fixture-session-0001');
+    expect(session.sessionId).toBeTruthy();
+    expect(session.sessionId).not.toBe('BOGUS');
   });
 
   it('A-6: kill() tree-kills the child — no orphan, isRunning flips, later requests reject', async () => {

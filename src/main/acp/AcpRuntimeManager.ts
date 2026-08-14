@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import { BrowserWindow } from 'electron';
+import * as path from 'path';
+import { app, BrowserWindow } from 'electron';
 import {
   type AcpAgentCapabilities,
   type AcpAgentInfo,
@@ -13,7 +14,9 @@ import {
   type AcpWaitState,
 } from '../../shared/acpTypes';
 import { IPC_CHANNELS, type AgentSessionStartFailedPayload, type TerminalProvider } from '../../shared/types';
-import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
+import { AcpProcess, type AcpJsonRpcMessage, type AcpTransport } from './AcpProcess';
+import { ClaudeStreamJsonTransport } from './ClaudeStreamJsonTransport';
+import { CLAUDE_STREAM_JSON_ARGS } from './claudeStreamJson';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import {
   getProviderConfig,
@@ -129,7 +132,7 @@ async function acquireInitLock(): Promise<() => void> {
 }
 
 export class AcpRuntimeManager extends EventEmitter {
-  private process: AcpProcess | null = null;
+  private process: AcpTransport | null = null;
   private sessionId: string | null = null;
   // Preserve the session id across runtime restarts so a watchdog/crash
   // restart can resume the prior session via session/resume instead of
@@ -462,20 +465,36 @@ export class AcpRuntimeManager extends EventEmitter {
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
     if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
-    this.process = new AcpProcess({
-      command,
-      args,
-      cwd: this.options.workDir,
-      env: spawnEnv,
-    });
+    // WO-G4: Claude runs its structured stream-json mode through the
+    // transport adapter instead of a JSON-RPC stdio process. The spawn
+    // command/args live in the transport (CLAUDE_STREAM_JSON_ARGS); the
+    // scaffold `provider.acpCommand` for claude is NOT used here.
+    if (this.provider.id === 'claude') {
+      this.process = new ClaudeStreamJsonTransport({
+        agentName: this.options.agentName,
+        workDir: this.options.workDir,
+        eventStoreDir: path.join(app.getPath('userData'), 'bridge-events'),
+      });
+    } else {
+      this.process = new AcpProcess({
+        command,
+        args,
+        cwd: this.options.workDir,
+        env: spawnEnv,
+      });
+    }
 
     // Developer visibility (Jon's ask): show the exact launch command —
     // overrides included — as a banner line in the pane, the way the old PTY
     // shell echo did. Emitted on every (re)spawn so a restart with
     // re-resolved overrides is visible too.
+    const spawnDisplay =
+      this.provider.id === 'claude'
+        ? `claude ${CLAUDE_STREAM_JSON_ARGS.join(' ')}`
+        : `${command} ${args.join(' ')}${k3Effort ? `  KIMI_MODEL_THINKING_EFFORT=${k3Effort}` : ''}`;
     this.emitAcpEvent({
       sessionUpdate: 'spawn_info',
-      command: `${command} ${args.join(' ')}${k3Effort ? `  KIMI_MODEL_THINKING_EFFORT=${k3Effort}` : ''}`,
+      command: spawnDisplay,
     });
 
     if (this.provider.autoApprove) {

@@ -2,8 +2,9 @@
  * BRIDGE 1 (kanban 117423) — ClaudeStreamJsonBridge transport tests.
  *
  * The child is test-fixtures/fake-claude.cjs, a node script that mirrors the
- * real CLI's stream-json lifecycle (init on start, assistant+result per
- * NDJSON stdin turn, exit 0 on EOF). No real `claude` binary required.
+ * real CLI's stream-json lifecycle (DEFERRED init on the first turn — 2.1.231
+ * emits nothing at startup — assistant+result per NDJSON stdin turn, exit 0
+ * on EOF). No real `claude` binary required.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -57,6 +58,8 @@ describe('ClaudeStreamJsonBridge', () => {
     const sessions: string[] = [];
     b.on('session', (id: string) => sessions.push(id));
     b.start();
+    // Deferred init (2.1.231): init arrives with the FIRST turn, not at spawn.
+    b.prompt('trigger init');
     await waitFor(() => b.getSessionId() === 'fake-fixture-session-0001');
     expect(sessions).toEqual(['fake-fixture-session-0001']);
   });
@@ -66,7 +69,6 @@ describe('ClaudeStreamJsonBridge', () => {
     const events: ClaudeStreamJsonEvent[] = [];
     b.on('event', (e: ClaudeStreamJsonEvent) => events.push(e));
     b.start();
-    await waitFor(() => b.getSessionId() !== null);
     b.prompt('hello bridge');
     await waitFor(() => events.some((e) => e.type === 'result'));
     const assistant = events.find((e) => e.type === 'assistant');
@@ -104,6 +106,7 @@ describe('ClaudeStreamJsonBridge', () => {
     process.env.CLAUDE_CODE_GIT_BASH_PATH = 'C:\\Program Files\\Git\\bin\\bash.exe';
     const b = makeBridge();
     b.start();
+    b.prompt('env probe'); // deferred init: the system event rides the first turn
     await waitFor(() =>
       queryBridgeEvents(dir, 'NextPert').some((s) => s.event.type === 'system'),
     );
@@ -120,6 +123,7 @@ describe('ClaudeStreamJsonBridge', () => {
     const b = makeBridge({ resumeSessionId: 'resumed-uuid-1234' });
     expect(b.getSessionId()).toBe('resumed-uuid-1234');
     b.start();
+    b.prompt('resume probe'); // deferred init: events start with the first turn
     await waitFor(() => queryBridgeEvents(dir, 'NextPert').length > 0);
     expect(fs.existsSync(path.join(dir, 'NextPert', 'resumed-uuid-1234.jsonl'))).toBe(true);
     expect(fs.existsSync(path.join(dir, 'NextPert', 'pre-init.jsonl'))).toBe(false);
