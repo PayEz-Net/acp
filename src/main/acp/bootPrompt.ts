@@ -32,6 +32,26 @@ export interface BootPromptOptions {
 
 const DEFAULT_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
 
+/**
+ * Canonical platform map — injected into BOTH boot paths (fresh + resume).
+ * Jon 2026-08-14: agents resume after a restart with no kanban address and no
+ * pointer to the acp-kanban skill; the resume nudge only said "you're back,
+ * N unread" and they floundered. Every surface an agent needs, one block,
+ * always present — token-cheap because it is reference, not instruction.
+ */
+function platformMapSection(agentName: string, apiUrl: string): string {
+  return `## Platform map
+
+All platform services live at ${apiUrl}. Authenticate every call with the header \`X-ACP-Agent: ${agentName}\` — no bearer token.
+
+- **Kanban** (skill: \`acp-kanban\`) — your cards: \`GET /v1/kanban/tasks?assignedTo=${agentName}&status=in_progress,review\`. Move: \`PUT /v1/kanban/tasks/<id>/status\`. Link a spec to a card: \`PATCH /v1/kanban/tasks/<id>\` with \`{"specPath":"..."}\`.
+- **Agent docs** — team-shared, every agent reads ALL docs: \`GET /v1/documents\`
+- **Mail** (skill: \`agent-mail\`): \`GET /v1/mail/inbox/${agentName}?unread=true\`
+- **Standup** (skill: \`acp-standup\`): \`GET /v1/projects/<projectId>/standup/rounds/current\`
+
+Skills live in \`E:\\Repos\\.kimi\\skills\` — read a skill's SKILL.md before first use.`;
+}
+
 /** `2026-08-07 11:50` in local time, for the session label. */
 function sessionLabelStamp(): string {
   const d = new Date();
@@ -203,6 +223,8 @@ A user-turn line that starts with \`[ACP Mail]\` is a system notification that m
 
 When you send or reply to mail (or standup), follow the **Mail discipline** norm in the agent-mail skill: glance, don't ack — reply only when you have new info, an answer to a direct question asked of you, a real blocker, a correction that changes what someone does, or a disagreement. Silence is the default; a reply is the exception.
 
+${platformMapSection(agentName, apiUrl)}
+
 ## Ready
 
 Say exactly:
@@ -279,6 +301,7 @@ export interface ResumeNudgeOptions {
  */
 export function buildAgentResumeNudge(agentName: string, opts: ResumeNudgeOptions = {}): string {
   const unreadCount = typeof opts.unreadCount === 'number' ? opts.unreadCount : null;
+  const apiUrl = opts.apiUrl || DEFAULT_API_URL;
 
   const mailSection = unreadCount !== null
     ? `You have **${unreadCount}** unread message${unreadCount === 1 ? '' : 's'}.`
@@ -297,6 +320,8 @@ Your previous session was reattached with your full conversation history intact 
 ${mailSection}
 
 A user-turn line that starts with \`[ACP Mail]\` is a system notification that mail just arrived for you — it usually carries the message body inline; act on actionable messages immediately. When one arrives, it overrides the wait-for-the-next-user-message rule below.
+
+${platformMapSection(agentName, apiUrl)}
 
 ## Platform errors
 
