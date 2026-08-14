@@ -133,4 +133,30 @@ describe('SessionManager', () => {
       expect(result).toBe(false);
     });
   });
+
+  // 212705: board.js sends completedAt:null on reopen; the adapter must forward it as
+  // completed_at:null or the card keeps its DONE timestamp. Setting stays server-side.
+  describe('updateTask completedAt forwarding (212705)', () => {
+    const kanbanRow = { id: 1, project_id: 31, title: 't', status: 'backlog', completed_at: null };
+    let calls;
+    beforeEach(() => {
+      calls = [];
+      manager._cloudKanban = async (method, path, body) => {
+        calls.push({ method, path, body });
+        return { data: { ...kanbanRow } };
+      };
+    });
+
+    test('forwards completedAt:null as completed_at:null (reopen clears the DONE stamp)', async () => {
+      await manager.updateTask(1, { status: 'in_progress', completedAt: null }, 31);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].method).toBe('PATCH');
+      expect(calls[0].body.completed_at).toBeNull();
+    });
+
+    test('does NOT forward a non-null completedAt (server auto-stamps on ->done, DnP 7279)', async () => {
+      await manager.updateTask(1, { status: 'done', completedAt: '2026-08-14T00:00:00Z' }, 31);
+      expect(calls[0].body).not.toHaveProperty('completed_at');
+    });
+  });
 });

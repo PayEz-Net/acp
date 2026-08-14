@@ -16,6 +16,8 @@ export function success(data, operationCode, requestId, extras = {}) {
     meta: {
       version: '1.0',
       performance: extras.performance || null,
+      // 121194: present only on endpoints with a real paging contract (kanban list).
+      ...(extras.pagination ? { pagination: extras.pagination } : {}),
     },
   };
 }

@@ -349,6 +349,11 @@ export async function createApp(cfg) {
   // /v1/messages — chat + clusters RETIRED in Phase 5 (replaced by /v1/chat/*)
   app.use('/v1/messages', messagingRoutes(storage));
   app.use('/v1/kanban', kanbanRoutes(storage, localEventBus));
+  // 117431 step 2: the ADDRESSED kanban shape — /v1/projects/:projectId/kanban/tasks,
+  // prefix-gated for bearer callers (canSeeProject forwards the session JWT to the cloud
+  // project read; agents bypass per RULING A, agent scoping = card 210601). Mounted BEFORE
+  // the standup/projects proxies so these paths land here, not in the fallthrough.
+  app.use('/v1/projects/:projectId/kanban', kanbanRoutes(storage, localEventBus, { pathScoped: true }));
   app.use('/v1/chat', chatRoutes(appConfig, localEventBus, storage));
   // Contractor routes — only mounted if enabled (disabled by default)
   if (contractorService && contractorSessionManager) {

@@ -109,12 +109,35 @@ export async function listTasks(storage, filter = {}, projectId) {
   return storage.listTasks(filter); // storage excludes archived unless filter.includeArchived
 }
 
+// 121194 residual (rides 117431): the list endpoint accepted limit/offset/page and IGNORED
+// them — four paging contracts returned an identical full table. This is the single place
+// paging is applied; it exists so the contract is real and unit-testable. `page` is NOT
+// honoured — the API never documented it and two paging dialects is how we got here.
+export function applyPaging(rows, { limit, offset } = {}) {
+  const total = rows.length;
+  let off = 0;
+  let lim = null;
+  if (offset !== undefined) {
+    off = Number(offset);
+    if (!Number.isInteger(off) || off < 0) throw invalid(`Invalid offset "${offset}". Must be a non-negative integer`);
+  }
+  if (limit !== undefined) {
+    lim = Number(limit);
+    if (!Number.isInteger(lim) || lim < 1) throw invalid(`Invalid limit "${limit}". Must be a positive integer`);
+  }
+  const page = lim == null ? rows.slice(off) : rows.slice(off, off + lim);
+  return { rows: page, total, limit: lim, offset: off, hasMore: off + page.length < total };
+}
+
 // G1 — edit free-form fields. Rejects status/assignee (guarded elsewhere) and
 // unknown fields (no silent drop).
 export async function editTask(storage, id, updates, actor, projectId) {
   const task = await getTask(storage, id, projectId);
   if ('status' in updates) throw invalid('Cannot edit status via PATCH — use PUT /tasks/:id/status');
   if ('assignedTo' in updates || 'assignee' in updates) throw invalid('Cannot edit assignee via PATCH — use PUT /tasks/:id/assign');
+  // 117431 step 1: project moves get a NAMED rejection pointing at the real route — never a
+  // generic "not editable" and never silent acceptance.
+  if ('projectId' in updates || 'project_id' in updates) throw invalid('Cannot edit projectId via PATCH — use PUT /tasks/:id/move');
 
   const clean = {};
   for (const [k, v] of Object.entries(updates)) {
@@ -222,4 +245,28 @@ export async function archiveTask(storage, id, archived, actor, projectId) {
   }
   await recordActivity(storage, id, actor, archived ? 'archived' : 'unarchived', { projectId });
   return updated;
+}
+
+// 117431 build-order step 1 — move a card BETWEEN projects, preserving the task id. Today a
+// misfiled card is unrecoverable (PATCH rejects projectId, no move route). The authoritative
+// write + guard on BOTH projects + the 'moved' activity entry live in the .NET twin
+// (PayEz.Vibe.Public.Api ProjectController.MoveKanbanTask) — this layer validates and forwards,
+// and deliberately does NOT recordActivity itself so the trail isn't double-written.
+export async function moveTaskToProject(storage, id, targetProjectId, actor, projectId) {
+  await getTask(storage, id, projectId); // 404 if missing from the active project
+  const target = Number(targetProjectId);
+  if (!Number.isInteger(target) || target <= 0) throw invalid('target_project_id is required (positive integer)');
+  if (target === Number(projectId)) throw invalid(`Task ${id} is already on project ${projectId}`);
+  if (typeof storage.moveTaskToProject !== 'function') {
+    const err = new Error('storage does not support moveTaskToProject (cloud build predates the move endpoint)');
+    err.code = 'MOVE_UNSUPPORTED';
+    throw err;
+  }
+  const moved = await storage.moveTaskToProject(id, target, actor || null, projectId);
+  if (!moved) {
+    const err = new Error(`Move did not persist for task ${id} (no row updated)`);
+    err.code = 'MOVE_NOT_PERSISTED';
+    throw err;
+  }
+  return moved;
 }
