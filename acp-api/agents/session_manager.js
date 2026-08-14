@@ -656,11 +656,65 @@ export class SessionManager {
     if (updates.filesChanged !== undefined) body.files_changed = updates.filesChanged;
     if (updates.archived !== undefined) body.archived = updates.archived;
     // status transitions auto-stamp started_at/completed_at server-side (DnP 7279) — don't send timestamps.
+    // 212705: EXCEPT the reopen clear. The auto-stamp only SETS completed_at on ->done; a
+    // done->reopen must send an explicit null or the card keeps its DONE timestamp (measured
+    // 209387). Non-null completedAt is still never forwarded — setting is the server's job.
+    if (updates.completedAt === null) body.completed_at = null;
     if (Object.keys(body).length === 0) return this.getTask(id, projectId);
     const res = await this._cloudKanban('PATCH', `/v1/projects/${pid}/kanban/tasks/${Number(id)}`, body);
     const t = res?.data;
     if (!t) return null;
     return this._rowToTask(t, pid);
+  }
+
+  // 117431 step 1: cross-project move — cloud POST .../tasks/{id}/move (guards BOTH projects
+  // and records the 'moved' activity server-side). Returns the moved task, null if not found.
+  async moveTaskToProject(id, targetProjectId, actor, projectId) {
+    const pid = this._requireProjectId(projectId, 'moveTaskToProject');
+    const res = await this._cloudKanban('POST', `/v1/projects/${pid}/kanban/tasks/${Number(id)}/move`, {
+      target_project_id: Number(targetProjectId),
+      actor: actor || null,
+    });
+    const t = res?.data;
+    if (!t) return null;
+    return this._rowToTask(t, Number(targetProjectId));
+  }
+
+  // 117431 RULING A (BAPert 2026-08-11): for JWT callers the CLOUD project read IS the
+  // access answer — 200 = the session user can see the project, 404/403 = cannot (the
+  // cloud's double-NotFound existence-hiding). Status-aware, unlike _cloudKanban which
+  // collapses non-2xx into a throw. A transport/resolve failure THROWS so the route can
+  // 503 honestly — never fail open, never fake-deny on a wobble.
+  async canSeeProject(projectId) {
+    const pid = this._requireProjectId(projectId, 'canSeeProject');
+    const url = `${config.vibeApiUrl}/v1/projects/${pid}`;
+    const doFetch = async (bearer) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ROSTER_FETCH_TIMEOUT_MS);
+      try {
+        return await fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${bearer}`,
+            'X-Client-Id': requireTokenClientId(bearer),
+            'X-Vibe-Via': 'idp-proxy',
+          },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    let token = await ensureValidToken(config.idpUrl, 'kanban');
+    if (!token) throw new Error('canSeeProject: NO_SESSION (log in first)');
+    let res = await doFetch(token);
+    if (res.status === 401) {
+      const refreshed = await forceRefresh(config.idpUrl, 'canSeeProject-401');
+      if (!refreshed) throw new Error('canSeeProject: NO_SESSION after refresh');
+      res = await doFetch(refreshed);
+    }
+    if (res.status >= 200 && res.status < 300) return true;
+    if (res.status === 401 || res.status === 403 || res.status === 404) return false;
+    throw new Error(`canSeeProject: cloud answered HTTP ${res.status} for project ${pid}`);
   }
 
   // ── #64 G4: kanban activity / audit trail (vibe.kanban_activity) ──────────
@@ -739,6 +793,8 @@ export class SessionManager {
       getTask: (id, projectId) => self.getTask(id, projectId),
       listTasks: (filter) => self.listTasks(filter),
       updateTask: (id, updates, projectId) => self.updateTask(id, updates, projectId),
+      moveTaskToProject: (id, targetProjectId, actor, projectId) => self.moveTaskToProject(id, targetProjectId, actor, projectId),
+      canSeeProject: (projectId) => self.canSeeProject(projectId),
       // #64 kanban mutation surface — activity (G4) + comments (G3)
       appendKanbanActivity: (e) => self.appendKanbanActivity(e),
       listKanbanActivity: (id, projectId) => self.listKanbanActivity(id, projectId),

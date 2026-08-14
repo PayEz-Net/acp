@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { createTask, getTask, listTasks, moveTask, assignTask, editTask, archiveTask, addComment, TRANSITIONS } from '../kanban/board.js';
+import { createTask, getTask, listTasks, moveTask, assignTask, editTask, archiveTask, addComment, moveTaskToProject, applyPaging, TRANSITIONS } from '../kanban/board.js';
 
 function createMockStorage() {
   return {
@@ -7,6 +7,7 @@ function createMockStorage() {
     getTask: jest.fn(async () => null),
     listTasks: jest.fn(async () => []),
     updateTask: jest.fn(async (_id, updates) => ({ id: 1, ...updates })),
+    moveTaskToProject: jest.fn(async (id, target) => ({ id, projectId: target })),
     appendKanbanActivity: jest.fn(async () => 1),
     addKanbanComment: jest.fn(async (c) => ({ comment_id: 1, ...c })),
     listKanbanComments: jest.fn(async () => []),
@@ -149,6 +150,13 @@ describe('editTask (G1)', () => {
     await expect(editTask(storage, 1, { assignedTo: 'X' }, 'jon')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
   });
 
+  // 117431 step 1: projectId via PATCH gets a NAMED rejection that points at the move route.
+  test('rejects editing projectId via PATCH, naming PUT /tasks/:id/move', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    await expect(editTask(storage, 1, { projectId: 12 }, 'jon')).rejects.toThrow(/PUT \/tasks\/:id\/move/);
+  });
+
   test('rejects unknown field (no silent drop)', async () => {
     const storage = createMockStorage();
     storage.getTask.mockResolvedValue({ ...sampleTask });
@@ -222,6 +230,91 @@ describe('TRANSITIONS', () => {
   });
 });
 
+// ── 117431 step 1: moveTaskToProject (cross-project move, id preserved) ──────────
+describe('moveTaskToProject (117431)', () => {
+  test('moves a task to the target project via storage', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    const moved = await moveTaskToProject(storage, 1, 12, 'Nextpert-Scout', 31);
+    expect(moved.projectId).toBe(12);
+    const call = storage.moveTaskToProject.mock.calls[0];
+    expect(call[0]).toBe(1);
+    expect(call[1]).toBe(12);
+    expect(call[2]).toBe('Nextpert-Scout'); // actor forwarded for the .NET-side activity entry
+    expect(call[3]).toBe(31);
+  });
+
+  test('does NOT double-write activity here (the .NET move endpoint records it)', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    await moveTaskToProject(storage, 1, 12, 'Nextpert-Scout', 31);
+    expect(storage.appendKanbanActivity).not.toHaveBeenCalled();
+  });
+
+  test('404s when the task is not on the source project', async () => {
+    const storage = createMockStorage(); // getTask -> null
+    await expect(moveTaskToProject(storage, 999, 12, 'a', 31)).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+  });
+
+  test('rejects a missing/garbage target', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    await expect(moveTaskToProject(storage, 1, undefined, 'a', 31)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(moveTaskToProject(storage, 1, 'abc', 'a', 31)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+
+  test('rejects a no-op move to the same project', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    await expect(moveTaskToProject(storage, 1, 31, 'a', 31)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+
+  test('surfaces a non-persisting move as a hard failure, never fake-green', async () => {
+    const storage = createMockStorage();
+    storage.getTask.mockResolvedValue({ ...sampleTask });
+    storage.moveTaskToProject.mockResolvedValue(null);
+    await expect(moveTaskToProject(storage, 1, 12, 'a', 31)).rejects.toMatchObject({ code: 'MOVE_NOT_PERSISTED' });
+  });
+});
+
+// ── 121194: applyPaging — the paging contract, unit-tested pure ──────────
+describe('applyPaging (121194)', () => {
+  const rows = Array.from({ length: 10 }, (_, i) => ({ id: i + 1 }));
+
+  test('no params -> full set, hasMore false', () => {
+    const p = applyPaging(rows, {});
+    expect(p.rows).toHaveLength(10);
+    expect(p.total).toBe(10);
+    expect(p.hasMore).toBe(false);
+  });
+
+  test('limit caps the page and sets hasMore', () => {
+    const p = applyPaging(rows, { limit: '5' });
+    expect(p.rows.map((r) => r.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(p.hasMore).toBe(true);
+  });
+
+  test('offset+limit returns a DISTINCT page (the 121194 acceptance: not the same rows)', () => {
+    const p = applyPaging(rows, { limit: '5', offset: '5' });
+    expect(p.rows.map((r) => r.id)).toEqual([6, 7, 8, 9, 10]);
+    expect(p.hasMore).toBe(false);
+    expect(p.total).toBe(10);
+  });
+
+  test('offset past the end -> empty page, hasMore false', () => {
+    const p = applyPaging(rows, { limit: '5', offset: '50' });
+    expect(p.rows).toHaveLength(0);
+    expect(p.hasMore).toBe(false);
+  });
+
+  test('garbage limit/offset 400s, never silently ignored', async () => {
+    expect(() => applyPaging(rows, { limit: 'abc' })).toThrow(/Invalid limit/);
+    expect(() => applyPaging(rows, { limit: '0' })).toThrow(/Invalid limit/);
+    expect(() => applyPaging(rows, { offset: '-1' })).toThrow(/Invalid offset/);
+    try { applyPaging(rows, { limit: 'abc' }); } catch (e) { expect(e.code).toBe('INVALID_REQUEST'); }
+  });
+});
+
 // ── 117039: the LIST DTO must carry the fields a board view consumes ──────────
 // The defect this pins: the list read merged three cloud column boards whose rows
 // were lean (no assignee/blockers reachable), and done/waiting paginated server-
@@ -281,5 +374,32 @@ describe('117039 list DTO (session_manager storage)', () => {
     ]);
     const review = await m.listTasks({ projectId: 31, status: 'review' });
     expect(review.map((r) => r.id)).toEqual([1, 3]);
+  });
+});
+
+// ── 117431 step 1: the storage move call hits the cloud move route, source-scoped ──────────
+describe('117431 moveTaskToProject (session_manager storage)', () => {
+  async function makeManager() {
+    process.env.IDP_URL ||= 'http://127.0.0.1:9';
+    process.env.VIBE_API_URL ||= 'http://127.0.0.1:9';
+    const { SessionManager } = await import('../agents/session_manager.js');
+    const m = new SessionManager({ vibesqlUrl: 'http://localhost:5173' });
+    m._cloudKanban = jest.fn(async () => ({ data: { id: 204645, title: 'probe', status: 'backlog', project_id: 12 } }));
+    return m;
+  }
+
+  test('POSTs to /v1/projects/{source}/kanban/tasks/{id}/move with target_project_id + actor', async () => {
+    const m = await makeManager();
+    const moved = await m.moveTaskToProject(204645, 12, 'Nextpert-Scout', 31);
+    const [method, path, body] = m._cloudKanban.mock.calls[0];
+    expect(method).toBe('POST');
+    expect(path).toBe('/v1/projects/31/kanban/tasks/204645/move');
+    expect(body).toMatchObject({ target_project_id: 12, actor: 'Nextpert-Scout' });
+    expect(moved.id).toBe(204645);
+  });
+
+  test('missing source projectId is a hard error, never a silent global call', async () => {
+    const m = await makeManager();
+    await expect(m.moveTaskToProject(1, 12, 'a', null)).rejects.toThrow(/projectId is required/);
   });
 });
