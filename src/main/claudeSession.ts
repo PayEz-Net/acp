@@ -49,7 +49,28 @@ import * as path from 'path';
 const ACP_SESSION_NAMESPACE = 'acp-desktop.claude.session.v1';
 
 /**
+ * A brand-new session UUID. THIS is what the ACP spawn path uses.
+ *
+ * Every ACP spawn starts a fresh conversation (Jon 2026-08-14: resuming a large
+ * session at startup is "a never in the acp thing"). A fresh id each time keeps
+ * `--session-id` valid — it errors on an id already in use — and means
+ * `--resume` is never emitted from a spawn. Prior context reaches the agent as a
+ * summary in the boot prompt, not as a replayed transcript.
+ *
+ * Random, not derived: a derived id is stable, and a stable id is exactly what
+ * makes "just resume it" look reachable. See pty.ts for the full rationale.
+ */
+export function newClaudeSessionId(): string {
+  return crypto.randomUUID();
+}
+
+/**
  * Stable session UUID for one agent placement.
+ *
+ * NOT FOR THE SPAWN PATH — use `newClaudeSessionId()`. This exists for tooling
+ * that needs to NAME a placement's session deterministically (locating a
+ * transcript, a deliberate manual resume outside the ACP). Wiring it back into a
+ * spawn re-arms the full-transcript boot this rig deliberately removed.
  *
  * Derived rather than persisted: no store to drift, no migration, and a wiped
  * session directory just means the next spawn creates a fresh conversation under

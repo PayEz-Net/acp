@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { error } from '../response.js';
+import { error, success } from '../response.js';
+import { composeBrief, MAX_MAILS_SUMMARISED } from '../mail/briefComposer.js';
 import type { Config } from '../../config.js';
 import type { ContractorService } from '../contractors/service.js';
 import type { SessionManager } from '../contractors/sessionManager.js';
@@ -9,6 +10,9 @@ import { requireStartedProjectId, ProjectNotEngagedError } from '../projects/sta
 
 const AGENTMAIL_BASE = '/v1/agentmail';
 const PROXY_TIMEOUT_MS = 10_000;
+/** How an AGENT reaches this sidecar — printed into brief text so the reply
+ *  instructions are copy-pasteable from inside a pane. */
+const ACP_SELF_BASE = (process.env.ACP_API_URL || 'http://127.0.0.1:3001').replace(/\/+$/, '');
 
 export class NotAuthenticatedError extends Error {
   constructor() {
@@ -176,6 +180,45 @@ function sendProxyError(res: Response, req: Request, err: any, operation: string
   res.status(502).json(
     error('PROXY_ERROR', `Mail proxy failed: ${msg}`, operation, (req as any).requestId)
   );
+}
+
+/**
+ * Mark inbox rows read — THE one implementation of the rule.
+ *
+ * Marks by `inbox_id`, never `message_id`. Those are different sequences
+ * (message 27804 lives in inbox row 87106) and the route below takes the inbox
+ * one, so handing it a message id names a real but UNRELATED row and marks that
+ * read — returning `200 {"success":true}` either way. Measured 2026-08-14: 88
+ * wrong rows written before anyone noticed, because the caller checked only the
+ * status code while the response body named the row it had actually touched.
+ *
+ * So: verify. A mark counts only when the server says it acted on the message
+ * we asked for. Never report a mark that did not happen — the caller uses this
+ * to decide whether mail can stop being re-offered.
+ */
+async function markRowsRead(
+  cfg: Config,
+  agent: string,
+  rows: Array<{ inbox_id?: number; message_id?: number }>,
+): Promise<number[]> {
+  const marked: number[] = [];
+  for (const row of rows) {
+    if (row.inbox_id == null) {
+      console.warn(`[mailBrief] ${agent}: message ${row.message_id} has no inbox_id — cannot mark read`);
+      continue;
+    }
+    const r = await proxyToCloud(cfg, `/inbox/${row.inbox_id}/read`, 'POST');
+    const actedOn = (r.data as any)?.data?.message_id;
+    if (r.status >= 200 && r.status < 300 && (actedOn == null || actedOn === row.message_id)) {
+      if (row.message_id != null) marked.push(row.message_id);
+    } else {
+      console.warn(
+        `[mailBrief] ${agent}: mark-read mismatch — asked for ${row.message_id} ` +
+        `(inbox ${row.inbox_id}), server reported ${actedOn ?? `HTTP ${r.status}`}`,
+      );
+    }
+  }
+  return marked;
 }
 
 export default function mailProxyRoutes(
@@ -464,6 +507,131 @@ export default function mailProxyRoutes(
       res.status(result.status).json(result.data);
     } catch (err: any) {
       sendProxyError(res, req, err, 'mail_mark_all_read');
+    }
+  });
+
+  // POST /v1/mail/brief/:agent — hand this agent ONE summarised brief of its
+  // unread mail, and mark exactly what it was handed as read.
+  //
+  // This is the pull half of mail delivery. The push half (the ProjectBriefr
+  // loop) offers briefs on a cadence; this lets an agent that has just finished
+  // something ask "what have you got for me?" and get it immediately, instead
+  // of waiting out a batching window. Jon 2026-08-14: an agent should not have
+  // to sit idle to earn its mail.
+  //
+  // The two halves cannot double-deliver, and it needs no coordination to be
+  // true: the ONLY state either path keeps is the server's unread set. An agent
+  // that pulls marks its mail read, so the next push sweep simply finds nothing.
+  //
+  // POST, not GET: this mutates (marks read). A GET that clears an inbox is a
+  // trap for anything that retries or prefetches.
+  router.post('/brief/:agent', async (req: Request, res: Response) => {
+    const agent = String(req.params.agent || '').trim();
+    if (!agent) {
+      res.status(400).json(error('VALIDATION_ERROR', 'agent is required', 'mail_brief', (req as any).requestId));
+      return;
+    }
+
+    try {
+      const projectId = requireStartedProjectId(`briefing ${agent}`);
+
+      // Same call the inbox route makes — not a second implementation of it.
+      const inbox = await proxyToCloud(cfg, `/inbox/${encodeURIComponent(agent)}`, 'GET', {
+        unread: true,
+        project_id: projectId,
+      });
+      if (inbox.status < 200 || inbox.status >= 300) {
+        res.status(inbox.status).json(inbox.data);
+        return;
+      }
+
+      const unread: any[] = ((inbox.data as any)?.data?.messages ?? []).filter((m: any) => !m?.read_at);
+      // Slice BEFORE composing and BEFORE marking. The composer describes at
+      // most MAX_MAILS_SUMMARISED; marking a bigger batch read would bin the
+      // overflow unseen. Anything past the cap simply stays unread and leads
+      // the next brief.
+      const messages = unread.slice(0, MAX_MAILS_SUMMARISED);
+      if (unread.length > messages.length) {
+        console.log(
+          `[mailBrief] ${agent}: ${unread.length} unread, briefing ${messages.length}; ` +
+          `${unread.length - messages.length} stay unread for the next brief`,
+        );
+      }
+      if (messages.length === 0) {
+        res.status(200).json(
+          success({ agent_name: agent, count: 0, brief: null, message_ids: [] }, 'mail_brief', (req as any).requestId),
+        );
+        return;
+      }
+
+      const { text, modelOk } = await composeBrief(agent, messages, ACP_SELF_BASE);
+
+      // PULL marks on compose: the caller IS the agent, so returning the brief
+      // is delivery. PUSH must not — the router still has to get it into a
+      // turn, and an inject can be deferred or fail. Marking before that is
+      // confirmed loses mail silently. Push passes mark_read:false and calls
+      // /brief/:agent/confirm once the runtime has actually taken it.
+      const shouldMark = req.body?.mark_read !== false;
+      if (!shouldMark) {
+        res.status(200).json(
+          success(
+            {
+              agent_name: agent,
+              count: messages.length,
+              brief: text,
+              model_ok: modelOk,
+              message_ids: messages.map((m) => m.message_id),
+              inbox_ids: messages.map((m) => m.inbox_id),
+              marked_read: [],
+            },
+            'mail_brief',
+            (req as any).requestId,
+          ),
+        );
+        return;
+      }
+
+      const marked = await markRowsRead(cfg, agent, messages);
+
+      res.status(200).json(
+        success(
+          {
+            agent_name: agent,
+            count: messages.length,
+            brief: text,
+            model_ok: modelOk,
+            message_ids: messages.map((m) => m.message_id),
+            marked_read: marked,
+          },
+          'mail_brief',
+          (req as any).requestId,
+        ),
+      );
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'mail_brief');
+    }
+  });
+
+  // POST /v1/mail/brief/:agent/confirm  { rows: [{inbox_id, message_id}] }
+  // Delivery confirmed — now the mail may stop being re-offered. Separate from
+  // compose so the push path marks AFTER the runtime accepted the brief, not
+  // before. Same marking rule, same verification, one implementation.
+  router.post('/brief/:agent/confirm', async (req: Request, res: Response) => {
+    const agent = String(req.params.agent || '').trim();
+    const rows = req.body?.rows;
+    if (!agent || !Array.isArray(rows)) {
+      res.status(400).json(
+        error('VALIDATION_ERROR', 'agent and rows[] are required', 'mail_brief_confirm', (req as any).requestId),
+      );
+      return;
+    }
+    try {
+      const marked = await markRowsRead(cfg, agent, rows);
+      res.status(200).json(
+        success({ agent_name: agent, marked_read: marked, requested: rows.length }, 'mail_brief_confirm', (req as any).requestId),
+      );
+    } catch (err: any) {
+      sendProxyError(res, req, err, 'mail_brief_confirm');
     }
   });
 

@@ -39,6 +39,16 @@ const DEFAULT_API_URL = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
  * N unread" and they floundered. Every surface an agent needs, one block,
  * always present — token-cheap because it is reference, not instruction.
  */
+// NO SKILL PATH HERE. This block used to end by telling agents that skills live
+// at an absolute path into the kimi skills directory. Two defects in one line:
+// a banned drive literal (guard-workspace-debt A:drive-literal — it had been
+// failing `npm test` in pretest for everyone), and, worse, the WRONG tree for
+// most of the team. Claude agents load skills from their own runtime directory;
+// every claude agent was pointed at kimi's. Each runtime discovers its own
+// skills by name, so naming a location was a second resolver for something the
+// CLI already owns. Name the skill, never its path — and note this comment
+// deliberately does not quote the old string, because quoting it would re-trip
+// the very guard the change exists to satisfy.
 function platformMapSection(agentName: string, apiUrl: string): string {
   return `## Platform map
 
@@ -49,7 +59,7 @@ All platform services live at ${apiUrl}. Authenticate every call with the header
 - **Mail** (skill: \`agent-mail\`): \`GET /v1/mail/inbox/${agentName}?unread=true\`
 - **Standup** (skill: \`acp-standup\`): \`GET /v1/projects/<projectId>/standup/rounds/current\`
 
-Skills live in \`E:\\Repos\\.kimi\\skills\` — read a skill's SKILL.md before first use.`;
+Each service above names its skill — invoke the skill rather than hand-rolling the call.`;
 }
 
 /** `2026-08-07 11:50` in local time, for the session label. */

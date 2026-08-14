@@ -23,6 +23,11 @@ import urllib.request
 from pathlib import Path
 
 OLLAMA = os.environ.get("KB_OLLAMA_URL", "http://10.0.0.220:11434")
+# Summariser ladder: the fast local model first, a bigger local one as the
+# last resort when the fast one collapses on a long transcript. Both local,
+# both free — no account tokens are spent summarising.
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen2.5-coder:7b")
+SUMMARY_FALLBACK_MODEL = os.environ.get("SUMMARY_FALLBACK_MODEL", "gemma4:26b")
 KB_REMEMBER = Path("E:/Repos/.claude/hooks/kb_remember.py")
 OLLAMA_HEALTH_TIMEOUT = 2  # Don't wait long for health check
 
@@ -77,43 +82,231 @@ def summarize_with_qwen(transcript_text: str, agent_name: str, max_tokens: int =
     Call Qwen 2.5 to generate a session summary.
     Returns (summary_text, token_estimate).
     """
-    prompt = f"""Summarize this {agent_name} session transcript concisely.
+    # (see distill_transcript below — the tail is what matters)
+    # THE TAIL, DISTILLED. This used to pass `transcript_text[:8000]` — the
+    # FIRST 8k characters of a file that runs to megabytes — while the comment
+    # beside it said "most recent is at the end" and the prompt said "favor
+    # recency". So every summary described the boot preamble: "the session began
+    # with the user receiving a list of available tools and agents." Accurate,
+    # and worth nothing to an agent trying to pick the work back up.
+    #
+    # Raw jsonl is also the wrong food: most of its bytes are tool_use blobs and
+    # metadata, so 8k of raw JSON is a handful of messages. Distil to role +
+    # text + tool names first, then take the END.
+    convo = distill_transcript(transcript_text, max_chars=24000)
 
-Format:
-1. A 2-3 sentence overall summary of what was accomplished
-2. Detailed bulleted list of key moments/decisions (the last parts are MOST important)
+    instructions = f"""You are writing a handoff note for {agent_name}, a software agent whose
+session is ending. They will read this at the start of their next session, with
+no memory of this one. Write it TO them, in second person.
 
-Keep it tight enough to fit in ~1500 tokens when used as boot context. If you must choose, favor recency.
+Cover, in this order:
+1. What they were working on — the actual task, with real names: files, cards, branches, agents.
+2. What is DONE and verified, versus what is claimed but unverified.
+3. What is IN FLIGHT right now — the thing they were mid-way through.
+4. What to do NEXT, concretely enough to act on without re-reading anything.
+5. Open questions, blockers, or decisions awaiting someone else.
 
----
-TRANSCRIPT:
-{transcript_text[:8000]}  # First 8k chars (most recent is at the end, usually)
-"""
+Rules:
+- Specifics only. Names, ids, paths, numbers. No "various tasks" or "several improvements".
+- Say nothing about tool listings, available agents, skills, or session startup. That is scaffolding, not work.
+- If something was tried and failed, say so and why — that is the most valuable line you can write.
+- No preamble, no sign-off. Under 400 words."""
 
-    req = urllib.request.Request(
-        f"{OLLAMA}/api/generate",
-        data=json.dumps({
-            "model": "qwen2.5-coder:7b",
-            "prompt": prompt,
-            "stream": False,
-            "temperature": 0.3,  # Lower temp for consistency
-        }).encode(),
-        headers={"Content-Type": "application/json"}
-    )
+    # num_ctx must be set explicitly: Ollama's default context is far smaller
+    # than this prompt, and an over-long prompt comes back as a bare HTTP 500 —
+    # which is how the two biggest transcripts (the two that most needed a
+    # summary) silently produced none. `temperature` also belongs inside
+    # `options` for /api/generate; at the top level it is ignored.
+    def call(model: str, convo_text: str, timeout: int) -> str:
+        body = instructions + "\n---\nEND OF SESSION (most recent last):\n" + convo_text
+        req = urllib.request.Request(
+            f"{OLLAMA}/api/generate",
+            data=json.dumps({
+                "model": model,
+                "prompt": body,
+                "stream": False,
+                "options": {"num_ctx": 16384, "temperature": 0.3},
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r).get("response", "").strip()
+
+    # A ladder, not a single shot. The 7b model collapses into repetition on the
+    # longest, noisiest transcripts — which belong to the agents who did the most
+    # work and most need a handoff. Shrinking the input fixes most of those; the
+    # bigger local model catches the rest. Both are free and this runs once, at
+    # shutdown, so the only cost of trying harder is a little wall-clock.
+    attempts = [
+        (SUMMARY_MODEL, convo, 180),
+        (SUMMARY_MODEL, convo[-9000:], 180),
+        (SUMMARY_FALLBACK_MODEL, convo[-14000:], 600),
+    ]
+    for model, text, timeout in attempts:
+        try:
+            summary = call(model, text, timeout)
+        except Exception as e:
+            print(f"[warn] {agent_name}: {model} failed ({e})")
+            continue
+        if summary and not is_degenerate(summary):
+            return summary, estimate_tokens(summary)
+        print(f"[warn] {agent_name}: {model} returned degenerate output on {len(text)} chars — shrinking/escalating")
+
+    print(f"[warn] {agent_name}: no usable summary after {len(attempts)} attempts")
+    return "", 0
+
+
+ACP_API = os.environ.get("ACP_API_URL", "http://127.0.0.1:3001").rstrip("/")
+
+
+def live_roster() -> set:
+    """Agent names the rig actually knows about.
+
+    The summary is looked up at boot by EXACT agent name
+    (sessionSummary.ts: `scope_id = $1`, deliberately never a prefix), so a row
+    stored under anything else is invisible forever. Gating on the real roster
+    keeps junk keys — temp probe dirs, other repos' sessions — out of the kb
+    instead of storing summaries nobody can ever read.
+    """
+    # Explicit roster wins. THE ORDERING TRAP: this script's whole job runs at
+    # shutdown, and the ACP API is one of the things shutting down — so asking
+    # it for the roster works from the before-quit handler (API still alive) and
+    # fails from any hard kill or after-the-fact run, storing NOTHING at exactly
+    # the moment summaries matter most. A caller that already knows the team can
+    # say so.
+    override = os.environ.get("SUMMARY_ROSTER", "").strip()
+    if override:
+        names = {n.strip() for n in override.split(",") if n.strip()}
+        print(f"[roster] {len(names)} from SUMMARY_ROSTER (API not consulted)")
+        return names
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            result = json.load(r)
-            summary = result.get("response", "").strip()
-            token_estimate = estimate_tokens(summary)
-            return summary, token_estimate
+        req = urllib.request.Request(f"{ACP_API}/v1/mail/agents")
+        req.add_header("X-ACP-Agent", "BAPert")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            payload = json.load(r)
+        data = payload.get("data")
+        rows = data.get("agents") if isinstance(data, dict) else data
+        names = set()
+        for row in rows or []:
+            if isinstance(row, str):
+                names.add(row)
+            elif isinstance(row, dict) and row.get("name"):
+                names.add(str(row["name"]))
+        return names
     except Exception as e:
-        print(f"[warn] Qwen summarize failed for {agent_name}: {e}")
-        return "", 0
+        print(f"[warn] roster unavailable ({e}) — cannot verify agent names")
+        return set()
+
+
+def agent_name_from_transcript(path: Path) -> str | None:
+    """Whose session is this? Ask the transcript, don't decode the folder name.
+
+    THE BUG THIS FIXES (2026-08-14): the agent name was taken from the project
+    DIRECTORY SLUG — `C--Users-jon-local-AgentRepos-BAPert` — and stored as the
+    kb scope_id. Boot looks up `BAPert`. Exact match, so every summary ever
+    written by this script was unreadable, and every boot logged `summary=none`
+    while the rig looked like it had a working summary pipeline.
+
+    Claude records the real `cwd` in the transcript, and the ACP spawns each
+    agent in a directory named for it, so the basename of that cwd IS the agent
+    name — read from the runtime rather than reconstructed from a slug that was
+    lossy on purpose.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f):
+                if i > 50:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = entry.get("cwd")
+                if cwd:
+                    return Path(str(cwd).replace("\\", "/")).name
+    except Exception as e:
+        print(f"[warn] could not read cwd from {path.name}: {e}")
+    return None
+
+
+def is_degenerate(text: str) -> bool:
+    """Did the local model produce garbage instead of a handoff?
+
+    DotNetPert-Scout's first run came back as a line of '@@@@@@@@@@'. A summary
+    like that is WORSE than none: the boot prompt presents it as "where you left
+    off", so the agent starts believing it has context and has nothing. Reject
+    it — an empty summary is honest, garbage is not.
+    """
+    body = "".join(ch for ch in text if not ch.isspace())
+    if len(body) < 40:
+        return True
+    # A real handoff is mostly letters and digits.
+    alnum = sum(1 for ch in body if ch.isalnum())
+    if alnum / len(body) < 0.55:
+        return True
+    # Any single character dominating is the classic repetition collapse.
+    if max(body.count(ch) for ch in set(body)) / len(body) > 0.30:
+        return True
+    return False
+
+
+def distill_transcript(raw: str, max_chars: int = 24000) -> str:
+    """Raw jsonl -> readable conversation tail.
+
+    Keeps role, message text, and tool NAMES (not their payloads — a 40KB file
+    read tells the summariser nothing that `<used Read>` doesn't). Returns the
+    LAST `max_chars` worth, because what an agent needs on resume is where it
+    got to, not how it started.
+    """
+    parts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = entry.get("message") or {}
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        else:
+            chunks = []
+            for block in content or []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    chunks.append(block.get("text", ""))
+                elif btype == "tool_use":
+                    chunks.append(f"<used {block.get('name')}>")
+                elif btype == "tool_result":
+                    chunks.append("<tool result>")
+                # thinking blocks are deliberately dropped
+            text = "\n".join(c for c in chunks if c).strip()
+        if not text:
+            continue
+        # Bound any single message so one giant paste can't eat the window.
+        if len(text) > 2000:
+            text = text[:2000] + " …"
+        parts.append(f"{role.upper()}: {text}")
+
+    convo = "\n\n".join(parts)
+    if len(convo) > max_chars:
+        convo = "[… earlier turns omitted …]\n\n" + convo[-max_chars:]
+    return convo
 
 
 def find_agent_transcripts() -> dict:
-    """Find all agent session transcripts in ~/.claude/projects/"""
+    """Find agent session transcripts in ~/.claude/projects/, keyed by AGENT NAME."""
     transcripts = {}
     projects_dir = Path.home() / ".claude" / "projects"
 
@@ -121,28 +314,41 @@ def find_agent_transcripts() -> dict:
         print(f"[info] No projects dir found at {projects_dir}")
         return transcripts
 
-    for agent_dir in projects_dir.iterdir():
-        if not agent_dir.is_dir():
+    roster = live_roster()
+    if roster:
+        print(f"[roster] {len(roster)} agents: {', '.join(sorted(roster))}")
+    else:
+        print("[warn] no roster — storing nothing (a summary under a wrong key is unreadable)")
+        return transcripts
+
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
             continue
 
-        agent_name = agent_dir.name
-
-        # Find the most recent .jsonl transcript
-        jsonl_files = list(agent_dir.glob("**/*.jsonl"))
+        jsonl_files = list(project_dir.glob("**/*.jsonl"))
         if not jsonl_files:
             continue
 
         latest_jsonl = max(jsonl_files, key=lambda p: p.stat().st_mtime)
+        agent_name = agent_name_from_transcript(latest_jsonl)
+
+        if not agent_name or agent_name not in roster:
+            continue
+
+        # Same agent in two project dirs (a second-instance cwd): keep the
+        # transcript that was written most recently.
+        prev = transcripts.get(agent_name)
+        if prev and prev[1] >= latest_jsonl.stat().st_mtime:
+            continue
 
         try:
-            # Read transcript
             content = latest_jsonl.read_text(errors="ignore")
-            transcripts[agent_name] = content
-            print(f"[found] {agent_name}: {len(content)} bytes")
+            transcripts[agent_name] = (content, latest_jsonl.stat().st_mtime)
+            print(f"[found] {agent_name}: {len(content)} bytes ({project_dir.name})")
         except Exception as e:
             print(f"[error] Reading {agent_name} transcript: {e}")
 
-    return transcripts
+    return {name: payload[0] for name, payload in transcripts.items()}
 
 
 def cleanup_old_summaries(agent_name: str) -> None:
@@ -178,11 +384,16 @@ def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int)
     Rejects full summaries > 2000 tokens; short summary always stores.
     Old summaries are marked as expired to keep the KB clean.
     """
-    MAX_FULL_TOKENS = 2000
-    MAX_SHORT_TOKENS = 300
+    MAX_FULL_TOKENS = 4000
+    # Was 300. See the boot-summary note below for why that ceiling is obsolete.
+    MAX_SHORT_TOKENS = 1200
 
     if not full_summary or not full_summary.strip():
         print(f"[skip] Empty summary for {agent_name}")
+        return False
+
+    if is_degenerate(full_summary):
+        print(f"[reject] {agent_name} summary is degenerate model output — storing nothing")
         return False
 
     if not KB_REMEMBER.exists():
@@ -218,18 +429,23 @@ def store_summary_in_kb(agent_name: str, full_summary: str, token_estimate: int)
     else:
         print(f"[skip] {agent_name} full summary too large ({token_estimate} tokens), storing short only")
 
-    # Create SHORT summary for boot injection (extract first section + keywords)
-    lines = full_summary.split('\n')
-    short_lines = []
-    for line in lines[:10]:  # Take first ~10 lines (usually covers the 2-3 sentence summary)
-        if line.strip():
-            short_lines.append(line)
-        if len('\n'.join(short_lines)) > 1200:  # Stop if we exceed ~300 tokens
-            break
-
-    short_summary = '\n'.join(short_lines)
-    if not short_summary:
-        short_summary = full_summary[:500]  # Fallback: first 500 chars
+    # Boot summary. This used to keep `lines[:10]` — the first ten lines of the
+    # handoff — which sliced BAPert's mid-sentence at "In-Progress Tasks:" and
+    # threw away the half that says what to do next.
+    #
+    # The 300-token ceiling came from the context-size panic. The measured win
+    # turned out to be TURN elimination, not per-turn size (77x), and startups
+    # are now fresh sessions rather than replayed transcripts — so a boot
+    # summary is landing in an empty window, not a full one. Jon 2026-08-14:
+    # "the session summarizer needn't be quite so sparse now." Keep the whole
+    # handoff when it fits; trim from the END on a line boundary when it does
+    # not, because the "what next" lives at the end.
+    short_summary = full_summary.strip()
+    if estimate_tokens(short_summary) > MAX_SHORT_TOKENS:
+        limit = MAX_SHORT_TOKENS * 4  # ~4 chars/token
+        cut = short_summary[:limit]
+        nl = cut.rfind('\n')
+        short_summary = (cut[:nl] if nl > limit // 2 else cut) + "\n[… trimmed]"
 
     # Add RAG query note
     short_summary += "\n\n[The full session is available in the KB for detailed reference — query it if you need context on specific work items.]"

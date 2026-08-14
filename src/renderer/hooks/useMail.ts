@@ -114,12 +114,16 @@ export function useMail({ agents, pollInterval = 30000, enabled = true }: UseMai
       // Fetch full message with ActionPanel response
       await fetchMessage(message.message_id);
 
-      // Mark as read if unread
-      if (!message.is_read) {
-        const success = await markMessageRead(message.message_id);
+      // Mark as read if unread. markMessageRead takes the INBOX id (see its
+      // doc comment) — this passed message_id, so opening a mail in the sidebar
+      // marked a different, older mail read instead.
+      if (!message.is_read && message.inbox_id != null) {
+        const success = await markMessageRead(message.inbox_id);
         if (success) {
           markAsRead(message.message_id);
         }
+      } else if (!message.is_read) {
+        console.warn(`[Mail] no inbox_id on message ${message.message_id} — not marking read`);
       }
     } else {
       selectMessage(null);

@@ -22,13 +22,36 @@ export default function sseStreamRoutes(upstreamManager: UpstreamSseManager, loc
   // lists from renderer clients. No hardcoded roster, no fallback agents.
   const subscribedAgents = new Set<string>();
 
+  // Say it out loud at boot. The suppression below is intentional, but an
+  // intentional silence and a broken pipe look identical in a log that never
+  // mentions either.
+  console.log(
+    '[SSE] agent mail push SUPPRESSED by design — mail reaches agents as batched '
+    + 'briefs via ProjectBriefr (scripts/project-briefer.py). If briefs are not '
+    + 'arriving, the router is down: agents are receiving NO mail.',
+  );
+
+  /**
+   * MAIL PUSH TO AGENTS IS OFF, DELIBERATELY.
+   *
+   * `next` is empty on purpose, so upstreamManager.stop() runs and no agent is
+   * subscribed to cloud mail push. Per-message push cost one turn per message
+   * and a full session-context reload with it - one week of quota in four hours
+   * (docs/a_very_important_hard_lesson_learned_about_ai_rigs.md). Mail now
+   * reaches agents ONLY as a batched brief from ProjectBriefr
+   * (scripts/project-briefer.py -> POST /v1/lifecycle/agents/:name/inject).
+   *
+   * BEFORE YOU "FIX" THIS: re-populating `next` from client.agents restores the
+   * burn. It looks like a one-line repair of an empty loop. It is not.
+   *
+   * This previously read as a for-loop whose body was three comments - which is
+   * indistinguishable from a bug, and left NOTHING saying push was off on
+   * purpose while the router that replaced it was still a stub. The rig went
+   * deaf and nothing reported it. Hence the startup line below: a suppression
+   * that cannot announce itself is not a decision, it is an outage.
+   */
   function recomputeUpstream(): void {
     const next = new Set<string>();
-    for (const client of clients) {
-      if (client.agents) {
-        for (const agent of client.agents) next.add(agent);
-      }
-    }
 
     const changed =
       next.size !== subscribedAgents.size ||

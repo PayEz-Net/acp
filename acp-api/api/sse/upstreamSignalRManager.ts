@@ -118,6 +118,10 @@ export class UpstreamSignalRManager {
 
     conn.on('ReceiveNotification', (notification: Record<string, unknown>) => {
       const data = notification.data as Record<string, unknown> | undefined;
+      // NOTE: Full mail body in notification.data is code drift — intended architecture
+      // is to send only metadata here and fetch body on-demand. For now, we include the
+      // full body so mail routers (ProjectBriefr) can use it directly without additional
+      // API calls. If needed, any agent can fetch the full mail via the mail API directly.
       console.log('[SignalR] ReceiveNotification:', {
         event_type: notification.event_type,
         message_id: data?.message_id,

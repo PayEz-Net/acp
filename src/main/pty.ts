@@ -17,6 +17,7 @@ import {
   type AcpEventPayload,
   type AcpPromptPayload,
   type AcpInjectMailPayload,
+  type AcpMailInjectResult,
   type AcpCancelPayload,
   type AcpPurgeQueuePayload,
   type AcpSetModePayload,
@@ -28,7 +29,7 @@ import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputRepor
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
 import { buildClaudeSpawnCommand, resolveClaudeEffort, isForeignRuntimeModel } from './claudeSpawnCommand';
-import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
+import { newClaudeSessionId } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
 import { TerminalScreen } from './terminalScreen';
@@ -345,6 +346,73 @@ const acpRuntimes: Map<string, AcpRuntimeManager> = new Map();
     Without this the poller outlives the pane and keeps injecting into a dead runtime. */
 const acpMailTimers = new Map<string, () => void>();
 let mainWindowRef: BrowserWindow | null = null;
+
+/**
+ * Deliver one already-composed notice into an agent's live ACP turn, for
+ * callers OUTSIDE the renderer (ProjectBriefr routes briefs in over the
+ * lifecycle callback server — see lifecycle-server POST /internal/mail/inject).
+ *
+ * Same runtime path as the ACP_INJECT_MAIL ipc handler, so the tri-state is
+ * unchanged: 'delivered' | 'deferred' (agent mid-turn, park and re-offer —
+ * NOT a failure) | 'failed'. 'no-runtime' is DISTINCT from 'failed' on
+ * purpose: no ACP session for that name is an unspawned/PTY-only agent, and a
+ * router must be able to tell "nobody home" from "the runtime broke" — the
+ * two want different operator responses.
+ */
+export async function injectMailToAgent(
+  agentName: string,
+  text: string,
+): Promise<AcpMailInjectResult | 'no-runtime'> {
+  const runtime = getAcpRuntimeByAgent(agentName);
+  if (runtime) return runtime.injectMail(text);
+
+  // PTY agents (every Claude pane on this rig) have no ACP runtime, so an
+  // ACP-only inject returns 'no-runtime' for a perfectly live agent — which is
+  // exactly how the router first came up delivering nothing to all seven.
+  // Same handoff the inbox poller used: bracketed paste, then a separate CR,
+  // so a multi-line brief arrives as ONE input rather than N submitted lines.
+  const managed = getManagedPtyByAgent(agentName);
+  if (!managed) return 'no-runtime';
+
+  // WHEN we write does not matter: Claude Code queues typed input and consumes
+  // it at the turn boundary (measured 2026-08-14 — briefs delivered mid-work all
+  // afternoon and the agents acted on them). So there is no idle window to wait
+  // for and nothing is gained by timing this. The two things that DO matter are
+  // how MANY writes we make — batching already cut that ~20:1 — and whether the
+  // bytes are encoded the way the TUI is currently prepared to read them.
+  //
+  // Which is the open question. `bracketedPasteEnabled` tracks whether Claude
+  // Code has turned paste mode on (ESC[?2004h) for this PTY. If it is OFF, the
+  // ESC[200~ / ESC[201~ wrapper is not consumed as a paste delimiter — it is
+  // just a CSI sequence arriving at the input parser, which is a candidate
+  // explanation for the garbage that flooded a pane on 2026-08-14. The flag has
+  // existed all along, documented as "diagnostic only", and NOTHING reads it.
+  //
+  // Log it rather than act on it. The hypothesis is unproven, and silently
+  // changing the encoding on a hunch is how you end up with a second bug that
+  // looks like a fix. If floods correlate with paste=false, the change is
+  // obvious and evidenced; if they do not, this log says so and the real cause
+  // is still in front of us.
+  console.log(
+    `[PTY] inject -> ${agentName}: ${text.length} chars, bracketedPaste=${managed.bracketedPasteEnabled}`,
+  );
+  queuePtyWrite(managed, `${PASTE_START}${text}${PASTE_END}`);
+  setTimeout(() => queuePtyWrite(managed, '\r'), 100);
+  // 'delivered' here means HANDED OVER, not read: a PTY offers no mid-turn
+  // signal, so a brief arriving mid-turn queues as the agent's next input
+  // instead of reporting 'deferred'. The CLI submits it at the turn boundary,
+  // which is the behaviour we want — but it is a weaker claim than the ACP
+  // path's, and mail is marked read on it. See lifecycle-server for why 202
+  // and 200 are kept apart.
+  return 'delivered';
+}
+
+function getManagedPtyByAgent(agentName: string): ManagedPty | undefined {
+  for (const t of terminals.values()) {
+    if (t.agentName === agentName) return t;
+  }
+  return undefined;
+}
 
 function getAcpRuntimeByAgent(agentName: string): AcpRuntimeManager | undefined {
   for (const runtime of acpRuntimes.values()) {
@@ -1387,21 +1455,12 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     // NEVER receives mail: startInboxPoller was only ever called on the PTY
     // path, ~290 lines past this return, so every Kimi agent's inbox went
     // unpolled. Mail reached the store and the sidebar; nothing handed it to
-    // the agent. injectMail is the ACP equivalent of the PTY stdin write, and
-    // it is the better one — it returns a result instead of assuming delivery
-    // the way a write at a TUI does.
-    let acpMailTimer: NodeJS.Timeout | null = null;
-    acpMailTimers.set(id, () => { if (acpMailTimer) clearTimeout(acpMailTimer); });
-    startInboxPoller({
-      agentName,
-      projectId: opts?.projectId,
-      deliver: (text: string) => {
-        void runtime.injectMail(text).catch((err: any) => {
-          console.warn(`[MailPoll] injectMail failed for ${agentName}:`, err?.message ?? err);
-        });
-      },
-      setTimer: (t) => { acpMailTimer = t; },
-    });
+    // All mail delivery via ProjectBriefr router only — agents receive briefs when idle.
+    // Disabled 2026-08-14: inbox poller causes interrupt-driven turns.
+    // User work orders bypass mail entirely (direct PTY injection).
+    // let acpMailTimer: NodeJS.Timeout | null = null;
+    // acpMailTimers.set(id, () => { if (acpMailTimer) clearTimeout(acpMailTimer); });
+    // startInboxPoller({...});
     return id;
   }
 
@@ -1623,19 +1682,37 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
       // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
       // module load — so the composition lives in a module with no electron dep.
-      // Session continuity: derive a stable per-placement id, then RESUME if a
-      // transcript already exists on disk and CREATE if not. The existence check
-      // is deliberate rather than a try//catch — handing `--resume` a missing id
-      // kills the pane, and `--session-id` errors on an id already in use, so
-      // neither flag is safe to guess with. See claudeSession.ts.
-      const claudeSessionId = deriveClaudeSessionId(agentName, opts?.projectId);
-      const resumeSession = claudeSessionExists(resolvedWorkDir, claudeSessionId);
+      // EVERY ACP SPAWN IS A FRESH SESSION. Jon, 2026-08-14, absolute:
+      // "loading large session files into the agents without summary is a
+      // 'never in the acp' thing ... i never ever want that to happen with an
+      // acp startup, ever."
+      //
+      // This used to derive a stable per-placement id and `--resume` whenever a
+      // transcript existed on disk. Measured cost of that: DotNetPert booted at
+      // 100% context used and BAPert at 84% — before either did any work. A
+      // resumed transcript is the whole prior conversation, so the agent starts
+      // at the ceiling with no room to think and the quota already spent.
+      //
+      // Prior context arrives as a SUMMARY in the boot prompt instead
+      // (spawn-orchestrator.ts -> bootPrompt.ts "Where you left off"), which is
+      // the fresh-session-per-launch policy that file already documents. A blank
+      // boot is an acceptable failure here; a full-transcript boot is not — the
+      // costs are not symmetric.
+      //
+      // Resuming a big session is still legitimate — as a DELIBERATE manual act
+      // outside the ACP (PowerShell, `claude --resume <id>`), where the token
+      // cost is chosen with eyes open. It must never be something a restart does
+      // to you. Do NOT reintroduce a resume branch here.
+      //
+      // A fresh random id every spawn, so `--session-id` is always valid
+      // (it errors on an id already in use) and `--resume` is never emitted.
+      const claudeSessionId = newClaudeSessionId();
       const cmd = buildClaudeSpawnCommand({
         effort,
         modelOverride: opts?.modelOverride,
         bootPromptTmpPath,
         sessionId: claudeSessionId,
-        resume: resumeSession,
+        resume: false,
       });
       ptyProcess.write(cmd);
       // Report the EFFECTIVE model, not the requested one. buildClaudeSpawnCommand
@@ -1649,7 +1726,11 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         : rejectedModel
           ? `, model: default (override '${opts.modelOverride}' rejected — foreign runtime)`
           : `, model: ${opts.modelOverride}`;
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: inbox poller -> PTY injection, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      // Says FRESH unconditionally because the spawn is now unconditionally
+      // fresh. A log line that could still print RESUME would imply the branch
+      // still exists — the next person grepping for how resume happens must
+      // find nothing, not a dormant ternary.
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: FRESH ${claudeSessionId}, acp-mail: ProjectBriefr router (batched on idle), kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -1689,8 +1770,8 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     // the injected mail carries a nonce and the AGENT'S OWN OUTPUT must
     // demonstrate it acted on the nonce.
     //
-    // Remove this once G4 lands injectMail on the runtime manager.
-    startInboxPoller(managed);
+    // Disabled 2026-08-14: ProjectBriefr router handles all mail delivery.
+    // startInboxPoller(managed);
 
     let reportSent = false;
     let buffer = '';

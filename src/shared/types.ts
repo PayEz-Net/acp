@@ -41,6 +41,18 @@ export type TerminalProvider = 'claude' | 'kimi' | 'codex';
 // Mail message from Vibe SQL
 export interface MailMessage {
   message_id: number;
+  /**
+   * Id of THIS recipient's inbox row — a different sequence from `message_id`
+   * (message 27804 lives in inbox row 87106). Required by
+   * `POST /v1/mail/inbox/{inbox_id}/read`.
+   *
+   * The server has always sent it; this model just didn't declare it, so the
+   * only id reachable at a call site was `message_id` — and both mark-read
+   * call sites duly passed that, marking unrelated older mail read for anyone
+   * who opened a message. A field missing from a type is not a field missing
+   * from the wire. Optional because older cached payloads may predate it.
+   */
+  inbox_id?: number;
   from_agent: string;
   to_agent: string;
   subject: string;
