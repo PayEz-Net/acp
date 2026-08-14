@@ -5,8 +5,31 @@ import { reviewTask, autoMailOnStatusChange } from '../../kanban/review.js';
 import { makeApiMailSender } from '../../collaboration/mail.js';
 import type { LocalEventBus } from '../sse/localEventBus.js';
 
+type ProjectResolution =
+  | { ok: true; projectId: number | null }
+  | { ok: false; status: number; code: string; message: string };
+
 export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus): Router {
   const router = Router();
+
+  // #117431: POST/GET /tasks honour a client-supplied project id (`project_id` or
+  // `projectId`). An unknown id is REJECTED loudly (400 PROJECT_NOT_FOUND) — we
+  // NEVER silently substitute the active project (that cross-filed real cards).
+  // Only an absent id falls back to the active project.
+  async function resolveTargetProject(supplied: unknown): Promise<ProjectResolution> {
+    if (supplied === undefined || supplied === null || supplied === '') {
+      return { ok: true, projectId: await storage.getActiveProjectId() };
+    }
+    const id = Number(supplied);
+    if (!Number.isInteger(id) || id <= 0) {
+      return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: `Invalid project id "${String(supplied)}"` };
+    }
+    const project = await storage.getProject(id);
+    if (!project) {
+      return { ok: false, status: 400, code: 'PROJECT_NOT_FOUND', message: `Project ${id} not found — refusing to fall back to the active project` };
+    }
+    return { ok: true, projectId: id };
+  }
 
   // #64 GAP 4: transition notifications go through the LIVE mail API (/v1/mail/send),
   // not the orphaned storage.createMessage path. See collaboration/mail.js.
@@ -15,10 +38,18 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
   router.post('/tasks', async (req: Request, res: Response, next) => {
     try {
       (req as any).operationCode = 'kanban_create';
-      // Archived project guard
-      const activeProjectId = await storage.getActiveProjectId();
-      if (activeProjectId) {
-        const project = await storage.getProject(activeProjectId);
+      // #117431: resolve the target project FIRST — honour the client-supplied
+      // id, reject an unknown one loudly, fall back to active only when absent.
+      const resolved = await resolveTargetProject(req.body?.project_id ?? req.body?.projectId);
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ success: false, message: resolved.message, error: { code: resolved.code } });
+        return;
+      }
+      const projectId = resolved.projectId;
+      // Archived project guard — now applied to the RESOLVED target project (#117431),
+      // not blindly to the active one.
+      if (projectId) {
+        const project = await storage.getProject(projectId);
         if (project?.status === 'archived') {
           res.status(403).json({ success: false, message: 'Project is archived', error: { code: 'PROJECT_ARCHIVED' } });
           return;
@@ -28,7 +59,6 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       if (!req.body.createdBy && (req as any).agentName) {
         req.body.createdBy = (req as any).agentName;
       }
-      const projectId = await storage.getActiveProjectId();
       const id = await createTask(storage, req.body, projectId);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       localEventBus?.emit({
@@ -55,9 +85,14 @@ export default function kanbanRoutes(storage: any, localEventBus?: LocalEventBus
       // ?includeArchived=true -> both active and archived.
       if (req.query.archived === 'true') filter.archived = true;
       if (req.query.includeArchived === 'true') filter.includeArchived = true;
-      // #64: project-scoped board.
-      const projectId = await storage.getActiveProjectId();
-      const tasks = await listTasks(storage, filter, projectId);
+      // #64: project-scoped board. #117431: honour ?project_id=/?projectId=, reject
+      // an unknown id loudly; only an absent id falls back to the active project.
+      const resolved = await resolveTargetProject(req.query.project_id ?? req.query.projectId);
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ success: false, message: resolved.message, error: { code: resolved.code } });
+        return;
+      }
+      const tasks = await listTasks(storage, filter, resolved.projectId);
       const elapsed = Math.round(performance.now() - (req as any).startTime);
       res.json(success(tasks, 'kanban_list', (req as any).requestId, {
         performance: { response_time_ms: elapsed },
