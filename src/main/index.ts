@@ -1,6 +1,9 @@
 // Load sibling .env before any module reads process.env. This lets the installed
 // app configure secrets without relying on shell env vars.
 import './loadEnv';
+// Tee console.* to <userData>/acp-main.log before anything else can log
+// (card 185035 — main-process blindness cost us a whole post-mortem).
+import { initMainLog } from './mainLog';
 
 import { app, BrowserWindow, ipcMain, shell, session, dialog, clipboard } from 'electron';
 import { autoUpdater } from 'electron-updater';
@@ -45,6 +48,11 @@ import { VIBE_API_URL, cloudEndpointsSnapshot } from './env';
 // merges rather than deletes, and exits fast. Absent the flag this is a no-op and
 // normal app boot continues. Runtime spawn-orchestrator colonize stays as
 // an idempotent self-heal backstop (already-satisfied → instant no-op).
+// --- Main-process persistent log (card 185035) -------------------------------
+// First executable statement after imports: every later console.* line lands
+// in <userData>/acp-main.log, so a dead runtime never leaves zero evidence.
+initMainLog();
+
 {
   const ci = process.argv.indexOf('--acp-colonize');
   if (ci !== -1) {
