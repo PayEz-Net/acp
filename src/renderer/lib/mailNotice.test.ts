@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  buildMailDeliveryDeferredText,
   buildMailDeliveryFailedText,
   buildMailNoticeText,
   collectUnreadNotices,
@@ -43,22 +44,38 @@ describe('buildMailNoticeText', () => {
 
 describe('buildMailDeliveryFailedText', () => {
   it('states the failure visibly instead of faking a delivered notice', () => {
-    const text = buildMailDeliveryFailedText('NextPert');
+    const text = buildMailDeliveryFailedText('NextPert', 17371, 'QAPert', 'F2 BLOCKED');
     expect(text).toContain('[ACP Mail] Delivery failed');
+    expect(text).toContain('Message 17371 from QAPert ("F2 BLOCKED")');
     expect(text).toContain('/v1/mail/inbox/NextPert?unread=true');
+  });
+});
+
+describe('buildMailDeliveryDeferredText', () => {
+  it('says the true thing: push skipped by design mid-turn, message parked with its own link', () => {
+    const text = buildMailDeliveryDeferredText('BAPert', 17372, 'NextPert', 'F2 block confirmed');
+    expect(text).toContain('[ACP Mail] Delivery deferred');
+    expect(text).toContain('BAPert is mid-turn');
+    expect(text).toContain('interrupting BAPert');
+    expect(text).toContain('Message 17372 from NextPert ("F2 block confirmed")');
+    expect(text).toContain('/v1/mail/messages/17372');
+    expect(text).not.toContain('unread=true');
+    expect(text).not.toContain('failed');
   });
 });
 
 describe('deliverAcpMailNotice', () => {
   it('echoes only after the runtime accepts the notice', async () => {
     const onDelivered = vi.fn();
+    const onDeferred = vi.fn();
     const onFailed = vi.fn();
-    const inject = vi.fn().mockResolvedValue(true);
+    const inject = vi.fn().mockResolvedValue('delivered');
 
     await deliverAcpMailNotice('n', {
       getSurface: () => ({ terminalId: 't1', sessionId: 's1' }),
       inject,
       onDelivered,
+      onDeferred,
       onFailed,
       delaysMs: DELAYS,
       sleep: noSleep,
@@ -78,13 +95,15 @@ describe('deliverAcpMailNotice', () => {
     ];
     let i = 0;
     const onDelivered = vi.fn();
+    const onDeferred = vi.fn();
     const onFailed = vi.fn();
-    const inject = vi.fn().mockResolvedValue(true);
+    const inject = vi.fn().mockResolvedValue('delivered');
 
     await deliverAcpMailNotice('n', {
       getSurface: () => surfaces[Math.min(i++, surfaces.length - 1)],
       inject,
       onDelivered,
+      onDeferred,
       onFailed,
       delaysMs: DELAYS,
       sleep: noSleep,
@@ -96,15 +115,17 @@ describe('deliverAcpMailNotice', () => {
     expect(onFailed).not.toHaveBeenCalled();
   });
 
-  it('reports failure when the runtime keeps refusing (inject returns false)', async () => {
+  it('reports failure when the runtime keeps refusing (inject keeps failing)', async () => {
     const onDelivered = vi.fn();
+    const onDeferred = vi.fn();
     const onFailed = vi.fn();
-    const inject = vi.fn().mockResolvedValue(false);
+    const inject = vi.fn().mockResolvedValue('failed');
 
     await deliverAcpMailNotice('n', {
       getSurface: () => ({ terminalId: 't1', sessionId: 's1' }),
       inject,
       onDelivered,
+      onDeferred,
       onFailed,
       delaysMs: DELAYS,
       sleep: noSleep,
@@ -115,15 +136,39 @@ describe('deliverAcpMailNotice', () => {
     expect(onFailed).toHaveBeenCalledTimes(1);
   });
 
-  it('treats a throwing inject as a failed attempt and keeps retrying', async () => {
+  it('short-circuits on a mid-turn defer — final by design, no retries, not a failure', async () => {
     const onDelivered = vi.fn();
+    const onDeferred = vi.fn();
     const onFailed = vi.fn();
-    const inject = vi.fn().mockRejectedValueOnce(new Error('ipc down')).mockResolvedValue(true);
+    const inject = vi.fn().mockResolvedValue('deferred');
 
     await deliverAcpMailNotice('n', {
       getSurface: () => ({ terminalId: 't1', sessionId: 's1' }),
       inject,
       onDelivered,
+      onDeferred,
+      onFailed,
+      delaysMs: DELAYS,
+      sleep: noSleep,
+    });
+
+    expect(inject).toHaveBeenCalledTimes(1);
+    expect(onDeferred).toHaveBeenCalledTimes(1);
+    expect(onDelivered).not.toHaveBeenCalled();
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it('treats a throwing inject as a failed attempt and keeps retrying', async () => {
+    const onDelivered = vi.fn();
+    const onDeferred = vi.fn();
+    const onFailed = vi.fn();
+    const inject = vi.fn().mockRejectedValueOnce(new Error('ipc down')).mockResolvedValue('delivered');
+
+    await deliverAcpMailNotice('n', {
+      getSurface: () => ({ terminalId: 't1', sessionId: 's1' }),
+      inject,
+      onDelivered,
+      onDeferred,
       onFailed,
       delaysMs: DELAYS,
       sleep: noSleep,

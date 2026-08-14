@@ -10,6 +10,7 @@ import { CLAUDE_STREAM_JSON_ARGS } from './claudeStreamJson';
  */
 export const KIMI_MODEL_ALIASES: Readonly<Record<string, string>> = {
   k3: 'kimi-code/k3',
+  'k3-256k': 'kimi-code/k3-256k',
   'kimi-for-coding': 'kimi-code/kimi-for-coding',
   'kimi-for-coding-highspeed': 'kimi-code/kimi-for-coding-highspeed',
 };
@@ -60,11 +61,14 @@ export function kimiSpawnArgs(baseArgs: string[], modelOverride?: string | null)
 /** k3 thinking efforts (reasoning_effort low/high/max per the model docs). */
 const K3_THINKING_EFFORTS: ReadonlySet<string> = new Set(['low', 'high', 'max']);
 
+/** k3-family ids that accept the thinking-effort channel (k3 + its 256k variant). */
+const K3_FAMILY_MODELS: ReadonlySet<string> = new Set(['k3', 'k3-256k']);
+
 /**
  * Env value for KIMI_MODEL_THINKING_EFFORT, or undefined when no injection
- * should happen: the effort channel is k3-only, and only when k3 is
- * explicitly selected via override (an inherited default_model might not be
- * k3 — injecting blind would risk mis-applying effort to another model).
+ * should happen: the effort channel is k3-family-only, and only when a k3-family
+ * model is explicitly selected via override (an inherited default_model might not
+ * be k3 — injecting blind would risk mis-applying effort to another model).
  * A set-but-invalid effort for k3 warns and skips (never silently spawns
  * with a wrong value).
  */
@@ -73,7 +77,7 @@ export function kimiK3ThinkingEffortEnv(
   effort: string | undefined,
   onWarn: (message: string) => void,
 ): string | undefined {
-  if (modelOverride !== 'k3' || !effort) return undefined;
+  if (!modelOverride || !K3_FAMILY_MODELS.has(modelOverride) || !effort) return undefined;
   if (K3_THINKING_EFFORTS.has(effort)) return effort;
   onWarn(`effort_override '${effort}' is not a k3 thinking effort (low|high|max) — ignoring`);
   return undefined;

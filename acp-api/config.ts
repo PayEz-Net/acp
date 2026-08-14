@@ -87,6 +87,10 @@ export const config = {
   vibeAuthMode: process.env.VIBE_AUTH_MODE || 'bearer',
   vibeSigningKey: process.env.VIBE_SIGNING_KEY || '',
   execTimeoutMs: parseInt(process.env.EXEC_TIMEOUT_MS ?? '', 10) || 5000,
+  // Shared kb (pgvector) store. Used ONLY to put an agent's last session
+  // summary into its boot prompt. Unset = agents boot with no prior context,
+  // which is logged loudly once rather than failing — see routes/sessionSummary.
+  kbDatabaseUrl: process.env.KB_DATABASE_URL || '',
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
   corsOrigins: process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:40020',
@@ -94,6 +98,11 @@ export const config = {
   partyTickMs: parseInt(process.env.PARTY_TICK_MS ?? '', 10) || 5000,
   autonomyMaxRuntimeHours: parseInt(process.env.AUTONOMY_MAX_RUNTIME_HOURS ?? '', 10) || 4,
   escalationSensitivity: parseInt(process.env.ESCALATION_SENSITIVITY ?? '', 10) || 2,
+
+  // Work-stoppage detection (kanban 181986) — see api/lifecycle/workStoppageMonitor.ts
+  workStoppageSilenceMinutes: parseInt(process.env.WORK_STOPPAGE_SILENCE_MINUTES ?? '', 10) || 30,
+  workStoppageTickSeconds: parseInt(process.env.WORK_STOPPAGE_TICK_SECONDS ?? '', 10) || 60,
+  workStoppageKickFrom: process.env.WORK_STOPPAGE_KICK_FROM || 'BAPert',
 
   // VibeSQL direct lane — used by agent roster raw queries and the agent
   // document store. Kept central here so callers don't proliferate env reads.

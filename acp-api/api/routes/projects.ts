@@ -53,6 +53,8 @@ import {
   type CurrentProjectState,
 } from '../projects/mapper.js';
 import * as cache from '../projects/cache.js';
+import { getStartedProjectId } from '../projects/startedProject.js';
+import { markProjectEngaged } from '../projects/engagement.js';
 
 const PROXY_TIMEOUT_MS = 10_000;
 const CLOUD_PROJECTS_PATH = '/v1/projects';
@@ -162,7 +164,8 @@ interface CurrentResult {
   current_project_id: number | null;
   project: MappedProject | null;
   current_project_state: CurrentProjectState;
-  source: 'cloud' | 'cache' | 'defaults';
+  /** 'started' = the dev's Start click on this machine. It outranks every other source. */
+  source: 'started' | 'cloud' | 'cache' | 'defaults';
   fetchedAt: string;
   warning?: string;
 }
@@ -226,89 +229,47 @@ async function readList(
   }
 }
 
-async function readCurrent(
-  cfg: Config,
-  userId: string,
-  forceRefreshFlag: boolean,
-): Promise<CurrentResult> {
-  if (!forceRefreshFlag) {
-    const fresh = cache.current.getFresh(userId);
-    if (fresh) {
-      return {
-        current_project_id: fresh.current_project_id,
-        project: fresh.project,
-        current_project_state: fresh.current_project_state,
-        source: 'cache',
-        fetchedAt: fresh.fetchedAt,
-      };
-    }
-  }
-  try {
-    const { status, payload } = await callCloud(cfg, 'GET', CLOUD_CURRENT_PROJECT_PATH);
-    if (status >= 200 && status < 300 && (payload as any)?.success) {
-      const mapped = extractAndMapCurrent(payload);
-      const entry = cache.current.set(userId, mapped);
-      console.log(
-        '[ProjectsProxy] current-project for user', userId,
-        '→ project_id:', entry.current_project_id,
-        'project:', entry.project ? { id: entry.project.id, name: entry.project.name, status: entry.project.status, is_active: entry.project.is_active } : null,
-        'state:', entry.current_project_state
-      );
-      return {
-        current_project_id: entry.current_project_id,
-        project: entry.project,
-        current_project_state: entry.current_project_state,
-        source: 'cloud',
-        fetchedAt: entry.fetchedAt,
-      };
-    }
-    const stale = cache.current.getStale(userId);
-    if (stale) {
-      return {
-        current_project_id: stale.current_project_id,
-        project: stale.project,
-        current_project_state: stale.current_project_state,
-        source: 'cache',
-        fetchedAt: stale.fetchedAt,
-        warning: `Cloud returned HTTP ${status}; serving last-known current`,
-      };
-    }
-    // No cache, cloud unhappy → conservative default: 'unset'. The FE will
-    // render the first-boot prompt; that's the safe assumption when we
-    // genuinely don't know whether a row exists. Better than silently
-    // assuming 'empty' (would show create-CTA over a real-but-unreachable
-    // user account).
+async function readCurrent(cfg: Config, userId: string): Promise<CurrentResult> {
+  const projectId = getStartedProjectId();
+  if (projectId === null) {
+    // Nothing started. The picker renders for this; do not supply a project.
     return {
       current_project_id: null,
       project: null,
       current_project_state: 'unset',
-      source: 'defaults',
+      source: 'started',
       fetchedAt: new Date().toISOString(),
-      warning: `Cloud returned HTTP ${status}; no cache available`,
-    };
-  } catch (err: any) {
-    if (err instanceof NotAuthenticatedError) throw err;
-    const stale = cache.current.getStale(userId);
-    const reason = err?.name === 'AbortError' ? 'Cloud unreachable (timeout)' : `Cloud unreachable (${err?.message || 'error'})`;
-    if (stale) {
-      return {
-        current_project_id: stale.current_project_id,
-        project: stale.project,
-        current_project_state: stale.current_project_state,
-        source: 'cache',
-        fetchedAt: stale.fetchedAt,
-        warning: `${reason}; serving last-known current`,
-      };
-    }
-    return {
-      current_project_id: null,
-      project: null,
-      current_project_state: 'unset',
-      source: 'defaults',
-      fetchedAt: new Date().toISOString(),
-      warning: `${reason}; no cache available`,
     };
   }
+
+  // Display fields (name, repo_path, team) for the project the click chose.
+  // The cache first, then the cloud by EXPLICIT ID. Neither one decides WHICH
+  // project this is — that is settled above and never reconsidered. A cold boot
+  // has an empty cache, and returning an id with no project record left the
+  // shell un-onboarded: no terminals, no mail.
+  const cached = cache.current.getStale(userId);
+  let project = cached?.project?.id === projectId ? cached.project : null;
+
+  if (!project) {
+    try {
+      const { status, payload } = await callCloud(cfg, 'GET', `${CLOUD_PROJECTS_PATH}/${projectId}`);
+      if (status >= 200 && status < 300) {
+        project = (payload as any)?.data?.project ?? (payload as any)?.data ?? null;
+      } else {
+        console.warn(`[projects] started project ${projectId} details: cloud HTTP ${status}`);
+      }
+    } catch (err: any) {
+      console.warn(`[projects] started project ${projectId} details unavailable: ${err.message}`);
+    }
+  }
+
+  return {
+    current_project_id: projectId,
+    project,
+    current_project_state: 'stored',
+    source: 'started',
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Router {
@@ -327,7 +288,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
 
       const [listR, currentR] = await Promise.all([
         readList(cfg, userId, req.query as Record<string, unknown>, forceRefreshFlag),
-        readCurrent(cfg, userId, forceRefreshFlag),
+        readCurrent(cfg, userId),
       ]);
 
       // Combined source resolution: if either side is cache/defaults,
@@ -390,7 +351,7 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
       if (!session) throw new NotAuthenticatedError();
       const userId = session.userId || '0';
       const forceRefreshFlag = String(req.query.force_refresh || '') === 'true';
-      const result = await readCurrent(cfg, userId, forceRefreshFlag);
+      const result = await readCurrent(cfg, userId);
       res.json(success(
         {
           project: result.project,
@@ -479,6 +440,27 @@ export default function projectRoutes(eventBus: LocalEventBus, cfg: Config): Rou
     } catch (err: any) {
       sendProxyError(res, req, err, 'project_set_current');
     }
+  });
+
+  // POST /v1/projects/engaged { project_id } — the user's Start TELLS the
+  // sidecar this machine's project. Called by the desktop main process from
+  // the LIFECYCLE_RESEED IPC handler (the one wire every ProjectPicker Start
+  // branch shares). Until this lands, mail/roster scoping refuses with 409
+  // PROJECT_NOT_ENGAGED. This machine's Start is the ONLY authority — the
+  // stored cloud pointer is picker display, never consulted for scoping.
+  router.post('/engaged', (req: Request, res: Response) => {
+    const { project_id } = req.body || {};
+    const id = parseInt(String(project_id), 10);
+    if (project_id === undefined || project_id === null || isNaN(id)) {
+      res.status(400).json(error('VALIDATION_ERROR', 'project_id required (integer)', 'project_engaged', (req as any).requestId));
+      return;
+    }
+    markProjectEngaged(id);
+    res.json(success(
+      { engaged: true, project_id: id },
+      'project_engaged',
+      (req as any).requestId,
+    ));
   });
 
   // POST /v1/projects — CREATE retired (lives on idealvibe).

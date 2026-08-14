@@ -7,8 +7,9 @@ import { autoUpdater } from 'electron-updater';
 import net from 'net';
 import { execSync } from 'child_process';
 import path from 'path';
-import { setupPtyHandlers, killAllPty } from './pty';
-import { initOutputSpill } from './ptyOutputReporter';
+import { setupPtyHandlers, killAllPty, getSessionTokenForTerminal } from './pty';
+import { initOutputSpill, setLiveSessionTokenResolver } from './ptyOutputReporter';
+import { initMainLog } from './mainLog';
 import { getSettings, setSettings } from './store';
 import { setupAuthHandlers, startTokenRefreshTimer, stopTokenRefreshTimer, onAuth } from './auth';
 import { acpApiGetStatus, acpApiCall, ACP_API_URL } from './acp-api-client';
@@ -19,6 +20,7 @@ import { startLifecycleHub, stopLifecycleHub, onLifecycleHubEvent, seedInitialLi
 import { startSpawnOrchestrator, stopSpawnOrchestrator, setSpawnGate } from './spawn-orchestrator';
 import { readAndApplyInstallerHandoff } from './installerHandoff';
 import { setupProjectSwitchHandler } from './project-switch';
+import { declareStartedProject } from './started-project';
 import { getNextBootOverlay, clearNextBootOverlay } from './store';
 import { IPC_CHANNELS } from '../shared/types';
 import type {
@@ -257,11 +259,53 @@ function setupIpcHandlers() {
   // spawn-orchestrator. The project is already RUNNING cloud-side; this
   // just hands the orchestrator the state the backend already has (no
   // cloud mutation, no invented transition).
-  ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async () => {
+  // THE START CLICK — the only thing that sets this machine's current project.
+  //
+  // Fired by ProjectPicker.handleStart BEFORE the spawn fan-out, so the sidecar
+  // knows which project this rig is on before a single agent is instantiated.
+  //
+  // Previously the sidecar answered "what project am I on?" from the cloud — a
+  // SINGLE PER-USER SLOT SHARED ACROSS MACHINES. A second machine clicking Start
+  // on a different project silently reassigned this one: agents on this project
+  // became unreachable (every send AGENT_NOT_FOUND), mail filed into the wrong
+  // project, and a cold restart came back somewhere else entirely.
+  //
+  // Persisted machine-locally and replayed on every boot, so the answer is always
+  // "the project the dev clicked Start on, here" — never what another machine wrote.
+  ipcMain.handle(IPC_CHANNELS.PROJECT_DECLARE_STARTED, async (_e, payload: unknown) => {
+    const p = payload as { projectId?: unknown; projectName?: unknown } | null;
+    const projectId = typeof p?.projectId === 'number' ? p.projectId : Number(p?.projectId);
+    if (!Number.isFinite(projectId) || projectId <= 0) {
+      // NO FALLBACK: an unusable project id is an error, not a reason to guess.
+      const msg = `PROJECT_DECLARE_STARTED requires a positive numeric projectId, got ${String(p?.projectId)}`;
+      console.error(`[StartedProject] ${msg}`);
+      return { success: false, errorMessage: msg };
+    }
+    const projectName = typeof p?.projectName === 'string' ? p.projectName : null;
+    return declareStartedProject(projectId, projectName);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.LIFECYCLE_RESEED, async (_event, projectId?: number) => {
     // The picker's explicit Start opens the spawn gate so the orchestrator will
     // honor RUNNING transitions. Until this fires, background RUNNING pushes are
     // ignored (no spawn before project selection).
     setSpawnGate(true);
+    // The same Start TELLS the sidecar this machine's project: mail/roster
+    // scoping refuses with 409 PROJECT_NOT_ENGAGED until this lands, and scopes
+    // from THIS value afterwards — never the shared per-user cloud slot. This
+    // IPC is the one wire every ProjectPicker Start branch shares (POST
+    // /current does NOT fire on stored-confirm). Fire-and-forget — a failure
+    // must not block Start; the sidecar simply keeps refusing.
+    if (typeof projectId === 'number') {
+      void acpApiCall('/v1/projects/engaged', {
+        method: 'POST',
+        body: JSON.stringify({ project_id: projectId }),
+      }).catch((err) => {
+        console.warn('[Lifecycle] sidecar /v1/projects/engaged call failed — mail stays Start-gated:', err);
+      });
+    } else {
+      console.warn('[Lifecycle] LIFECYCLE_RESEED without projectId — sidecar NOT engaged; mail stays Start-gated');
+    }
     await seedInitialLifecycleState();
   });
 
@@ -437,6 +481,18 @@ function setupIpcHandlers() {
 
 // App lifecycle
 app.whenReady().then(async () => {
+  // 185035: the main-process log file comes up FIRST, before anything else can
+  // emit a diagnostic worth keeping — every console.log/warn/error below this
+  // point is teed to <userData>/logs/main.log (append-only, capped, rotating).
+  // One instance only: the single-instance lock check immediately below means
+  // a lock-loser writes at most a line or two before quitting, and appends
+  // cannot corrupt each other.
+  const mainLogPath = initMainLog(app.getPath('userData'));
+  // 184949 discoverability half: this app has TWO candidate userData roots on
+  // one box (dev `name` vs packaged `productName`), so name the resolved one
+  // at boot — the log file itself is where you read it.
+  console.log(`[ACP] userData root: ${app.getPath('userData')} | main log: ${mainLogPath}`);
+
   // Collision check #1 — lock-loser: another instance with our app id is
   // alive. Tell the user plainly, then quit (the 1st instance's
   // second-instance handler focuses its window for the healthy case).
@@ -451,6 +507,11 @@ app.whenReady().then(async () => {
   // orphaned on disk. Runs after the single-instance check so two instances
   // never drain the same directory concurrently.
   initOutputSpill(app.getPath('userData'));
+  // 184984: let the spill drain re-resolve a LIVE sessionToken per terminal
+  // instead of replaying whatever (if anything) was captured when a payload
+  // first failed. Wired here rather than a static import between pty.ts and
+  // ptyOutputReporter.ts, which already import each other the other way.
+  setLiveSessionTokenResolver(getSessionTokenForTerminal);
 
   // Collision check #2 — foreign/zombie the lock misses (different app-id /
   // cross-build, or a zombie that released the lock but still holds the OAuth

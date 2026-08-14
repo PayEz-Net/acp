@@ -4,6 +4,7 @@
 import { config } from '../config.js';
 import { ensureValidToken, forceRefresh, requireTokenClientId } from '../api/auth/tokenManager.js';
 import { extractAndMapCurrent, extractAndMapList } from '../api/projects/mapper.js';
+import { getStartedProjectId } from '../api/projects/startedProject.js';
 
 const ROSTER_FETCH_TIMEOUT_MS = 10_000;
 const ROSTER_TTL_MS = 5 * 60 * 1000; // refresh occasionally so newly-hired agents resolve
@@ -300,37 +301,35 @@ export class SessionManager {
     return list.find((p) => Number(p.id) === key) || null;
   }
 
-  // The logged-in developer's CURRENT (startup) project, resolved off their bearer via the
-  // existing cloud focus-pointer (GET /v1/users/me/current-project) — NOT the killed _=1 stub.
-  // null = unset/empty (no project selected); consumers treat null as "no active project"
-  // (picker / create-CTA), never a silent default (no-unjustified-fallback / Aurum 7287).
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  //  CURRENT PROJECT == THE START-CLICK. LOCAL TO THIS MACHINE. FULL STOP.
+  //
+  //  This returns ONLY the Start-click project via getStartedProjectId() (startedProject.ts) — the project
+  //  the developer Start-clicked on THIS box. It does NOT resolve from GET /v1/users/me/current-
+  //  project, and it never will again. unset -> null -> "no active project" (picker / create-CTA),
+  //  never a silent default (no-unjustified-fallback).
+  //
+  //  WHY THE CLOUD RESOLVE IS DEAD (paid for in blood, 2026-08-03): that "focus pointer" is a
+  //  SINGLE per-user slot shared across every machine the user is signed in on. A Mac Start-clicked
+  //  project 18, a Windows box Start-clicked 31 — both wrote that one slot and STOMPED each other.
+  //  A Windows agent then resolved its "current project" as 18 (the Mac's), cross-pollinated mail
+  //  into the wrong team, and poisoned live agent contexts. The ONLY authority on current project
+  //  is the Start-click in the picker, on THIS machine. The picker. Nothing else. Zero. Nada. Nil.
+  //
+  //  TO THE NEXT SOUL EYEING "let's re-add the cloud resolve for persistence / SSO parity /
+  //  convenience": do not. You will resurrect cross-project contamination, corrupt running agent
+  //  teams, and — by Jon's long-standing, frequently-and-loudly-repeated decree — earn a permanent
+  //  transfer to swabbing floors on the bottom-most level of HELL. This has been killed more times
+  //  than anyone has bothered to count. Leave. It. Dead.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
   async getActiveProjectId() {
-    if (this._currentProjectId !== undefined && Date.now() - this._currentProjectAt < PROJECT_TTL_MS) {
-      return this._currentProjectId;
-    }
-    const result = await this._cloudGet('/v1/users/me/current-project', { trigger: 'current-project' });
-    if ('error' in result) return this._currentProjectId ?? null; // NO_SESSION pre-login
-    if (result.status < 200 || result.status >= 300) {
-      throw new Error(`current-project cloud-resolve HTTP ${result.status} from ${config.vibeApiUrl}/v1/users/me/current-project`);
-    }
-    const mapped = extractAndMapCurrent(result.body);
-    this._currentProjectId = mapped.current_project_id ?? null;
-    this._currentProjectAt = Date.now();
-    return this._currentProjectId;
+    return getStartedProjectId(); // Start-click project (startedProject.ts, the one source of truth). Never a cloud read.
   }
 
-  // Focus writeback to the cloud (PUT /v1/users/me/current-project { project_id }) so the
-  // developer's startup project persists tenant-wide; updates the local soft cache.
+  // The picker's Start-click sets the current project HERE, local to this machine. NO cloud PUT —
+  // persisting it tenant-wide is the exact stomp described above. Local only, always succeeds.
   async setActiveProjectId(id) {
-    const key = id === null ? null : Number(id);
-    const result = await this._cloudGet('/v1/users/me/current-project', {
-      method: 'PUT',
-      body: { project_id: key },
-      trigger: 'current-project-set',
-    });
-    if ('error' in result) return false; // NO_SESSION
-    if (result.status < 200 || result.status >= 300) return false;
-    this._currentProjectId = key;
+    this._currentProjectId = id === null ? null : Number(id);
     this._currentProjectAt = Date.now();
     return true;
   }
@@ -512,7 +511,7 @@ export class SessionManager {
       description: row.description,
       status: row.status,
       priority: row.priority,
-      assignedTo: row.assigned_to,
+      assignedTo: row.assigned_to ?? row.agent_name ?? null,
       createdBy: row.created_by,
       specPath: row.spec_path,
       milestone: row.milestone,
@@ -612,22 +611,21 @@ export class SessionManager {
     return this._rowToTask(t, pid);
   }
 
-  // Maps to the EXISTING cloud board reads (GET /v1/projects/{id}/kanban/active|done|waiting,
-  // DnP 7279). Those return board columns, so to reproduce the old arbitrary-filter SELECT we
-  // fetch ALL three boards, merge (dedupe by id), then apply the remaining predicates IN-MEMORY
-  // — exactly what the SQL did — instead of guessing a status->board mapping. A failed fetch
-  // THROWS (surfaced), never a silent []. FLAGGED to DnP: confirms board read wrapper shape
-  // (assumed { data: { tasks: [...] } } | { data: [...] }).
+  // 117039: reads the list-ALL endpoint (GET /v1/projects/{id}/kanban/tasks,
+  // page_size=0 full set, `{ data: { tasks, ... } }`) — NOT the three column boards.
+  // The old active/done/waiting merge had two stacked defects: done/waiting paginate
+  // server-side (default 20), so cards past page 1 were INVISIBLE to the list (the
+  // "ceiling"), and the column DTO was lean. The list-all endpoint exists precisely
+  // for this consumer and returns every status in one read. Remaining predicates are
+  // applied IN-MEMORY as before. A failed fetch THROWS (surfaced), never a silent [].
   async listTasks(filter = {}) {
     const pid = this._requireProjectId(filter.projectId, 'listTasks');
+    const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/tasks`);
+    const tasks = res?.data?.tasks ?? res?.data?.items ?? [];
     const seen = new Map();
-    for (const board of ['active', 'done', 'waiting']) {
-      const res = await this._cloudKanban('GET', `/v1/projects/${pid}/kanban/${board}`);
-      const tasks = res?.data?.tasks ?? res?.data?.items ?? res?.data ?? [];
-      for (const t of (Array.isArray(tasks) ? tasks : [])) {
-        const mapped = this._rowToTask(t, pid);
-        if (mapped.id != null) seen.set(mapped.id, mapped);
-      }
+    for (const t of (Array.isArray(tasks) ? tasks : [])) {
+      const mapped = this._rowToTask(t, pid);
+      if (mapped.id != null) seen.set(mapped.id, mapped);
     }
     let rows = Array.from(seen.values());
     // In-memory predicates mirroring the prior SQL. archived three-valued: legacy null = NOT archived.

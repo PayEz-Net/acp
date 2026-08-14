@@ -65,13 +65,24 @@ export async function reviewTask(storage, mailSender, id, action, opts = {}, pro
   throw err;
 }
 
-export async function autoMailOnStatusChange(storage, mailSender, task, newStatus) {
+/**
+ * `system` was never the notifier's identity - it was the FALLBACK in
+ * `task.assignedTo || 'system'`, firing precisely when a card had no assignee, so
+ * every move of an unassigned card 401'd: "Agent 'system' is not registered". The
+ * transition applied and the assignee was never told.
+ *
+ * The actor is the honest sender - the agent who moved the card is a real roster
+ * identity - and it was already in scope at the call site, used two lines away for
+ * the activity record. A `system` fallback remains for actorless callers (Bearer
+ * auth carries no agent name); those still 401 and still log loudly.
+ */
+export async function autoMailOnStatusChange(storage, mailSender, task, newStatus, actor) {
   if (!mailSender) return;
   const now = new Date().toISOString();
 
   if (newStatus === 'review') {
     await mailSender(storage, {
-      from: task.assignedTo || 'system',
+      from: actor || task.assignedTo || 'system',
       to: 'QAPert',
       subject: `REVIEW: ${task.title}`,
       body: `Task "${task.title}" ready for review.${task.specPath ? ` Spec: ${task.specPath}` : ''}`,
@@ -82,7 +93,7 @@ export async function autoMailOnStatusChange(storage, mailSender, task, newStatu
 
   if (newStatus === 'blocked') {
     await mailSender(storage, {
-      from: task.assignedTo || 'system',
+      from: actor || task.assignedTo || 'system',
       to: task.createdBy || 'BAPert',
       subject: `BLOCKED: ${task.title}`,
       body: `Task "${task.title}" is blocked.${task.blockers ? ` Reason: ${task.blockers}` : ''}`,
@@ -93,7 +104,7 @@ export async function autoMailOnStatusChange(storage, mailSender, task, newStatu
 
   if (newStatus === 'done') {
     await mailSender(storage, {
-      from: task.assignedTo || 'system',
+      from: actor || task.assignedTo || 'system',
       to: task.createdBy || 'BAPert',
       subject: `DONE: ${task.title}`,
       body: `Task "${task.title}" is complete.`,

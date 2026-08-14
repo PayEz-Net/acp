@@ -9,6 +9,15 @@ ACP is one product with two halves:
 | **Desktop Shell** | `E:\Repos\acp-desktop` | Electron 28 + React 18 + TypeScript + Vite |
 | **Backend API** | `E:\Repos\acp` (this repo) | Node.js + Express (migrating to TypeScript) |
 
+## Engineering doctrine — read this before writing code
+
+**The doctrine lives in [`../CLAUDE.md`](../CLAUDE.md) (repo root) and applies to this directory
+unchanged. Read it before writing code.**
+
+It is deliberately **not summarised here.** A summary is a second copy, a second copy drifts, and
+this one did: the version that sat here for 26 minutes was already missing two corollaries added
+to the root. That is rule 2 catching its own documentation. One file, no excerpt.
+
 ## What This Repo Contains
 
 The headless API server that powers agent collaboration, autonomy, and coordination.

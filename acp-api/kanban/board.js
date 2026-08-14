@@ -17,7 +17,29 @@ const TRANSITIONS = {
 };
 
 // G1: PATCH touches FREE-FORM fields only. status + assignedTo are excluded —
-// they keep their guarded endpoints so transitions/assignment-lock are unbypassable.
+// they keep their guarded endpoints, so transitions/assignment-lock are unbypassable
+// ⚠ THROUGH THIS PROXY ONLY. That clause used to read "unbypassable" full stop, and it
+// was measured false on 2026-08-08: the .NET PATCH
+// (PayEz.Vibe.Public.Api ProjectController.UpdateKanbanTask) does a project-access check
+// and then passes Status and AssignedTo straight through ToWrite to the repository. It
+// enforces no transition graph and no assignment lock, because neither exists on that
+// side — they are defined here and nowhere else. Anything reaching the cloud endpoint
+// directly can move a task backlog -> done in one call.
+// Ruled 2026-08-08: the .NET API is to become authoritative for both. Until that lands,
+// this file is the ONLY enforcement and it binds only callers who come through it.
+//
+// ⚠ THIS RULE EXISTS TWICE, IN TWO LANGUAGES. Fixing it here does NOT fix it for
+// callers who reach the .NET path, and vice versa. The twin lives in PayEz-Core:
+//     PayEz.Vibe.Public.Api/Controllers/V1/ProjectController.cs
+//     PayEz.Infrastructure/Repositories/Vibe/KanbanRepository.cs
+// PayEz-Core commit 7974a9773 ("persist `archived` + reject unknown fields") fixed the
+// .NET side on 2026-08-05 and shipped as vibe-api:archive-persist-7974a9773. THIS array
+// was not updated, so the defect stayed live on the Node path — five agents spent an
+// evening rediscovering it as cards 189672 and 189807 while the fix sat deployed.
+//
+// This is 31-WO-H1 §T4 verbatim: "ONE shared validation library, consumed by every
+// resource server — never per-service parsing (N implementations become N dialects)".
+// Before editing this array, change the .NET twin in the same work, or record why not.
 const EDITABLE_FIELDS = ['title', 'description', 'priority', 'milestone', 'blockers', 'specPath', 'filesChanged'];
 
 export { VALID_STATUSES, VALID_PRIORITIES, TRANSITIONS, EDITABLE_FIELDS };

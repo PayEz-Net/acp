@@ -27,7 +27,7 @@ import { getSettings } from './store';
 import { reportPtyOutput, flushPtyOutput, dropPtyOutput } from './ptyOutputReporter';
 import { AcpRuntimeManager } from './acp/AcpRuntimeManager';
 import { getProviderConfig, resolveKimiModelAlias } from './acp/providerConfigs';
-import { buildClaudeSpawnCommand, resolveClaudeEffort } from './claudeSpawnCommand';
+import { buildClaudeSpawnCommand, resolveClaudeEffort, isForeignRuntimeModel } from './claudeSpawnCommand';
 import { deriveClaudeSessionId, claudeSessionExists } from './claudeSession';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
 import { startAgentSession, endAgentSession } from './agentSessionLifecycle';
@@ -39,6 +39,85 @@ import { TerminalScreen } from './terminalScreen';
 const terminalScreens = new Map<string, TerminalScreen>();
 const frameFlushTimers = new Map<string, NodeJS.Timeout>();
 const FRAME_FLUSH_MS = 40;
+
+// --- Settle-report (117107 fix leg a) ------------------------------------
+// A full-screen TUI (Claude Code) that only ever repaints in place never
+// scrolls a row into historyAppended, so flushTerminalFrame's report path
+// never fires for the life of the session. This debounce fires once a
+// terminal has gone quiet for SETTLE_MS — no new PTY bytes — and asks the
+// screen model for whatever changed since the last report (deduped there).
+// 900ms is long enough that an actively-streaming response (new bytes every
+// frame) never fires mid-stream, and short enough that the stored record
+// lags live output by roughly one thinking-pause, not minutes.
+const settleTimers = new Map<string, NodeJS.Timeout>();
+const SETTLE_MS = 900;
+
+function scheduleSettleReport(terminalId: string): void {
+  const existing = settleTimers.get(terminalId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    settleTimers.delete(terminalId);
+    const screen = terminalScreens.get(terminalId);
+    if (!screen) return;
+    const rows = screen.takeSettleSnapshot();
+    if (rows && rows.length > 0) reportTerminalRows(terminalId, rows);
+  }, SETTLE_MS);
+  // Never hold the app open just to flush a settle report.
+  timer.unref?.();
+  settleTimers.set(terminalId, timer);
+}
+
+// --- Fail-loud watchdog (117107 fix leg c) -------------------------------
+// A telemetry pipeline whose success path silently stops running is
+// indistinguishable from an idle team. Track the last time each live
+// terminal actually got rows onto the cloud record (not merely "PTY is
+// alive") and alarm once a terminal has gone dark past the threshold —
+// exactly the collapse this card describes (60s of ingestion per respawn,
+// then nothing for a full sprint day).
+const lastReportedRowsAt = new Map<string, number>();
+const alarmedTerminals = new Set<string>();
+const TERMINAL_OUTPUT_ALARM_MS = 5 * 60 * 1000; // 5 minutes of zero reported rows
+const TERMINAL_WATCHDOG_INTERVAL_MS = 60 * 1000;
+let watchdogStarted = false;
+
+function startOutputWatchdog(): void {
+  if (watchdogStarted) return;
+  watchdogStarted = true;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, managed] of terminals) {
+      const baseline = lastReportedRowsAt.get(id) ?? managed.spawnedAt;
+      const silentMs = now - baseline;
+      const isAlarmed = alarmedTerminals.has(id);
+      if (silentMs >= TERMINAL_OUTPUT_ALARM_MS) {
+        if (!isAlarmed) {
+          alarmedTerminals.add(id);
+          const minutes = Math.round(silentMs / 60000);
+          console.error(
+            `[PTY] OUTPUT STALLED agent=${managed.agentName} terminal=${id} — ` +
+            `zero rows reported to the cloud record in ${minutes}m. A dead reporting ` +
+            `pipeline looks identical to an idle agent; this is the alarm that tells them apart.`,
+          );
+          safeSend(IPC_CHANNELS.TERMINAL_OUTPUT_STALLED, {
+            agentName: managed.agentName,
+            terminalId: id,
+            minutesSinceLastOutput: minutes,
+          });
+        }
+      } else if (isAlarmed) {
+        alarmedTerminals.delete(id);
+        console.log(`[PTY] Output resumed for agent=${managed.agentName} terminal=${id}`);
+        safeSend(IPC_CHANNELS.TERMINAL_OUTPUT_STALLED, {
+          agentName: managed.agentName,
+          terminalId: id,
+          minutesSinceLastOutput: 0,
+          recovered: true,
+        });
+      }
+    }
+  }, TERMINAL_WATCHDOG_INTERVAL_MS);
+  timer.unref?.();
+}
 
 function flushTerminalFrame(terminalId: string): void {
   const timer = frameFlushTimers.get(terminalId);
@@ -80,6 +159,13 @@ function reportTerminalRows(terminalId: string, rows: string[]): void {
   const MAX_REPORT_BYTES = 8192;
   const send = (batch: string[]) => {
     if (batch.length === 0) return;
+    // Fail-loud bookkeeping (117107 leg c): a batch actually being handed to
+    // the reporter is the definition of "not stalled", independent of
+    // whether the HTTP POST itself later succeeds — retries/spill in
+    // ptyOutputReporter already cover delivery; this watchdog covers the
+    // pipeline never being fed at all, which is the failure mode that was
+    // actually invisible.
+    lastReportedRowsAt.set(terminalId, Date.now());
     reportPtyOutput(
       managed.agentName,
       terminalId,
@@ -119,16 +205,26 @@ function scheduleTerminalFrameFlush(terminalId: string): void {
 function disposeTerminalScreen(terminalId: string): void {
   // Drains and reports any rows that had already scrolled off.
   flushTerminalFrame(terminalId);
+  const settleTimer = settleTimers.get(terminalId);
+  if (settleTimer) {
+    clearTimeout(settleTimer);
+    settleTimers.delete(terminalId);
+  }
   // Rows still on the visible screen never scroll into `historyAppended`, so
   // without this the final screenful of every session is missing from the
   // stored record. Must run before `terminals.delete(terminalId)` — the
   // reporter reads agentName/provider/sessionToken from the ManagedPty.
+  // takeSettleSnapshot (not the raw snapshot()) so this dedupes against
+  // whatever a settle-report or pre-wipe capture already sent — the exit
+  // path should only ever add what's genuinely new.
   const screen = terminalScreens.get(terminalId);
   if (screen) {
-    const finalRows = screen.snapshot();
-    if (finalRows.length > 0) reportTerminalRows(terminalId, finalRows);
+    const finalRows = screen.takeSettleSnapshot();
+    if (finalRows && finalRows.length > 0) reportTerminalRows(terminalId, finalRows);
   }
   terminalScreens.delete(terminalId);
+  lastReportedRowsAt.delete(terminalId);
+  alarmedTerminals.delete(terminalId);
 }
 
 
@@ -150,8 +246,14 @@ interface ManagedPty {
   // longer wrestle PTY bytes for mail push (that's handled by the MCP
   // Channels path in acp-mail-channel.js).
   bracketedPasteEnabled: boolean;
-  // Handle for the Kimi/Codex inbox poller. Claude agents use the MCP
-  // channel server (acp-mail-channel.js) instead and leave this null.
+  // Handle for the inbox poller. Runs for EVERY provider including claude —
+  // startInboxPoller is called unconditionally at spawn and delivers by
+  // injecting a bracketed-paste notice into the PTY (see the loop at the end
+  // of startInboxPoller). This comment previously said claude used the
+  // acp-mail MCP channel server and left this null; that server was removed
+  // and the claim was never re-checked. Measured on the wire 2026-08-08:
+  // `[PTY] Pushed mail 22657 from DotNetPert into BAPert PTY` on a
+  // claude-runtime spawn, 8 pushes across 4 agents in one boot.
   mailPollTimer: NodeJS.Timeout | null;
   // Path to the boot-prompt tmp file passed via --system-prompt-file (Claude)
   // or kept for reference when PTY-injected (Kimi/Codex). Cleaned up on
@@ -178,6 +280,9 @@ interface ManagedPty {
    * exit report. Undefined = a genuine unexpected exit, i.e. a real crash.
    */
   intentionalExit?: import('./agentSessionLifecycle').AgentSessionEndReason;
+  /** Spawn time — the fail-loud watchdog's baseline for "silent since when"
+   *  before this terminal has ever reported a single row (117107 leg c). */
+  spawnedAt: number;
 }
 
 export type AgentRuntime = TerminalProvider;
@@ -236,6 +341,9 @@ export interface SpawnAgentOptions {
 
 const terminals: Map<string, ManagedPty> = new Map();
 const acpRuntimes: Map<string, AcpRuntimeManager> = new Map();
+/** Cancels each ACP agent's mail poller on teardown, keyed by terminal id.
+    Without this the poller outlives the pane and keeps injecting into a dead runtime. */
+const acpMailTimers = new Map<string, () => void>();
 let mainWindowRef: BrowserWindow | null = null;
 
 function getAcpRuntimeByAgent(agentName: string): AcpRuntimeManager | undefined {
@@ -306,7 +414,12 @@ const BRACKETED_PASTE_OFF = Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x30, 0x3
 // (writeBuf) preserves byte order across interleaved writes; single keystrokes
 // take the immediate fast path so normal typing has ZERO added latency.
 const PTY_WRITE_CHUNK = 16384;  // bytes per write — normal pastes go in ONE write (intact bracketed paste); ConPTY-safe to ~24 KB
-const PTY_WRITE_PACE_MS = 4;    // gap between chunks; only applies to >16 KB pastes
+const PTY_WRITE_PACE_MS = 4;    // gap between chunks; only applies to >16 KB NON-paste writes
+// Bracketed-paste envelope. A write containing PASTE_START is never split — see
+// drainPtyWrite. Named rather than inlined so the two places that care (the
+// no-split guard and injectBootPrompt) cannot drift apart.
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
 
 function queuePtyWrite(managed: ManagedPty, data: string): void {
   if (!data) return;
@@ -322,10 +435,10 @@ function queuePtyWrite(managed: ManagedPty, data: string): void {
  */
 function injectBootPrompt(managed: ManagedPty, bootPrompt: string): void {
   if (!bootPrompt) return;
-  if (bootPrompt.length > PTY_WRITE_CHUNK) {
-    console.warn(`[PTY] Boot prompt for ${managed.agentName} is ${bootPrompt.length} chars (> ${PTY_WRITE_CHUNK}); chunked paste may not land cleanly`);
-  }
-  const paste = `\x1b[200~${bootPrompt}\x1b[201~\r`;
+  // No size warning here any more: drainPtyWrite never splits a bracketed paste,
+  // so an oversized boot prompt is delivered whole rather than "may not land
+  // cleanly". The length is logged there for every paste, this one included.
+  const paste = `${PASTE_START}${bootPrompt}${PASTE_END}\r`;
   queuePtyWrite(managed, paste);
 }
 
@@ -338,6 +451,36 @@ function drainPtyWrite(managed: ManagedPty): void {
       managed.writeBuf = '';
     }
     managed.writeDraining = false;
+    return;
+  }
+
+  // NEVER SPLIT A BRACKETED PASTE, AT ANY SIZE.
+  //
+  // The block above explains why splitting truncates: the child's paste parser
+  // finalizes on the FIRST fragment and drops the remainder. Raising the chunk
+  // size to 16 KB stopped ordinary pastes being split, but left the split in
+  // place above that — so a paste over 16 KB still lost everything past the
+  // first chunk. Reported 2026-08-08: "paste too much and the agent gets a
+  // truncated copy", with the UI showing the full text because only the PTY
+  // write truncates.
+  //
+  // The defence for keeping the split ("at 16 KB they fragment 16x less than
+  // the old 1 KB") treated this as proportional. It is not. ONE boundary is
+  // enough to lose the rest, so fragmenting less often does not fragment less
+  // harmfully — it only makes the failure rarer and therefore harder to catch.
+  //
+  // If the buffer carries a paste-start marker, it goes out whole. ConPTY was
+  // measured lossless to ~24 KB in a single write even to a deliberately
+  // slow-draining child; beyond that is unmeasured, and an unmeasured single
+  // write is still strictly better than a split that is KNOWN to truncate.
+  if (managed.writeBuf.includes(PASTE_START)) {
+    const bytes = managed.writeBuf.length;
+    managed.pty.write(managed.writeBuf);
+    managed.writeBuf = '';
+    managed.writeDraining = false;
+    console.log(
+      `[PTY] paste ${managed.agentName}: ${bytes} chars written whole (unsplit; > ${PTY_WRITE_CHUNK} would previously have truncated)`,
+    );
     return;
   }
   managed.writeDraining = true;
@@ -419,7 +562,35 @@ const MAIL_POLL_INTERVAL_MS = 30000;
 const MAIL_POLL_JITTER_MAX_MS = 10000;
 const MAIL_POLL_BACKOFF_MAX_MS = 300000; // 5 min cap
 
-function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ response: any; statusCode?: number }> {
+// Card 193400: pageSize 50 measured at 85ms/message server-side (TOAST
+// detoast on the body column) — 50 x 85ms = 4250ms against a 5s VibeSQL
+// ceiling, observed maxima 4834-5114ms. Shrinking this alone was NOT SAFE
+// (QAPert review, msg 24486): the poller only ever read page 1 of a
+// newest-first list, so a burst larger than pageSize between two polls
+// pushed the oldest of it off page 1 before the poller looked — silent,
+// permanent loss, not delay, and MAIL_POLL_BACKOFF_MAX_MS (five minutes)
+// makes that burst window far larger than the base 30s interval suggests.
+// The fix is `page` support below plus a stop-at-known-id loop, which makes
+// correctness independent of this number — it is a pure cost/latency knob now.
+const MAIL_POLL_PAGE_SIZE = 20;
+// BAPert ruling (msg 24553), after QAPert PROVED (not argued) that a page-count
+// cap strands mail permanently (msg 24545, empirically confirmed live msg
+// 24558/24572: one capped cycle, then every later cycle breaks after page 1
+// forever — 23 of 27 in-window messages never collected across 3 cycles,
+// zero convergence). A page-count cap cannot be made safe by raising the
+// number; the bound has to be wall-clock/message-count so the loop genuinely
+// keeps draining toward the watermark instead of stopping arbitrarily (option
+// A), and continuation pages fetch more per round trip once we know we're
+// past page 1 (option B, stopgap — AgentMailService.cs:430 allows up to 100).
+// Neither is a guarantee for an unboundedly deep backlog — that requires a
+// server-side `since=` filter (option C, carded separately by BAPert, not
+// shipped here) — but both make hitting the bound at all an abnormal event
+// instead of a routine one.
+const MAIL_POLL_CONTINUATION_PAGE_SIZE = 50; // pages 2+, once genuinely paging past the steady-state page
+const MAIL_POLL_CYCLE_BUDGET_MS = 20000; // wall-clock ceiling for one poll cycle's paging, well under the 30s base interval
+const MAIL_POLL_MAX_MESSAGES_PER_CYCLE = 5000; // pure backstop against a pathological/degenerate response stream — should never bind given the wall-clock bound above
+
+function fetchUnreadInbox(agentName: string, projectId?: number, page = 1, pageSize = MAIL_POLL_PAGE_SIZE): Promise<{ response: any; statusCode?: number }> {
   return new Promise((resolve) => {
     const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
     const u = new URL(`/v1/mail/inbox/${encodeURIComponent(agentName)}`, apiBase);
@@ -433,7 +604,8 @@ function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ resp
     // We do not need the server's filter: this poller already de-dupes against its
     // own `seen` set, which is the authority on "not yet injected". Asking the
     // server to decide read-state was the dependency that broke us.
-    u.searchParams.set('pageSize', '50');
+    u.searchParams.set('pageSize', String(pageSize));
+    u.searchParams.set('page', String(page));
     if (projectId != null) {
       u.searchParams.set('project_id', String(projectId));
     }
@@ -457,7 +629,13 @@ function fetchUnreadInbox(agentName: string, projectId?: number): Promise<{ resp
       }
     );
     req.on('error', () => resolve({ response: null }));
-    req.setTimeout(3000, () => { req.destroy(); resolve({ response: null }); });
+    // Card 193400: server observed at 1732ms avg / 5114ms max against a 5s
+    // ceiling; a 3000ms client timeout was destroying in-flight requests the
+    // server went on to complete with 200 (0 server-side 5xx/timeouts across
+    // 267 polls, 21 client-side "failures" in the same window). 8000ms clears
+    // the observed server max with margin while staying well under the 30s+
+    // poll interval, so a truly dead endpoint still gets caught promptly.
+    req.setTimeout(8000, () => { req.destroy(); resolve({ response: null }); });
   });
 }
 
@@ -537,13 +715,85 @@ function extractMessages(response: any): any[] {
 
 /** Consecutive inbox-poll failures per agent, so a dead delivery path is loud. */
 const mailPollFailures = new Map<string, number>();
+// Card 193400: `mailPollFailures` resets to 0 on every success, so n===1 meant
+// "first failure since the last success", not "first failure since boot" — a
+// timeout hours into a session printed a message asserting an auth-settling
+// cause that was never established. This tracks whether the poller has EVER
+// completed a 200 for this agent, so the boot-window message only fires when
+// that is actually true.
+//
+// NIT (QAPert review, msg 24486; accepted by BAPert ruling 24491 as a comment,
+// not a fix): both maps are module-level, keyed by agentName, and nothing
+// deletes an entry when a PTY exits. After a respawn under the same agent
+// name, mailPollEverSucceeded still reads true, so the real boot window prints
+// the "transient, retrying" message instead of the auth-settling one.
+// Pre-existing in shape (mailPollFailures already had this) and cosmetic —
+// left as-is rather than fixed here.
+const mailPollEverSucceeded = new Map<string, boolean>();
 
-function startInboxPoller(managed: ManagedPty): void {
-  const { agentName, projectId } = managed;
+/**
+ * How a poller hands a mail line to its agent, and where it parks its timer.
+ *
+ * THE DEFECT THIS EXISTS TO FIX (2026-08-10): this poller was only ever started
+ * on the PTY path — `startInboxPoller(managed)` sits ~290 lines AFTER the ACP
+ * branch returns. Every Kimi agent takes the ACP branch, so NOTHING polled their
+ * inbox and NOTHING called `injectMail`. Mail landed in the store, the sidebar
+ * showed it, and no one ever handed it to the agent. Jon hand-relayed messages
+ * for a full session as a result.
+ *
+ * The capability was present the whole time (`AcpRuntimeManager.injectMail`,
+ * wired to an IPC handler) — only the caller was missing. So this generalises
+ * the ONE poller rather than growing a second: the paging watermark, the 429
+ * backoff and the dedupe are hard-won and must not be duplicated and drift.
+ */
+interface InboxDelivery {
+  agentName: string;
+  projectId?: number;
+  /** Deliver one mail line. PTY writes to stdin; ACP calls injectMail. */
+  deliver: (text: string) => void;
+  /** Park the pending timer so teardown can clear it. */
+  setTimer: (t: NodeJS.Timeout | null) => void;
+}
+
+function startInboxPoller(target: ManagedPty | InboxDelivery): void {
+  // A ManagedPty keeps the original behaviour verbatim; an InboxDelivery is the
+  // ACP shape. Normalising here keeps every caller below unchanged.
+  const isManaged = 'pty' in (target as ManagedPty);
+  const managed = isManaged ? (target as ManagedPty) : null;
+  const del = isManaged
+    ? {
+        agentName: (target as ManagedPty).agentName,
+        projectId: (target as ManagedPty).projectId,
+        deliver: (text: string) => {
+          queuePtyWrite(managed!, `${PASTE_START}${text}${PASTE_END}`);
+          setTimeout(() => queuePtyWrite(managed!, '\r'), 100);
+        },
+        setTimer: (t: NodeJS.Timeout | null) => { managed!.mailPollTimer = t; },
+      }
+    : (target as InboxDelivery);
+  const { agentName, projectId } = del;
   const seen = new Set<number>();
+  // NIT (QAPert msg 24496): `seen` is never pruned — it grows for the life of
+  // the pane, and paging fills it faster than the old single-page fetch did.
+  // Not urgent at current volumes; noted so it isn't rediscovered as a leak.
   let firstPoll = true;
   // Cut-off between 'history to skip' and 'mail that arrived since we came up'.
   const pollerStartedAt = Date.now();
+  // Paging-stop watermark (QAPert msg 24496, approved as written BAPert msg
+  // 24498). THE TRAP: the obvious guard — "page while every id on the page is
+  // unseen" — walks the ENTIRE mailbox on every boot, because `seen` starts
+  // empty, so every page looks unseen and every full page keeps paging
+  // (measured: ~354 pages at pageSize 20 against the pod's slowest, 5s-ceiling
+  // endpoint, for every one of seven agents, on every restart). The fix is to
+  // page on TIME, not set membership: page 1 is newest-first, so page while
+  // the page still contains messages newer than this watermark; stop the
+  // moment a page contains one at-or-older (or undateable) — everything past
+  // that point, on this page and every later one, is already known. Starts at
+  // pollerStartedAt (the primitive the poller already uses to separate
+  // history from live mail — firstPoll then costs exactly one request, same
+  // as today) and advances to the newest timestamp actually collected after
+  // every cycle, so later polls never re-walk history either.
+  let newestKnownAt = pollerStartedAt;
   const apiBase = process.env.ACP_API_URL || 'http://127.0.0.1:3001';
   let currentInterval = MAIL_POLL_INTERVAL_MS + Math.floor(Math.random() * MAIL_POLL_JITTER_MAX_MS);
   let consecutive429s = 0;
@@ -552,49 +802,180 @@ function startInboxPoller(managed: ManagedPty): void {
   const scheduleNext = () => {
     if (activeTimer) clearTimeout(activeTimer);
     activeTimer = setTimeout(poll, currentInterval);
-    managed.mailPollTimer = activeTimer;
+    del.setTimer(activeTimer);
   };
 
+  // Card 193400 / QAPert review (msg 24486, corrected msg 24496) / BAPert
+  // ruling (msg 24491, 24498): page 1 alone is not safe at any pageSize,
+  // because page 1 of a newest-first list moves on. A burst larger than one
+  // page between two polls pushed the oldest of it off the page before this
+  // poller ever saw it — silently and permanently, not "delayed until next
+  // cycle" as the card originally claimed. This pages forward while pages
+  // are still newer than `newestKnownAt`. In steady state this is exactly one
+  // request; it only pages further in the burst case that used to lose mail.
   const poll = async () => {
-    const { response, statusCode } = await fetchUnreadInbox(agentName, projectId);
+    const collected: any[] = [];
+    let page = 1;
+    let pageSizeForPage = MAIL_POLL_PAGE_SIZE;
+    let cappedOut = false;
+    const cycleStartedAt = Date.now();
 
-    // Back off on 429 so we don't DDoS the local API when many agents run.
-    if (statusCode === 429) {
-      consecutive429s++;
-      currentInterval = Math.min(
-        currentInterval * 2,
-        MAIL_POLL_BACKOFF_MAX_MS
-      );
-      console.warn(`[PTY] Mail poll 429 for ${agentName}, backing off to ${currentInterval}ms (streak: ${consecutive429s})`);
-      scheduleNext();
-      return;
-    }
+    while (true) {
+      const { response, statusCode } = await fetchUnreadInbox(agentName, projectId, page, pageSizeForPage);
 
-    if (statusCode !== 200) {
-      // LOUD. This used to return silently, so a permanently-failing inbox fetch
-      // looked identical to an empty inbox: pollers logged "Started" and then
-      // nothing, forever. A delivery path that cannot report its own failure is
-      // indistinguishable from one with nothing to deliver.
-      mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
-      const n = mailPollFailures.get(agentName)!;
-      if (n === 1 || n === 5 || n % 20 === 0) {
-        console.warn(
-          `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
-          `(${n} consecutive). Mail delivery to this pane is NOT working.`,
+      // Back off on 429 so we don't DDoS the local API when many agents run.
+      if (statusCode === 429) {
+        consecutive429s++;
+        currentInterval = Math.min(
+          currentInterval * 2,
+          MAIL_POLL_BACKOFF_MAX_MS
         );
+        console.warn(`[PTY] Mail poll 429 for ${agentName}, backing off to ${currentInterval}ms (streak: ${consecutive429s})`);
+        scheduleNext();
+        return;
       }
-      scheduleNext();
-      return;
-    }
-    mailPollFailures.set(agentName, 0);
 
-    // Success — gradually restore interval
-    consecutive429s = Math.max(0, consecutive429s - 1);
-    if (consecutive429s === 0 && currentInterval > MAIL_POLL_INTERVAL_MS) {
-      currentInterval = Math.max(MAIL_POLL_INTERVAL_MS, Math.floor(currentInterval / 2));
+      if (statusCode !== 200) {
+        if (page > 1) {
+          // Page 1 already succeeded this cycle — don't discard it or treat
+          // the cycle as failed. Log loudly (a burst this large plus a
+          // mid-paging failure is exactly the case the safety cap exists
+          // for) and process what was collected; the rest arrives next cycle.
+          console.warn(
+            `[PTY] Mail poll page ${page} failed for ${agentName} (HTTP ${statusCode ?? 'network'}) ` +
+            `— processing ${collected.length} message(s) collected before the failure.`,
+          );
+          break;
+        }
+        // LOUD. This used to return silently, so a permanently-failing inbox fetch
+        // looked identical to an empty inbox: pollers logged "Started" and then
+        // nothing, forever. A delivery path that cannot report its own failure is
+        // indistinguishable from one with nothing to deliver.
+        mailPollFailures.set(agentName, (mailPollFailures.get(agentName) ?? 0) + 1);
+        const n = mailPollFailures.get(agentName)!;
+        const everSucceeded = mailPollEverSucceeded.get(agentName) ?? false;
+        if (n === 1 && !everSucceeded) {
+          // Attempt 1 is the boot window, not a fault. The poller starts at spawn
+          // while the bearer is still being established, so the first poll
+          // routinely fails and the next one succeeds — every agent, every boot.
+          // Declaring "NOT working" here conflated a transient startup condition
+          // with a permanent one, which is the same defect ptyOutputReporter
+          // split out as `session-pending` rather than burying under a generic
+          // failure. Escalate only once it is genuinely a streak.
+          console.log(
+            `[PTY] Mail poll for ${agentName} failed on first attempt ` +
+            `(HTTP ${statusCode ?? 'network'}) — auth may still be settling; retrying.`,
+          );
+        } else if (n === 1) {
+          // Card 193400: this agent has polled successfully before, so this is a
+          // mid-session transient (e.g. a slow-but-completing server response
+          // outrunning the client timeout), NOT a boot-auth condition. Do not
+          // assert a cause that was never established.
+          console.log(
+            `[PTY] Mail poll for ${agentName} failed (HTTP ${statusCode ?? 'network/timeout'}) ` +
+            `— transient, retrying next cycle.`,
+          );
+        } else if (n === 5 || n % 20 === 0) {
+          console.warn(
+            `[PTY] Mail poll FAILED for ${agentName}: HTTP ${statusCode ?? 'network'} ` +
+            `(${n} consecutive). Mail delivery to this pane is NOT working.`,
+          );
+        }
+        scheduleNext();
+        return;
+      }
+
+      if (page === 1) {
+        mailPollFailures.set(agentName, 0);
+        mailPollEverSucceeded.set(agentName, true);
+
+        // Success — gradually restore interval
+        consecutive429s = Math.max(0, consecutive429s - 1);
+        if (consecutive429s === 0 && currentInterval > MAIL_POLL_INTERVAL_MS) {
+          currentInterval = Math.max(MAIL_POLL_INTERVAL_MS, Math.floor(currentInterval / 2));
+        }
+      }
+
+      const pageMessages = extractMessages(response);
+      collected.push(...pageMessages);
+
+      // Strict '<' (not '<=') at the watermark: a message exactly at
+      // newestKnownAt is treated as still-possibly-new rather than a stop
+      // signal, so a tie at the boundary costs one extra page rather than a
+      // silently dropped sibling with an identical timestamp.
+      const reachedWatermark = pageMessages.some((m: any) => {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        return Number.isNaN(ts) || ts < newestKnownAt;
+      });
+
+      if (reachedWatermark || pageMessages.length < pageSizeForPage) break;
+
+      // Option A (BAPert ruling msg 24553): the bound is WALL-CLOCK / total
+      // MESSAGE COUNT, not page count — a page-count cap cannot be made safe
+      // by raising the number (QAPert proved this live, msg 24558/24572: a
+      // single capped cycle permanently stops the watermark from ever
+      // reaching deeper, regardless of how generous the page-count ceiling
+      // is). This keeps genuinely paging toward the watermark until either it
+      // arrives or one of these two backstops fires.
+      const elapsedMs = Date.now() - cycleStartedAt;
+      if (elapsedMs >= MAIL_POLL_CYCLE_BUDGET_MS || collected.length >= MAIL_POLL_MAX_MESSAGES_PER_CYCLE) {
+        cappedOut = true;
+        break;
+      }
+      page++;
+      // Option B stopgap (BAPert ruling msg 24553): once genuinely paging
+      // past the steady-state page, widen subsequent fetches — more ground
+      // covered per round trip before the wall-clock/count backstop can fire.
+      pageSizeForPage = MAIL_POLL_CONTINUATION_PAGE_SIZE;
     }
 
-    const messages = extractMessages(response);
+    if (cappedOut) {
+      // Loud (QAPert msg 24496 / BAPert msg 24498) AND accurate about the
+      // consequence: this does NOT retry automatically. Saying so plainly,
+      // with numbers, per BAPert's ruling that this card cannot close on an
+      // unconditional "mail cannot be silently lost" a third time.
+      let oldestCollectedAt = 'unknown';
+      for (const m of collected) {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        if (!Number.isNaN(ts)) {
+          const iso = new Date(ts).toISOString();
+          if (oldestCollectedAt === 'unknown' || iso < oldestCollectedAt) oldestCollectedAt = iso;
+        }
+      }
+      console.warn(
+        `[PTY] Mail paging cycle budget hit for ${agentName}: ${Date.now() - cycleStartedAt}ms / ` +
+        `${MAIL_POLL_CYCLE_BUDGET_MS}ms wall-clock, ${collected.length} messages collected this cycle ` +
+        `(oldest at ${oldestCollectedAt}) — an abnormal burst. The watermark is intentionally left ` +
+        `UNCHANGED (see the invariant above: newestKnownAt must never advance past it), so the next cycle ` +
+        `resumes paging from the same point rather than skipping past history it never fetched. This is ` +
+        `NOT automatic and NOT guaranteed to converge on a sustained flood (that requires a server-side ` +
+        `since= filter — BAPert msg 24553, carded separately) — recurrence needs investigation.`,
+      );
+    } else {
+      // *** THE INVARIANT THAT MAKES ANY OF THIS CORRECT (BAPert msg 24553): ***
+      // THE WATERMARK MUST NEVER ADVANCE PAST THE OLDEST MESSAGE CONTIGUOUSLY
+      // COLLECTED. Only safe to advance here because `!cappedOut` means paging
+      // ended by genuinely reaching the watermark or a short page — i.e. every
+      // message back to the true prior boundary is accounted for, with no gap.
+      // Advancing on a capped cycle (the first cut of this fix did, unconditionally)
+      // is precisely the bug: it declares data "known" that was never fetched,
+      // which is how a bounded cap turns back into silent, permanent loss —
+      // proved live by QAPert (msg 24558/24572): one capped cycle, then every
+      // later cycle broke after page 1 forever, 23 of 27 in-window messages
+      // never collected, zero convergence across 3 cycles.
+      for (const m of collected) {
+        const ts = Date.parse(String(m.created_at ?? m.ts ?? ''));
+        if (!Number.isNaN(ts) && ts > newestKnownAt) newestKnownAt = ts;
+      }
+    }
+
+    // Page 1 is newest-first and pages are appended in that order, so
+    // `collected` is newest-to-oldest end-to-end. Injection below writes
+    // sequentially into the PTY, so left as-is a paginated batch would land
+    // newest-first — invisible at one or two messages, but an agent reading a
+    // 60-message catch-up backwards can act on a reply before its question
+    // (BAPert msg 24498). Reverse once here so injection order is oldest-first.
+    const messages = collected.slice().reverse();
     if (firstPoll) {
       // Baseline HISTORY, not everything. Now that we fetch the full inbox (the
       // cloud's unread filter is broken — see fetchUnreadInbox), a blanket
@@ -623,33 +1004,25 @@ function startInboxPoller(managed: ManagedPty): void {
       seen.add(Number(id));
       const from = m.from_agent ?? 'unknown';
       const subject = m.subject ?? '(no subject)';
-      // The notice used to say `Read it NOW with: curl .../v1/mail/messages/N`.
-      // That GET STAMPS read_at in the cloud, so we were instructing every agent
-      // to run the one call that marks its own mail read — BEFORE acting on it.
-      // Result: 42 of 42 inbox entries carried a read_at nobody set deliberately,
-      // unread_count sat at 0 forever, and the inbox stopped working as a work
-      // queue. Confirmed by controlled probe (DotNetPert-Scout, 2026-07-30):
-      // read_at null -> one GET -> read_at stamped, unread_count 0.
-      //
-      // Team convention is that unread means NOT YET ACTIONED, which is why we
-      // leave mail unread in-session. Read-on-GET redefines it as NOT YET
-      // FETCHED — a different thing, and the difference is what destroyed the
-      // queue. So the notice no longer commands the fetch: it carries enough to
-      // act on, and tells the agent that fetching costs its unread state.
+      // Per-mail notice is intentionally LEAN: who / subject / id + the body-fetch
+      // curl, nothing else. GET on a message does NOT stamp read (re-confirmed
+      // 2026-08-05 by controlled probe: GET by id, inbox count + entry unchanged),
+      // so there is no fetch-cost to warn about. The old notice carried a stale
+      // "fetching marks it read, fetch only when ready to action" lecture in EVERY
+      // push — false and a context clogger (Jon, 2026-08-05). Mail-read and
+      // autonomy discipline lives in agent onboarding, not here.
       const text =
         `[ACP Mail] New message from ${from}: "${subject}" (id ${id}). ` +
         `Act on it. If you need the body: curl -s ${apiBase}/v1/mail/messages/${id} ` +
-        `-H "X-ACP-Agent: ${agentName}" — NOTE that fetching marks it read, so fetch ` +
-        `only when you are ready to action it, not to triage. Do not wait for the human.`;
+        `-H "X-ACP-Agent: ${agentName}".`;
       // Inject as bracketed paste + a SEPARATE Enter write. A raw
       // `write(text + '\r')` arrives as one input burst; the kimi TUI treats
       // the burst as pasted content and the trailing \r becomes a newline in
       // the draft — the notice sat unsubmitted in the input box until a
       // human pressed Enter. Paste-close followed by a distinct Enter write
       // is processed as a real submit, so mail lands straight in context.
-      queuePtyWrite(managed, `\x1b[200~${text}\x1b[201~`);
-      setTimeout(() => queuePtyWrite(managed, '\r'), 100);
-      console.log(`[PTY] Pushed mail ${id} from ${from} into ${agentName} PTY`);
+      del.deliver(text);
+      console.log(`[MailPoll] pushed mail ${id} from ${from} into ${agentName}`);
     }
 
     scheduleNext();
@@ -934,6 +1307,26 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         void endAgentSession(id, 'normal');
         acpRuntimes.delete(id);
       });
+
+    // THE MAIL PUSH — the defect this fixes. Without this line an ACP agent
+    // NEVER receives mail: startInboxPoller was only ever called on the PTY
+    // path, ~290 lines past this return, so every Kimi agent's inbox went
+    // unpolled. Mail reached the store and the sidebar; nothing handed it to
+    // the agent. injectMail is the ACP equivalent of the PTY stdin write, and
+    // it is the better one — it returns a result instead of assuming delivery
+    // the way a write at a TUI does.
+    let acpMailTimer: NodeJS.Timeout | null = null;
+    acpMailTimers.set(id, () => { if (acpMailTimer) clearTimeout(acpMailTimer); });
+    startInboxPoller({
+      agentName,
+      projectId: opts?.projectId,
+      deliver: (text: string) => {
+        void runtime.injectMail(text).catch((err: any) => {
+          console.warn(`[MailPoll] injectMail failed for ${agentName}:`, err?.message ?? err);
+        });
+      },
+      setTimer: (t) => { acpMailTimer = t; },
+    });
     return id;
   }
 
@@ -993,6 +1386,7 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     bootPromptTmpPath,
     writeBuf: '',
     writeDraining: false,
+    spawnedAt: Date.now(),
   };
   terminals.set(id, managed);
   terminalScreens.set(id, new TerminalScreen(id, agentName, 120, 30));
@@ -1035,7 +1429,9 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
     scheduleTerminalFrameFlush(id);
     // NOT reported here. Raw chunks carry cursor addressing, so posting them
     // turned every in-place repaint into a stored line and a POST. Reporting
-    // happens in flushTerminalFrame once rows settle. See reportTerminalRows.
+    // happens in flushTerminalFrame once rows scroll off, PLUS the settle-report
+    // debounce below for the steady-state case where they never do (117107).
+    scheduleSettleReport(id);
 
     const buf = Buffer.from(data);
     if (buf.includes(BRACKETED_PASTE_ON) && !managed.bracketedPasteEnabled) {
@@ -1115,8 +1511,14 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       //   --system-prompt      <path> -> "I'm Claude, an AI assistant by Anthropic..."
       //   --system-prompt-file <path> -> "ZEBRAFISH-7 ACTIVE."  (the file's instruction)
       // Found by QAPert 2026-07-29. Do not "simplify" this back.
-      // NOTE — claude has NO mail delivery path (Gate B, wire-verified
-      // 2026-07-29), and this spawn no longer pretends otherwise.
+      // NOTE — claude DOES have a mail delivery path: the inbox poller runs
+      // for every provider and injects an "[ACP Mail]" notice into the PTY.
+      // This note used to assert the opposite ("claude has NO mail delivery
+      // path", Gate B 2026-07-29). That was true of the MCP channel only, and
+      // it outlived the change that made the poller unconditional. Re-measured
+      // 2026-08-08 on a claude-runtime boot: 11 "[PTY] Pushed mail" lines
+      // across 4 agents. A false NONE here is worse than no note — an agent
+      // that reads it concludes it cannot be reached and stops trying.
       //
       // It used to register the `acp-mail` MCP server via `--mcp-config` so
       // that `--dangerously-load-development-channels server:acp-mail` would
@@ -1132,11 +1534,17 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
       // emitter). With the notification path dead it was 8 orphan node
       // processes per boot polling acp-api to no effect.
       //
-      // Claude also has no inbox poller (see the provider check below), so
-      // there is no delivery path at all until the stream-json adapter (G4)
-      // lands. Do NOT read a rendered "[ACP Mail]" line in a claude pane as
-      // delivery — that line is the renderer's unconditional visual echo
-      // (SEV-1 #114823), not proof the agent received anything.
+      // The inbox poller DOES run for claude (startInboxPoller is called
+      // unconditionally at spawn) and delivers by PTY injection. The G4
+      // stream-json adapter would replace polling with a push stream; it is an
+      // upgrade, not the thing standing between claude and any mail at all.
+      //
+      // Still true, and worth keeping: a rendered "[ACP Mail]" line in a pane
+      // is the renderer's unconditional visual echo (SEV-1 #114823) and is NOT
+      // proof the agent received anything. The evidence that delivery happened
+      // is the main-process log line "[PTY] Pushed mail <id> ... into <agent>
+      // PTY" — that records the write. Proof of RECEIPT is the agent acting on
+      // the message. Do not conflate the three.
       // Composed by claudeSpawnCommand.ts so the argv is unit-assertable (B-2).
       // pty.ts cannot be imported in a test — env.ts touches app.isPackaged at
       // module load — so the composition lives in a module with no electron dep.
@@ -1155,7 +1563,18 @@ export function spawnAgent(agentName: string, workDir: string, opts?: SpawnAgent
         resume: resumeSession,
       });
       ptyProcess.write(cmd);
-      console.log(`[PTY] Starting Claude Code (effort: ${effort}${opts?.modelOverride ? `, model: ${opts.modelOverride}` : ''}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: NONE — no delivery path on claude until the stream-json adapter lands, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
+      // Report the EFFECTIVE model, not the requested one. buildClaudeSpawnCommand
+      // drops a foreign-runtime override (e.g. a kimi `k3` on a claude placement)
+      // and warns; echoing opts.modelOverride here undid that warning one line
+      // later and is what made the UI badge look truthful while the process ran
+      // on the default. Same predicate as the spawn path — never a second copy.
+      const rejectedModel = opts?.modelOverride && isForeignRuntimeModel(opts.modelOverride);
+      const modelNote = !opts?.modelOverride
+        ? ''
+        : rejectedModel
+          ? `, model: default (override '${opts.modelOverride}' rejected — foreign runtime)`
+          : `, model: ${opts.modelOverride}`;
+      console.log(`[PTY] Starting Claude Code (effort: ${effort}${modelNote}, session: ${resumeSession ? 'RESUME' : 'new'} ${claudeSessionId}, acp-mail push: inbox poller -> PTY injection, kickoff: "Begin."${bootPromptTmpPath ? ', system-prompt: ' + path.basename(bootPromptTmpPath) : ''}) for ${agentName}`);
     } else if (provider === 'codex') {
       const model = settings.codexModel || 'codex-mini';
       ptyProcess.write(`codex --full-auto --model ${model}\r`);
@@ -1348,6 +1767,15 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number): 
   return false;
 }
 
+/** Current sessionToken for a live terminal, or undefined if the terminal is
+ *  gone or never got one (184984). Used to re-resolve a FRESH token at spill
+ *  drain time instead of replaying whatever was captured when the payload
+ *  first failed — which may be a session that ended days ago by the time a
+ *  stranded entry finally drains. */
+export function getSessionTokenForTerminal(terminalId: string): string | undefined {
+  return terminals.get(terminalId)?.sessionToken;
+}
+
 /** Get terminal info by agent name.
  *  When projectId is provided, scopes to that project (P0 namespace fix).
  *  When omitted, falls back to global-by-name for legacy callers. */
@@ -1377,6 +1805,7 @@ export function getActiveTerminals(): Array<{ id: string; agentName: string; pro
 
 export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
   mainWindowRef = mainWindow;
+  startOutputWatchdog();
 
   // NOTE: the renderer-facing PTY_SPAWN IPC handler was DELETED (SPEC-team-
   // runtime §3.3 FLAG 6). It was the phantom !backendAvailable spawn fallback
@@ -1457,7 +1886,7 @@ export function setupPtyHandlers(mainWindow: BrowserWindow | null) {
     const runtime = getAcpRuntimeByAgent(payload.agent);
     if (!runtime) {
       console.warn(`[ACP] inject-mail for unknown agent: ${payload.agent}`);
-      return false;
+      return 'failed';
     }
     console.log(`[ACP main] mail notice received for ${payload.agent}: ${payload.text.slice(0, 80)}`);
     return runtime.injectMail(payload.text);

@@ -24,6 +24,7 @@ import { type ClaudeEffort } from '../shared/types';
  */
 const FOREIGN_RUNTIME_MODELS: ReadonlySet<string> = new Set([
   'k3',
+  'k3-256k',
   'kimi-for-coding',
   'kimi-for-coding-highspeed',
 ]);

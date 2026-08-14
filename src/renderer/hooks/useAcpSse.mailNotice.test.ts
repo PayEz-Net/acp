@@ -12,7 +12,7 @@ import { useProjectStore } from '../stores/projectStore';
 import { useAgentOutputStore } from '../stores/agentOutputStore';
 import { useAcpSessionStore } from '../stores/acpSessionStore';
 
-const mockInjectAcpMail = vi.fn().mockResolvedValue(true);
+const mockInjectAcpMail = vi.fn().mockResolvedValue('delivered');
 
 beforeEach(() => {
   vi.stubGlobal('electronAPI', { injectAcpMail: mockInjectAcpMail });
@@ -42,21 +42,18 @@ afterEach(() => {
 });
 
 describe('routeMailNotice wiring (WO 11517)', () => {
-  it('pty-echo: a PTY-bridge agent gets the self-instructing notice as an info line', async () => {
+  it('pty-echo: a PTY-bridge agent gets NO SSE echo box — pty.ts poller/MCP is the sole notice+delivery path (duplicate box removed, Jon 2026-08-05)', async () => {
     useAppStore.setState({
       agents: [{ id: '1', name: 'NextPert', terminalId: 't-pty' } as never],
     });
 
     await routeMailNotice('NextPert', 'BAPert', 'WORK ORDER', 9101);
 
-    const lines = useAgentOutputStore.getState().lines;
-    expect(lines).toHaveLength(1);
-    expect(lines[0]?.source).toBe('info');
-    expect(lines[0]?.terminal_id).toBe('t-pty');
-    expect(lines[0]?.line).toContain('[ACP Mail] You have a message from BAPert: "WORK ORDER" (id: 9101)');
-    expect(lines[0]?.line).toContain('inline mail body');
-    expect(lines[0]?.line).toContain('do not wait for the human');
-    // No injection on the echo path — the main-side poller/MCP delivers.
+    // The SSE hook no longer paints the redundant "You have a message from" box on
+    // the pty-echo route: the main-process poller (pty.ts) already prints the
+    // "New message from" chat line and delivers out-of-band. So nothing here.
+    expect(useAgentOutputStore.getState().lines).toHaveLength(0);
+    // And it still never injects on this route.
     expect(mockInjectAcpMail).not.toHaveBeenCalled();
   });
 
@@ -92,5 +89,39 @@ describe('routeMailNotice wiring (WO 11517)', () => {
     expect(echo?.role).toBe('user');
     // And never through the PTY info-line channel.
     expect(useAgentOutputStore.getState().lines).toHaveLength(0);
+  });
+
+  it('deferred acp-inject re-drives when the agent goes idle (turn end)', async () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.setState({
+        agents: [{ id: '1', name: 'NextPert', terminalId: 't-acp' } as never],
+      });
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's-live',
+        update: { sessionUpdate: 'initialized', sessionId: 's-live' },
+      } as never);
+      // Agent mid-turn: the inject defers (tri-state) and parks the notice.
+      useAcpSessionStore.getState().startAssistantTurn('NextPert', 's-live');
+      mockInjectAcpMail.mockResolvedValue('deferred');
+
+      void routeMailNotice('NextPert', 'BAPert', 'WORK ORDER', 9103);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockInjectAcpMail).toHaveBeenCalledTimes(1);
+
+      // Turn ends — the parked notice re-drives through the full route.
+      mockInjectAcpMail.mockResolvedValue('delivered');
+      useAcpSessionStore.getState().applyEvent({
+        agent: 'NextPert',
+        sessionId: 's-live',
+        update: { sessionUpdate: 'turn_complete', sessionId: 's-live', stopReason: 'end_turn' },
+      } as never);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(mockInjectAcpMail).toHaveBeenCalledTimes(2);
+    } finally {
+      mockInjectAcpMail.mockResolvedValue('delivered');
+      vi.useRealTimers();
+    }
   });
 });

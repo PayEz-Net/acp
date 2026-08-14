@@ -8,6 +8,7 @@ interface ShutdownDeps {
   partyEngine: { stop: () => void };
   upstreamSse: { stop: () => void };
   healthMonitor: { stop: () => void };
+  workStoppageMonitor?: { stop: () => void };
   backoffManager: { shutdown: () => void };
   server: { close: (cb: () => void) => void } | null;
   callbackPort: number;
@@ -49,6 +50,7 @@ export function registerShutdownHandlers(deps: ShutdownDeps): void {
 
       // 3. Stop health monitor + backoff timers
       deps.healthMonitor.stop();
+      deps.workStoppageMonitor?.stop();
       deps.backoffManager.shutdown();
 
       // 4. Notify Electron callback

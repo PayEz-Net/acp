@@ -108,6 +108,15 @@ export type AcpSessionUpdate =
   | { sessionUpdate: 'prompt_queued'; sessionId: string; queueDepth: number }
   | { sessionUpdate: 'prompt_dequeued'; sessionId: string; queueDepth: number }
   | { sessionUpdate: 'queue_cleared'; sessionId: string }
+  /**
+   * Manager-authoritative turn boundary: a prompt was just dispatched to the
+   * runtime. Emitted for EVERY dispatch (human, mail-injected, queue-drained,
+   * boot/resume nudge) so the renderer's busy state spans the whole in-flight
+   * window — including the silent thinking front-end and turns the user did
+   * not personally send, which chunk-inferred turn detection misses (card
+   * 182119: the 'Ready' pill lying mid-work).
+   */
+  | { sessionUpdate: 'turn_started'; sessionId: string }
   | { sessionUpdate: 'turn_complete'; sessionId: string; stopReason: string }
   | { sessionUpdate: 'error'; sessionId?: string; error: string }
   | { sessionUpdate: 'stderr'; sessionId?: string; text: string }
@@ -142,6 +151,17 @@ export interface AcpInjectMailPayload {
   sessionId: string;
   text: string;
 }
+
+/**
+ * Tri-state result of a mail notice inject (WO 11622 follow-up, Jon
+ * 2026-08-01): 'delivered' — the runtime accepted the notice; 'deferred' —
+ * the agent is mid-turn and the push was deliberately skipped (mail parks
+ * in the inbox, NOT a failure); 'failed' — the notice genuinely could not
+ * be delivered (runtime down/unknown agent). The renderer must be able to
+ * tell defer from failure: a boolean false collapsed both and printed
+ * "Delivery failed" for routine mid-turn defers.
+ */
+export type AcpMailInjectResult = 'delivered' | 'deferred' | 'failed';
 
 export interface AcpCancelPayload {
   agent: string;

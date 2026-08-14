@@ -23,6 +23,7 @@ const IPC_CHANNELS = {
   SETTINGS_SET: 'settings:set',
   CLOUD_ENDPOINTS: 'cloud:endpoints',
   LIFECYCLE_RESEED: 'lifecycle:reseed',
+  PROJECT_DECLARE_STARTED: 'project:declare-started',
   AUTH_LOGIN: 'auth:login',
   AUTH_LOGOUT: 'auth:logout',
   AUTH_REFRESH: 'auth:refresh',
@@ -106,6 +107,7 @@ type AgentSessionStartFailedPayload = { agentName: string; terminalId: string; s
 // ACP transport type aliases (mirrors ../shared/acpTypes).
 type AcpPromptPayload = { agent: string; sessionId: string; text: string; images?: { data: string; mimeType: string; name?: string }[] };
 type AcpInjectMailPayload = { agent: string; sessionId: string; text: string };
+type AcpMailInjectResult = 'delivered' | 'deferred' | 'failed';
 type AcpCancelPayload = { agent: string; sessionId: string };
 type AcpPurgeQueuePayload = { agent: string };
 type AcpSetModePayload = { agent: string; sessionId: string; mode: string };
@@ -250,8 +252,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Re-read current-project + lifecycle and feed the orchestrator. Used
   // by the picker Start button (project already RUNNING cloud-side).
-  reseedLifecycle: (): Promise<void> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED);
+  declareStartedProject: (projectId: number, projectName: string | null): Promise<{ success: boolean; errorMessage?: string }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DECLARE_STARTED, { projectId, projectName });
+  },
+  reseedLifecycle: (projectId?: number): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.LIFECYCLE_RESEED, projectId);
   },
 
   // Pre-flight working-dir check (SPEC-workdir-invalid §3.5). Returns whether
@@ -365,7 +370,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_PROMPT, payload);
   },
 
-  injectAcpMail: (payload: AcpInjectMailPayload): Promise<boolean> => {
+  injectAcpMail: (payload: AcpInjectMailPayload): Promise<AcpMailInjectResult> => {
     return ipcRenderer.invoke(IPC_CHANNELS.ACP_INJECT_MAIL, payload);
   },
 
@@ -566,7 +571,8 @@ declare global {
       onAgentSessionStartFailed: (callback: (payload: AgentSessionStartFailedPayload) => void) => () => void;
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string }>;
-      reseedLifecycle: () => Promise<void>;
+      declareStartedProject: (projectId: number, projectName: string | null) => Promise<{ success: boolean; errorMessage?: string }>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<boolean>;
       minimizeWindow: () => void;
@@ -593,7 +599,7 @@ declare global {
       triggerPaste: () => Promise<void>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
-      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
+      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<AcpMailInjectResult>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       purgeAcpQueue: (payload: AcpPurgeQueuePayload) => Promise<number>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;

@@ -144,7 +144,20 @@ const STATUS_GLYPHS = /^(?=\s*\S)(?:\s|✓|✔|✗|✘|✕|✖|☐|☑|☒|✅|�
 // Lines that are purely animated/provider spinner glyphs signal live thinking.
 // Distinct from STATUS_GLYPHS so checkmarks, bullets, and separators don't start
 // a thinking block.
-const THINKING_GLYPHS = /^(?:[\s]*(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛|⠶|⠮|⠵|◐|◓|◑|◒|◉|🔴|🟠|🟡|🟢|🔵|🟣|⚫|⚪|🟤|🔘|🟥|🟧|🟨|🟩|🟦|🟪|🟫|🌕|🌑|🌒|🌓|🌔|🌖|🌗|🌘|🌙|🔶|🔷|🔸|🔹|⏳|⌛|🔄)[\s]*)+$/;
+//
+// ⚠️ SHAPE IS LOAD-BEARING — do not "tidy" this back into nested quantifiers.
+// eec445f fixed STATUS_GLYPHS and SEPARATOR_LINE but left THIS one as
+// `^(?:[\s]*(?:GLYPH)+[\s]*)+$` — the same catastrophic shape. Measured at HEAD
+// (#114877 follow-up): interleaved glyph+space pairs, NON-matching tail —
+// 18 pairs 6.4ms, 22 pairs 101ms, 26 pairs 1.7s (~4x per pair, exponential).
+// The all-glyph input is linear (each iteration must consume a glyph), which is
+// why it survived the first fix: the failing input is interleaved whitespace,
+// where the trailing [\s]* of one iteration and the leading [\s]* of the next
+// partition exponentially many ways before the anchors conclude failure.
+//
+// Now ONE quantifier over a flat alternation + the (?=\s*\S) lookahead that
+// preserves "at least one real glyph" (whitespace-only must not classify):
+const THINKING_GLYPHS = /^(?=\s*\S)(?:\s|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⠛|⠶|⠮|⠵|◐|◓|◑|◒|◉|🔴|🟠|🟡|🟢|🔵|🟣|⚫|⚪|🟤|🔘|🟥|🟧|🟨|🟩|🟦|🟪|🟫|🌕|🌑|🌒|🌓|🌔|🌖|🌗|🌘|🌙|🔶|🔷|🔸|🔹|⏳|⌛|🔄)+$/;
 
 // Common TUI thinking / working labels. These are emitted repeatedly while the
 // model is processing and create scrolling noise in the line-printer renderer.

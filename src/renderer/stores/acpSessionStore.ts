@@ -385,6 +385,19 @@ function applyAcpUpdate(session: AcpSessionState, update: AcpSessionUpdate | nul
       return { ...session, waitState: update.waitState };
     }
 
+    case 'turn_started': {
+      // Manager-authoritative dispatch boundary (card 182119): open the
+      // assistant turn NOW, even when the previous assistant turn is 'done' —
+      // the ensureAssistantTurn stray-chunk guard cannot tell a late chunk
+      // from the first chunk of a mail-injected / queue-drained / post-reload
+      // turn, and those turns used to stream their whole life with the pill
+      // on 'Ready'. No-op while a turn is already active (steers and nudges
+      // ride the live turn; only one active turn per agent).
+      if (session.activeTurnId) return session;
+      const turn = createTurn(agent, update.sessionId, 'assistant', [], new Date().toISOString());
+      return { ...session, turns: [...session.turns, turn], activeTurnId: turn.id };
+    }
+
     case 'turn_complete': {
       if (!session.activeTurnId) return session;
       const turns = session.turns.map((turn) =>

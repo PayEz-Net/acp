@@ -48,3 +48,48 @@ describe('human-interrupt rule', () => {
     expect(prompt).toMatch(/before your next tool call/);
   });
 });
+
+// Jon 2026-08-07: fresh-session-at-launch is the token policy; the previous
+// session stays on disk as the emergency escape hatch, and the boot prompt's
+// first line is what makes it findable in the kimi session picker.
+describe('session label (emergency-resume discoverability)', () => {
+  it('leads with an ACP-<agent> timestamped label', () => {
+    const prompt = buildAgentBootPrompt('NextPert');
+    expect(prompt).toMatch(/^\[ACP-NextPert — \d{4}-\d{2}-\d{2} \d{2}:\d{2}\]/);
+  });
+});
+
+describe('buildAgentBootPrompt — session summary (boot continuity)', () => {
+  it('includes the summary when one is supplied', () => {
+    const out = buildAgentBootPrompt('BAPert', { sessionSummary: 'Ruled on the tenancy question; guards planted.' });
+    expect(out).toContain('Where you left off');
+    expect(out).toContain('Ruled on the tenancy question; guards planted.');
+  });
+
+  it('frames it as a PREVIOUS session, not live state', () => {
+    // An agent that reads a summary as current will act on a world that has
+    // moved. The framing is the safety property, not decoration.
+    const out = buildAgentBootPrompt('BAPert', { sessionSummary: 'anything' });
+    expect(out).toContain('PREVIOUS session');
+    expect(out).toContain('not live state');
+    expect(out).toMatch(/verify/i);
+  });
+
+  it('emits NO summary section when there is no summary — an agent with no prior state boots clean', () => {
+    // Assert on the section HEADER, not the bare phrase: the static template
+    // legitimately mentions "Where you left off" when it teaches the resume
+    // branch ("If your profile contains a section titled ..."). What must not
+    // appear without a summary is the section itself.
+    for (const empty of [undefined, null, '', '   ']) {
+      const out = buildAgentBootPrompt('QAPert', { sessionSummary: empty as any });
+      expect(out).not.toContain('## Where you left off');
+    }
+  });
+
+  it('does not leak another agent\'s summary through the name', () => {
+    // Scoping is enforced server-side by exact scope_id match; this asserts the
+    // prompt renders only what it was handed and invents nothing.
+    const out = buildAgentBootPrompt('QAPert', { sessionSummary: null as any });
+    expect(out).not.toContain('NightHawk');
+  });
+});

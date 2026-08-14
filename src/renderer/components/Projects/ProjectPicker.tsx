@@ -80,6 +80,26 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
     const startProjectId = selectedProjectId;
     setSwitchError(null);
 
+    // DECLARE THE START CLICK — FIRST, before anything reads the pointer.
+    //
+    // This is the only thing that sets this machine's current project. It must
+    // run before setCurrentProject, because that writes the cloud and then
+    // re-reads GET /v1/projects/current — which answers from THIS declaration.
+    // Declared last, that read returned "unset", the store kept no active
+    // project, and the shell rendered un-onboarded: no terminals, no mail,
+    // while eight agents were already spawned in the main process.
+    const declared = await window.electronAPI.declareStartedProject(
+      startProjectId,
+      targetProjectNameForId(startProjectId),
+    );
+    if (!declared.success) {
+      console.error(
+        `[ProjectPicker] started-project declaration failed for ${startProjectId}: ${declared.errorMessage}`,
+      );
+      setSwitchError("Couldn't engage that project on this machine. Please try again.");
+      return;
+    }
+
     // First-pick path (state is 'unset', mapped to 'first-boot-prompt'):
     // cloud writeback only, no PTY work. Safe because Ship F-bis's
     // boot-ordering gate prevents PTYs from spawning before state flips
@@ -88,9 +108,14 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
     // fires and reconciles the team into appStore.agents — all in the
     // same tick the picker closes. ('create-cta' early-returns at the
     // top of this handler — no projects to pick.)
-    // The explicit user "go". The project is already RUNNING cloud-side
-    // (POSTing 'start' 400s — you can't start what's running). So instead
-    // of mutating the cloud, tell main to re-read the state the backend
+    // The explicit user "go". NOTE: this path only RESEEDS the lifecycle, it
+    // does not transition it. The old comment here claimed the project was
+    // "already RUNNING cloud-side" — untrue: project 31 sat IDLE from
+    // 2026-07-24 to 2026-08-01, and SpawnOrch only spawns on a transition INTO
+    // RUNNING, so reseeding IDLE spawned nothing for a week. Until Start POSTs
+    // {action:'start'} itself, a project that is not already RUNNING needs that
+    // POST by hand. Tracked; deliberately not fixed here.
+    // Tell main to re-read the state the backend
     // already has (current-project + lifecycle) and feed the spawn-
     // orchestrator, which instantiates the team. Best-effort; the
     // orchestrator's result is visible as the panes populating, and the
@@ -135,7 +160,7 @@ export function ProjectPicker({ isOpen, onClose }: ProjectPickerProps) {
       // the team runtime (conforming ones are left untouched).
       await useProjectStore.getState().reconcileTeamRuntime(startProjectId);
 
-      await window.electronAPI.reseedLifecycle();
+      await window.electronAPI.reseedLifecycle(startProjectId);
       return true;
     };
 

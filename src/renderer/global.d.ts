@@ -1,5 +1,5 @@
 import { AppSettings, TerminalData, AuthStatus, LoginRequest, LoginResult, TwoFactorRequest, TwoFactorResult, SpawnFailedPayload, NoTeamEngagedPayload, AgentSessionStartFailedPayload, TerminalReplayHistoryParams, TerminalReplayHistoryResult, TerminalReplaySessionsResult, TerminalReplayExportParams, TerminalFrameUpdate } from '@shared/types';
-import type { AcpEventPayload, AcpPromptPayload, AcpInjectMailPayload, AcpCancelPayload, AcpPurgeQueuePayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
+import type { AcpEventPayload, AcpPromptPayload, AcpInjectMailPayload, AcpMailInjectResult, AcpCancelPayload, AcpPurgeQueuePayload, AcpSetModePayload, AcpKillPayload, AcpPermissionResponsePayload } from '@shared/acpTypes';
 
 export {};
 
@@ -34,7 +34,9 @@ declare global {
       // Settings
       getSettings: () => Promise<AppSettings>;
       getCloudEndpoints: () => Promise<{ vibeApiUrl: string; hubUrl: string; idpUrl: string; envName: string; isPackaged: boolean; isInternalDevBuild: boolean }>;
-      reseedLifecycle: () => Promise<void>;
+      /** The dev clicked START. The ONLY thing that sets this machine's current project. */
+      declareStartedProject: (projectId: number, projectName: string | null) => Promise<{ success: boolean; errorMessage?: string }>;
+      reseedLifecycle: (projectId?: number) => Promise<void>;
       // Pre-flight working-dir validation (SPEC-workdir-invalid §3.5).
       validateWorkDir: (path: string) => Promise<{ ok: boolean; resolved: string | null }>;
       setSettings: (settings: Partial<AppSettings>) => Promise<void>;
@@ -67,7 +69,7 @@ declare global {
       triggerPaste: () => Promise<void>;
       // ACP transport (Agent Client Protocol) for Kimi and future structured providers.
       sendAcpPrompt: (payload: AcpPromptPayload) => Promise<void>;
-      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<boolean>;
+      injectAcpMail: (payload: AcpInjectMailPayload) => Promise<AcpMailInjectResult>;
       sendAcpCancel: (payload: AcpCancelPayload) => Promise<void>;
       purgeAcpQueue: (payload: AcpPurgeQueuePayload) => Promise<number>;
       sendAcpSetMode: (payload: AcpSetModePayload) => Promise<void>;

@@ -250,6 +250,28 @@ export async function acpApiGetAgentProfile(agentName: string): Promise<string |
   }
 }
 
+/**
+ * The agent's most recent stored session summary, for the boot prompt.
+ *
+ * Returns null on ANY failure or when none exists — an agent with no prior
+ * state must boot clean rather than be handed the nearest thing. Never throws:
+ * the caller is the spawn path, and a dead spawn is worse than a thin prompt.
+ */
+export async function acpApiGetSessionSummary(agentName: string): Promise<string | null> {
+  try {
+    const data = await acpApiCall(`/v1/agents/${encodeURIComponent(agentName)}/session-summary`, {
+      headers: { 'X-ACP-Agent': agentName },
+    });
+    const payload = (data as { data?: { summary?: string | null } })?.data
+      ?? (data as { summary?: string | null });
+    const summary = payload?.summary;
+    return typeof summary === 'string' && summary.trim() ? summary.trim() : null;
+  } catch (err: any) {
+    console.warn(`[ACP-API] session summary fetch failed for ${agentName}:`, err.message);
+    return null;
+  }
+}
+
 interface MailInboxResponse {
   success?: boolean;
   data?: {

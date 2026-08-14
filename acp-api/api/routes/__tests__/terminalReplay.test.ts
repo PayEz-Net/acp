@@ -58,9 +58,11 @@ describe('terminalReplayRoutes', () => {
   let backendUrl: string;
   let backendHistory: unknown[];
   let fetchSpy: jest.SpyInstance | undefined;
+  let capturedOrder: string | null;
 
   beforeEach((done) => {
     backendHistory = [];
+    capturedOrder = null;
     backend = http.createServer((req, res) => {
       if (req.url?.startsWith('/v1/agent-output/history')) {
         const url = new URL(req.url, `http://127.0.0.1`);
@@ -69,6 +71,7 @@ describe('terminalReplayRoutes', () => {
         const sessionId = url.searchParams.get('sessionId');
         const cursor = url.searchParams.get('cursor');
         const limit = Number(url.searchParams.get('limit') || '500');
+        capturedOrder = url.searchParams.get('order');
 
         let lines = backendHistory as Array<Record<string, unknown>>;
         if (projectId) {
@@ -200,5 +203,48 @@ describe('terminalReplayRoutes', () => {
     const { status, body } = await request(baseUrl, '/v1/terminal/replay?project_id=1');
     expect(status).toBe(401);
     expect((body as any).success).toBe(false);
+  });
+
+  // ── 117048: tail access + bounded aggregation ──────────────────────────────
+
+  it('forwards order=desc to the backend (tail access)', async () => {
+    backendHistory = [
+      { project_id: '1', session_id: 's1', agent: 'BAPert', terminal_id: 't1', provider: 'claude', line: 'newest', ts: '2026-08-07T09:00:00.000Z' },
+    ];
+
+    const { status, body } = await request(baseUrl, '/v1/terminal/replay?project_id=1&order=desc&limit=1');
+    expect(status).toBe(200);
+    expect(capturedOrder).toBe('desc');
+    expect((body as any).data.lines).toHaveLength(1);
+  });
+
+  it('omits the order param when not requested (default ASC contract unchanged)', async () => {
+    backendHistory = [];
+    await request(baseUrl, '/v1/terminal/replay?project_id=1');
+    expect(capturedOrder).toBeNull();
+  });
+
+  it('sessions flags truncation instead of dying when history exceeds the page cap', async () => {
+    // 20 pages x 5000 lines = the cap; one more line forces a 21st page -> truncated.
+    const big: unknown[] = [];
+    for (let i = 0; i < 100001; i += 1) {
+      big.push({ project_id: '1', session_id: 's1', agent: 'BAPert', terminal_id: 't1', provider: 'claude', line: `l${i}`, ts: `2026-08-01T00:${String(Math.floor(i / 60) % 60).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000Z` });
+    }
+    backendHistory = big;
+
+    const { status, body } = await request(baseUrl, '/v1/terminal/sessions?project_id=1');
+    expect(status).toBe(200);
+    expect((body as any).data.truncated).toBe(true);
+    expect((body as any).data.sessions.length).toBeGreaterThan(0);
+  });
+
+  it('sessions reports truncated=false on a bounded history', async () => {
+    backendHistory = [
+      { project_id: '1', session_id: 's1', agent: 'BAPert', terminal_id: 't1', provider: 'claude', line: 'a', ts: '2026-07-03T10:00:00.000Z' },
+    ];
+
+    const { status, body } = await request(baseUrl, '/v1/terminal/sessions?project_id=1');
+    expect(status).toBe(200);
+    expect((body as any).data.truncated).toBe(false);
   });
 });

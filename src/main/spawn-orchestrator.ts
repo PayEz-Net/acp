@@ -19,13 +19,16 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed, emitNoTeamEngaged } from './pty';
 import { endAgentSession } from './agentSessionLifecycle';
 import { getLocalSecret } from './api-server';
 import { colonizeWorkspace } from './colonize';
 import { getSettings } from './store';
 import { buildAgentBootPrompt } from './acp/bootPrompt';
-import { acpApiGetAgentProfile, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
+import { acpApiGetAgentProfile,
+  acpApiGetSessionSummary, acpApiGetUnreadMailCount, registerPtyTerminal } from './acp-api-client';
 import { onLifecycleHubEvent, type LifecycleState, type ProjectLifecycleChangedEvent } from './lifecycle-hub';
 import { narrowClaudeEffort } from '../shared/types';
 
@@ -138,7 +141,12 @@ async function buildLocalBootPrompt(agentName: string): Promise<string> {
   // fire a tool call during its initial turn, which was the root cause of the
   // Kimi ACP state-machine race that left Nextpert-Scout (and any other
   // dynamically-named agent) unable to start.
-  const [profile, unreadCount] = await Promise.all([
+  // sessionSummary is fetched alongside, NOT after: it must not add latency to
+  // the spawn path. It is also the only one of the three that is runtime-
+  // agnostic memory — Kimi has no kb_recall hook, so without this a Kimi agent
+  // boots with no prior context at all under the fresh-session-per-launch
+  // rotation policy.
+  const [profile, unreadCount, sessionSummary] = await Promise.all([
     acpApiGetAgentProfile(agentName).catch((err) => {
       console.warn(`[SpawnOrch] profile fetch failed for ${agentName}:`, err);
       return null;
@@ -147,9 +155,13 @@ async function buildLocalBootPrompt(agentName: string): Promise<string> {
       console.warn(`[SpawnOrch] unread mail fetch failed for ${agentName}:`, err);
       return null;
     }),
+    acpApiGetSessionSummary(agentName).catch((err) => {
+      console.warn(`[SpawnOrch] session summary fetch failed for ${agentName}:`, err);
+      return null;
+    }),
   ]);
-  console.log(`[SpawnOrch] boot prompt data for ${agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'missing'}`);
-  return buildAgentBootPrompt(agentName, { profile, unreadCount });
+  console.log(`[SpawnOrch] boot prompt data for ${agentName}: profile=${profile ? 'present' : 'missing'} unread=${unreadCount ?? 'missing'} summary=${sessionSummary ? `${sessionSummary.length}c` : 'none'}`);
+  return buildAgentBootPrompt(agentName, { profile, unreadCount, sessionSummary });
 }
 
 async function fetchBootPrompt(projectId: number, agentId: number): Promise<string | null> {
@@ -343,17 +355,64 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // "report as" skill kickoff.
     const cloudBootPrompt = await fetchBootPrompt(projectId, member.agent_id);
     const localBootPrompt = localBootPrompts.get(member.agent_name) ?? buildAgentBootPrompt(member.agent_name);
-    const bootPrompt = cloudBootPrompt?.trim() ? cloudBootPrompt.trim() : localBootPrompt;
-    if (cloudBootPrompt?.trim()) {
-      console.log(`[SpawnOrch] using cloud boot-prompt for ${member.agent_name}`);
-    } else {
-      console.log(`[SpawnOrch] using synthesized boot-prompt for ${member.agent_name}`);
-    }
+    // Jon 2026-08-10: THE NO-ONBOARDING RULING IS RESCINDED. It was made
+    // 2026-08-01 against a welcome WALL OF TEXT, and it was right then. What it
+    // silently also blocked was the session summary, which did not exist yet:
+    // under the fresh-session-per-launch rotation policy a Kimi agent has NO
+    // kb_recall hook and NO resumable session, so with the prompt suppressed it
+    // boots with literally no prior context. Jon hit this directly — he told the
+    // team to "resume session" and they had no idea what he meant, because there
+    // was nothing to resume and nothing had been handed to them.
+    //
+    // Prefer the LOCAL synthesized prompt: it is the only one carrying the
+    // session summary (buildAgentBootPrompt renders "Where you left off" from
+    // the prefetched summary). The cloud Wave-D prompt does not.
+    console.log(`[SpawnOrch] ${member.agent_name} prompt choice: mapHit=${localBootPrompts.has(member.agent_name)} localHasSummary=${(localBootPrompts.get(member.agent_name) ?? '').includes('Where you left off')} cloudPresent=${Boolean(cloudBootPrompt?.trim())}`);
+    const bootPrompt = localBootPrompt?.trim() ? localBootPrompt : (cloudBootPrompt ?? undefined);
+    // Report what was CHOSEN, not what was merely available. The previous
+    // version branched on `cloudBootPrompt?.trim()` while the selection above
+    // prefers local — so it logged "using cloud boot-prompt" on every run in
+    // which the cloud merely HAD one, including the runs that used local. That
+    // sent an investigation after a precedence bug that did not exist.
+    // (doctrine: know which instrument you used.)
+    const chosen = localBootPrompt?.trim() ? 'local-synthesized' : (cloudBootPrompt?.trim() ? 'cloud' : 'NONE');
+    console.log(
+      `[SpawnOrch] boot-prompt for ${member.agent_name}: chose=${chosen} ` +
+      `carriesSummary=${(bootPrompt ?? '').includes('Where you left off')}`,
+    );
 
-    // Workspace root = the colonized PROJECT root, period. Per-agent
-    // work_dir_override is IGNORED (no per-agent editor yet → always null →
-    // pure landmine). One authority: the project.
-    const workDir = workspaceRoot;
+    // Jon 2026-08-10: "Just put them on their work tree folder."
+    //
+    // The project root for project 31 is `e:\repos` — the PARENT of every repo
+    // on the box: 64 top-level dirs, 81 .git dirs, 467 node_modules within four
+    // levels, and the same file in up to SIX copies (localAuth.ts x6,
+    // spawn-orchestrator.ts x5). Landing every agent there means every search
+    // returns N copies of every hit and the agent has to work out which tree is
+    // live. That is the wrong-artifact failure this codebase keeps paying for.
+    //
+    // So: each agent gets its own worktree home. Same convention as the profile
+    // briefing (acp-api routes/agents.ts withWorktreeHome) — one authority for
+    // the path, grep JONS-MACBOOK-SWITCH there when moving machines.
+    //
+    // NOT a silent fallback: if an agent has no home yet we use the project root
+    // and SAY SO, because quietly putting an agent back in the monorepo is
+    // exactly the kind of invisible regression that took all night to find.
+    // Skills still resolve — they are registered globally via extra_skill_dirs
+    // in ~/.kimi/config.toml, NOT discovered from cwd.
+    const agentReposRoot = process.env.ACP_AGENT_REPOS_ROOT
+      || path.join(os.homedir(), 'AgentRepos');
+    const agentHome = path.join(agentReposRoot, member.agent_name);
+    let workDir = workspaceRoot;
+    try {
+      if (fs.statSync(agentHome).isDirectory()) {
+        workDir = agentHome;
+      }
+    } catch { /* no home for this agent yet — reported below, never silent */ }
+    console.log(
+      workDir === agentHome
+        ? `[SpawnOrch] ${member.agent_name} workDir=${workDir} (own worktree home)`
+        : `[SpawnOrch] ${member.agent_name} workDir=${workDir} (PROJECT ROOT — no worktree home at ${agentHome}; searches will span the whole monorepo)`,
+    );
     // Project-driven runtime (feedback_runtime_choice_vs_platform_llm):
     // the WHOLE team runs the project's single runtime_choice. Per-member
     // runtime_override (mixed-mode: different runtimes within one project)
@@ -398,6 +457,25 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // value is moot in that case; treating undefined as non-kimi just skips
     // an unnecessary stagger before the block fires.
     const effectiveProvider = runtime;
+
+    // Re-check the dedup guard immediately before spawning. The check at the
+    // top of this iteration ran BEFORE `await fetchBootPrompt`, and the direct
+    // PTY path can spawn this same agent during that await — leaving `existing`
+    // stale and this loop free to start a SECOND process on the same claude
+    // session id. Observed 2026-08-08 prod boot: QAPert ran twice on session
+    // dbb732d5 (two opus/high processes appending to one JSONL) while the
+    // orchestrator reported `spawn complete: 1/7`, because from its own view it
+    // had only spawned one. Check-then-act across an await needs the check
+    // repeated after the await, not just before it.
+    const raced = getAgentSessionByAgent(member.agent_name, projectId);
+    if (raced) {
+      console.log(
+        `[SpawnOrch] ${member.agent_name} acquired ${raced.kind.toUpperCase()} ${raced.id} ` +
+        `during boot-prompt fetch; skipping duplicate spawn in project=${projectId}`,
+      );
+      continue;
+    }
+
     try {
       const terminalId = spawnAgent(member.agent_name, workDir, { bootPrompt, runtime, effort, modelOverride, projectId, agentId: member.agent_id });
       records.push({
@@ -505,6 +583,17 @@ let spawnGateOpen = false;
 
 export function setSpawnGate(open: boolean): void {
   spawnGateOpen = open;
+
+  // Opening the gate IS the user's Start click, so forget what we saw while it
+  // was shut. The hub seeds current state on connect — before any pick — and a
+  // project already RUNNING was recorded then and ignored (gate closed). Left
+  // in place, that memory makes the reseed look like "no change", so nothing
+  // spawns and the shell comes up blank with the project engaged. Clearing it
+  // lets the reseed register as a transition into RUNNING, which is what the
+  // click meant.
+  if (open) {
+    lastSeenState.clear();
+  }
 }
 
 export function startSpawnOrchestrator(): void {

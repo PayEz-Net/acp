@@ -258,6 +258,15 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
   const provider = (teamRuntime ?? line.provider ?? agent?.provider) as CodeProvider | undefined;
   const isUser = line.source === 'user';
   const isInfo = line.source === 'info';
+  // Info lines (boot prompts, injected [ACP Mail] notices) arrive as one long,
+  // dimmed string that renders as a full-height wall and buries the live
+  // conversation. Collapse to a one-line preview; click to expand. (Jon 2026-08-05)
+  const [infoExpanded, setInfoExpanded] = useState(false);
+  const infoText = line.line ?? '';
+  const infoTooLong = isInfo && infoText.length > 100;
+  const infoPreview = infoTooLong
+    ? infoText.split('\n')[0].slice(0, 100).replace(/\s+\S*$/, '').trimEnd() + ' …'
+    : '';
   return (
     <div
       className={`flex flex-col py-0.5 rounded px-1 -mx-1 ${
@@ -288,15 +297,17 @@ function AgentOutputLineItem({ line, showThinking, teamRuntime, agents }: AgentO
           </div>
         ) : (
           <span
+            onClick={infoTooLong ? () => setInfoExpanded((v) => !v) : undefined}
+            title={infoTooLong ? (infoExpanded ? 'Click to collapse' : 'Click to expand') : undefined}
             className={`min-w-0 whitespace-pre-wrap leading-tight rounded ${
               isUser
                 ? 'px-2 py-1 break-words bg-blue-600/25 text-blue-100'
                 : isInfo
-                  ? 'flex-1 px-1.5 py-0.5 overflow-x-auto text-slate-400 italic text-xs'
+                  ? `flex-1 px-1.5 py-0.5 overflow-x-auto text-slate-400 italic text-xs${infoTooLong ? ' cursor-pointer hover:text-slate-300 select-none' : ''}`
                   : 'flex-1 px-1.5 py-0.5 overflow-x-auto text-slate-300'
             }`}
           >
-            {line.line}
+            {infoTooLong && !infoExpanded ? infoPreview : line.line}
           </span>
         )}
       </div>

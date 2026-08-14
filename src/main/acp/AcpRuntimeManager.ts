@@ -5,6 +5,7 @@ import {
   type AcpAgentInfo,
   type AcpContentBlock,
   type AcpEventPayload,
+  type AcpMailInjectResult,
   type AcpPermissionOption,
   type AcpPromptImage,
   type AcpSendContentBlock,
@@ -165,17 +166,32 @@ export class AcpRuntimeManager extends EventEmitter {
   private promptIdleTicks = 0;
   private inactivityTimer: ReturnType<typeof setInterval> | null = null;
   private promptSettledRef: { current: boolean } | null = null;
+  // Watchdog ladder state (cancel-first, kill-last + throttle-aware grace).
+  // cancelGraceTicksLeft non-null: a session/cancel is out and the stalled
+  // turn has that many ticks to settle before the restart escalates.
+  // stalledTurnNudgePending arms the post-settle resume nudge (same process,
+  // context intact). lastThrottleAt/throttleExtensions drive the provider-
+  // throttle extension: recent 429/quota evidence on stderr means the silence
+  // is the provider's, not a wedge — restarting into a rate limit spawns a
+  // fresh CLI straight into the same wall (the restart churn IS the bog-down).
+  private cancelGraceTicksLeft: number | null = null;
+  private stalledTurnNudgePending = false;
+  private lastThrottleAt: number | null = null;
+  private throttleExtensions = 0;
 
   // Kimi's ACP runtime does not handle concurrent session/prompt requests on
   // the same session; overlapping calls produce -32603 internal errors and can
   // cause the in-flight turn to return an empty end_turn. Queue prompts so only
-  // one is ever in flight at a time.
-  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void }> = [];
+  // one is ever in flight at a time. Entries are tagged by lane: 'human'
+  // prompts are the ones the reply-turn nudge may fold into itself (see
+  // takeQueuedHumanTexts); 'system' prompts (nudges, kickoffs) always dispatch
+  // as their own turn.
+  private promptQueue: Array<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system'; replyNudge?: boolean }> = [];
   // Prompts sent THROUGH into the active turn (slice B steer passthrough).
   // Tracked (with their prompt) so kill()/dropQueuedPrompts can settle their
   // waiters exactly like queued prompts — and so a resumed restart can
   // re-dispatch them (the turn they rode died with the old process).
-  private pendingSteers = new Set<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void }>();
+  private pendingSteers = new Set<{ prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' }>();
   private promptInFlight = false;
   // Human-reply backstop (NGTMI: "the team lead ignores me"). A human prompt
   // mid-turn STEERS in to influence the live task — but text only posts at
@@ -190,6 +206,21 @@ export class AcpRuntimeManager extends EventEmitter {
   //      answering.
   private humanWaitWarnTimer: ReturnType<typeof setTimeout> | null = null;
   private humanWaitTimer: ReturnType<typeof setTimeout> | null = null;
+  // True while the backstop's own reply-turn nudge is the active turn. The
+  // grace cancel must never fire against it — that turn IS the reply the
+  // human is waiting for (see armHumanWaitBackstop).
+  private replyTurnActive = false;
+  // Learned runtime capability. The kimi TUI has two distinct primitives for
+  // input during a busy turn — Esc interrupts (cancel), Ctrl+S steers (pushes
+  // up into the live turn) — but the ACP wire only has session/prompt, and
+  // kimi's adapter (≤0.31.x) busy-rejects it mid-turn (turn.agent_busy): the
+  // Ctrl+S equivalent does not exist on ACP. The FIRST busy-rejected steer
+  // flips this flag; afterwards human prompts queue directly instead of
+  // attempting a doomed steer, the stage-1 warning steer is skipped (it could
+  // only ever be rejected), and the grace-cancel nudge carries the queued
+  // human text — otherwise the agent is told to answer a message it never
+  // received, and the backlog drains one stale message per turn.
+  private steerUnsupported = false;
 
   // Crash-recovery state. We track whether a kill was intentional so an
   // unexpected process exit can auto-restart, and we back off so a repeatedly
@@ -220,6 +251,13 @@ export class AcpRuntimeManager extends EventEmitter {
   // survives the episode is a property of the resumed session, and
   // re-resuming it just re-enters the busy loop.
   private skipResumeOnce = false;
+  // Dispatch attempts on the CURRENT process (reset in startOnce). A busy
+  // rejection on the very first dispatch after a fresh spawn is definitional:
+  // no live turn can exist on a brand-new process, so the "active turn" the
+  // runtime reports is a zombie marker from the resumed session file — the
+  // busy re-sync cancels it immediately instead of probing for 15s while
+  // every mail defers against the ghost.
+  private dispatchAttemptsThisProcess = 0;
 
   // Preserve the most recent user prompts across runtime restarts so a watchdog
   // restart (or unexpected process crash) doesn't force the user to restate the
@@ -234,26 +272,23 @@ export class AcpRuntimeManager extends EventEmitter {
     private readonly options: AcpRuntimeOptions,
   ) {
     super();
-    // Hydrate the session id from the previous app run so session/resume can
-    // reattach the agent's working context after an app crash/restart, not
-    // just after in-process runtime restarts. Absent/unknown ids are a no-op:
-    // startOnce() falls back to session/new when resume fails.
-    this.lastSessionId = this.readPersistedSessionId();
+    // SESSION ROTATION POLICY (Jon 2026-08-07): every app launch starts a
+    // FRESH session — we deliberately do NOT hydrate lastSessionId from
+    // persisted settings here. The immortal-resume pattern grew sessions past
+    // 1,000 messages and ~250k cached-read tokens PER TURN (511M cache-reads
+    // in 2 days — Jon's weekly allowance in a day). Continuity lives
+    // server-side (kanban/mail/profile, all re-read by the boot prompt), so a
+    // fresh session loses chit-chat, not work. In-process restarts (watchdog,
+    // crash) still resume via the in-memory lastSessionId — a session born
+    // this run is young and cheap. The persisted id is still WRITTEN each
+    // start: the future "session fluffer" (cherry-picked tail-of-previous-
+    // context restore, not condensed) will read it to find the prior session.
+    // Do not "fix" this back without re-reading the token math.
   }
 
   /** electron-store key scoping this runtime's persisted session id. */
   private get sessionPersistKey(): string {
     return `${this.options.agentName}::${this.options.workDir}`;
-  }
-
-  private readPersistedSessionId(): string | null {
-    try {
-      return getSettings().acpSessionIds?.[this.sessionPersistKey] ?? null;
-    } catch (err) {
-      // Settings read failure must never block runtime startup.
-      console.warn(`[ACP ${this.options.agentName}] failed to read persisted session id:`, err);
-      return null;
-    }
   }
 
   private persistSessionId(sessionId: string): void {
@@ -332,26 +367,64 @@ export class AcpRuntimeManager extends EventEmitter {
           this.stopPromptWatchdog();
           return;
         }
-        this.promptSettledRef!.current = true;
-        const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending; restarting runtime`;
-        console.warn(`[ACP ${this.options.agentName}] ${message}`);
-        // Best-effort cancel: a merely-slow runtime may still honor it and
-        // resolve the turn; a truly hung one ignores it and gets killed by the
-        // restart. Either way the turn is declared over here so the queue is
-        // not held hostage by a promise that may never settle.
-        //
-        // A busy re-sync episode that consumed the whole idle budget will not
-        // be fixed by re-resuming the same session: the next start falls back
-        // to session/new exactly once (same one-shot skip as the busy-cap
-        // escalation in executePrompt).
-        if (this.agentBusyRejectionCount > 0) {
-          this.agentBusyRejectionCount = 0;
-          this.agentBusyCancelSent = false;
-          this.skipResumeOnce = true;
+
+        // Stage A grace: the cancel is already out — count down, then escalate
+        // to the kill+restart a genuinely hung runtime needs.
+        if (this.cancelGraceTicksLeft != null) {
+          this.cancelGraceTicksLeft--;
+          if (this.cancelGraceTicksLeft > 0) return;
+          this.cancelGraceTicksLeft = null;
+          this.stalledTurnNudgePending = false;
+          this.promptSettledRef!.current = true;
+          const message = `No response from ${this.options.agentName} for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s and session/cancel went unanswered; restarting runtime`;
+          console.warn(`[ACP ${this.options.agentName}] ${message}`);
+          // A busy re-sync episode that consumed the whole idle budget will not
+          // be fixed by re-resuming the same session: the next start falls back
+          // to session/new exactly once (same one-shot skip as the busy-cap
+          // escalation in executePrompt).
+          if (this.agentBusyRejectionCount > 0) {
+            this.agentBusyRejectionCount = 0;
+            this.agentBusyCancelSent = false;
+            this.skipResumeOnce = true;
+          }
+          this.process?.notify('session/cancel', { sessionId: this.sessionId });
+          this.failPendingTurn(message);
+          void this.restart();
+          return;
         }
+
+        // Stage C: the silence is the PROVIDER's (recent 429/quota evidence on
+        // stderr), not a wedge. Restarting into a rate limit spawns a fresh
+        // CLI straight into the same wall — bounded full-budget extensions
+        // instead, with the throttle state shown on the pane.
+        const throttleFresh =
+          this.lastThrottleAt != null && Date.now() - this.lastThrottleAt < THROTTLE_EVIDENCE_FRESH_MS;
+        if (throttleFresh && this.throttleExtensions < MAX_THROTTLE_EXTENSIONS) {
+          this.throttleExtensions++;
+          this.promptIdleTicks = 0;
+          const message = `silent ${Math.round(PROMPT_IDLE_MS / 1000)}s but provider is throttling (429/quota on stderr) — extending grace ${this.throttleExtensions}/${MAX_THROTTLE_EXTENSIONS}, no restart`;
+          console.warn(`[ACP ${this.options.agentName}] ${message}`);
+          this.emitAcpEvent({
+            sessionUpdate: 'wait_state',
+            sessionId: this.sessionId ?? '',
+            waitState: {
+              kind: 'provider_retry',
+              errorName: `throttling (429/quota) — grace ${this.throttleExtensions}/${MAX_THROTTLE_EXTENSIONS}`,
+            },
+          });
+          return;
+        }
+
+        // Stage A: cancel-first. A merely-slow runtime honors the cancel and
+        // settles — the settle path then re-orients it with STALLED_TURN_NUDGE
+        // (same process, context intact, NO restart). A truly hung runtime
+        // ignores the cancel and the next ticks escalate above.
+        this.cancelGraceTicksLeft = WATCHDOG_CANCEL_GRACE_TICKS;
+        this.stalledTurnNudgePending = true;
+        console.warn(
+          `[ACP ${this.options.agentName}] no response for ${Math.round((this.promptIdleTicks * WATCHDOG_INTERVAL_MS) / 1000)}s while a turn was pending — sent session/cancel; restarting only if unanswered for ${(WATCHDOG_CANCEL_GRACE_TICKS * WATCHDOG_INTERVAL_MS) / 1000}s`,
+        );
         this.process?.notify('session/cancel', { sessionId: this.sessionId });
-        this.failPendingTurn(message);
-        void this.restart();
       }
     }, WATCHDOG_INTERVAL_MS);
   }
@@ -389,6 +462,9 @@ export class AcpRuntimeManager extends EventEmitter {
   private markPromptActivity(): void {
     if (this.promptPending) {
       this.promptIdleTicks = 0;
+      // Activity means the stall (if any) ended — the throttle-extension
+      // budget is per-stall, not per-process-lifetime.
+      this.throttleExtensions = 0;
     }
   }
 
@@ -462,12 +538,26 @@ export class AcpRuntimeManager extends EventEmitter {
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
     if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
+    // Effort rides an ENV VAR, so it never appears in the spawn command line the
+    // way --model does. Until this line existed, the ONLY output was a warning on
+    // an INVALID value — which meant "no warning" read identically for "applied
+    // correctly" and "never set at all", and a whole session ran on unverified
+    // token settings. State it either way, so the pane and the log can be read
+    // as evidence instead of inference.
+    console.log(
+      `[ACP ${this.options.agentName}] thinking effort: ` +
+      (k3Effort
+        ? `${k3Effort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
+        : `NONE INJECTED (model=${this.options.modelOverride ?? 'inherit'}, effort_override=${this.options.effort ?? 'unset'})` +
+          ` — effort applies only to k3-family models explicitly overridden`),
+    );
     this.process = new AcpProcess({
       command,
       args,
       cwd: this.options.workDir,
       env: spawnEnv,
     });
+    this.dispatchAttemptsThisProcess = 0;
 
     // Developer visibility (Jon's ask): show the exact launch command —
     // overrides included — as a banner line in the pane, the way the old PTY
@@ -493,6 +583,15 @@ export class AcpRuntimeManager extends EventEmitter {
       const trimmed = text.trim();
       if (trimmed) {
         console.error(`[ACP ${this.options.agentName}] stderr: ${trimmed}`);
+      }
+      // Provider-throttle evidence (429/quota/backoff): the watchdog's
+      // throttle extension reads this to wait out provider stalls instead of
+      // restarting into the same wall.
+      if (THROTTLE_STDERR_PATTERN.test(text)) {
+        if (this.lastThrottleAt == null || Date.now() - this.lastThrottleAt >= THROTTLE_EVIDENCE_FRESH_MS) {
+          console.warn(`[ACP ${this.options.agentName}] provider throttle evidence on stderr — watchdog will extend grace instead of restarting`);
+        }
+        this.lastThrottleAt = Date.now();
       }
       this.emitAcpEvent({ sessionUpdate: 'stderr', sessionId: this.sessionId ?? undefined, text });
     });
@@ -562,9 +661,13 @@ export class AcpRuntimeManager extends EventEmitter {
         }
       }
 
-      // Resume the prior session when possible. A restart (watchdog, crash,
-      // failed turn) must not throw away the agent's working context by
-      // starting an empty session/new. Kimi advertises loadSession and
+      // Resume the prior session when possible — IN-PROCESS restarts only
+      // (watchdog, crash, failed turn): lastSessionId is set in memory after
+      // this process's first start, and a session born this run is young and
+      // cheap to resume. App LAUNCH never resumes (session-rotation policy,
+      // Jon 2026-08-07 — see the constructor note): the constructor does not
+      // hydrate lastSessionId from settings, so this branch can only fire
+      // after an in-process restart. Kimi advertises loadSession and
       // implements session/resume (no history replay — the renderer already
       // holds the transcript). Unknown/expired sessions return a JSON-RPC
       // error and fall back to session/new.
@@ -606,9 +709,10 @@ export class AcpRuntimeManager extends EventEmitter {
 
     this.sessionId = (sessionResult.sessionId as string) ?? null;
     this.lastSessionId = this.sessionId;
-    // Persist so an app-level crash/restart (not just a runtime restart) can
-    // resume this session on next launch. When resume just succeeded this is
-    // a no-op (id unchanged); a fresh session/new self-heals the entry.
+    // Persist so an in-process crash restart can resume this session, and so
+    // the id on disk is always the CURRENT session — the emergency manual
+    // reload handle (and later, the fluffer's pointer to the previous
+    // session). A fresh session/new self-heals the entry.
     if (this.sessionId) this.persistSessionId(this.sessionId);
     this.resumedLastStart = resumed;
     this.initialized = true;
@@ -678,6 +782,20 @@ export class AcpRuntimeManager extends EventEmitter {
           });
         }
       }
+      // Say what was actually sent. Three separate verification attempts on this
+      // path measured the wrong artifact (the PTY temp file, which the ACP path
+      // never writes) and twice nearly reported a working feature as broken.
+      // The kickoff is the ONLY thing the agent receives, so log its shape.
+      console.log(
+        `[ACP ${this.options.agentName}] kickoff: ${kickoff.length} chars, ` +
+        `session-summary ${kickoff.includes('Where you left off') ? 'INCLUDED' : 'ABSENT'}, ` +
+        // NOT "source=orchestrator". A non-empty bootPrompt only proves SOMEONE
+        // supplied one — pty.ts's synchronous fallback supplies a non-empty
+        // prompt too. Labelling non-empty as "orchestrator" made all 7 agents
+        // look orchestrator-fed when in fact every one of them had taken the
+        // fallback. Report the property we can actually observe.
+        `bootPrompt=${this.options.bootPrompt?.trim() ? 'supplied-by-caller' : 'none (runtime built it)'}`,
+      );
       this.systemPrompt(kickoff).catch((err) => {
         console.error(`[ACP] Failed to send onboarding kickoff for ${this.options.agentName}:`, err);
       });
@@ -718,7 +836,7 @@ export class AcpRuntimeManager extends EventEmitter {
     if (this.promptInFlight) {
       this.armHumanWaitBackstop();
     }
-    await this.sendPrompt(prompt);
+    await this.sendPrompt(prompt, 'human');
   }
 
   private async systemPrompt(text: string): Promise<void> {
@@ -726,7 +844,7 @@ export class AcpRuntimeManager extends EventEmitter {
       throw new Error('ACP runtime not initialized');
     }
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
-    await this.sendPrompt(prompt);
+    await this.sendPrompt(prompt, 'system');
   }
 
   private recordUserPrompt(text: string): void {
@@ -742,22 +860,31 @@ export class AcpRuntimeManager extends EventEmitter {
    * context); if the runtime can't steer (old adapter, busy-reject), the mail
    * DEFERS — it waits in the inbox and the renderer's catch-up synthesis
    * re-notifies at the next idle/connect. It is never queued behind the turn.
-   * Resolves true on delivery, false on defer/failure (the renderer's
-   * retry/failure path settles either way, WO 11462).
+   * Returns a tri-state (Jon 2026-08-01): 'delivered' / 'deferred' (parked by
+   * design — NOT a failure) / 'failed' (runtime genuinely unreachable), so
+   * the renderer can say the true thing in the pane instead of crying
+   * "Delivery failed" for a routine defer.
    */
-  async injectMail(text: string): Promise<boolean> {
+  async injectMail(text: string): Promise<AcpMailInjectResult> {
     if (!this.process?.isRunning() || !this.sessionId) {
       console.warn(`[ACP ${this.options.agentName}] injectMail skipped: runtime not initialized`);
-      return false;
+      return 'failed';
     }
 
     const prompt: AcpSendContentBlock[] = [{ type: 'text', text }];
     this.recordUserPrompt(text);
     if (this.promptInFlight) {
-      return this.steerThrough(prompt, { queueOnBusy: false });
+      // Jon 2026-08-01: mail NEVER interrupts an active turn. The steer path
+      // beheads the in-flight step (StepInterrupted ~1s — measured across
+      // three agents simultaneously: agents mailing each other meant every
+      // step died, and restarting the sessions did not cure it). Mail is
+      // durable in the inbox; defer it. The idle catch-up synthesis
+      // re-notifies when the turn completes.
+      console.log(`[ACP ${this.options.agentName}] mail deferred (active turn) — no interruption; re-drive delivers at turn end`);
+      return 'deferred';
     }
     this.executePrompt(prompt);
-    return true;
+    return 'delivered';
   }
 
   /**
@@ -766,7 +893,7 @@ export class AcpRuntimeManager extends EventEmitter {
    * by dropQueuedPrompts). Callers that only care about delivery events can
    * keep ignoring the result; injectMail depends on it (WO 11462).
    */
-  private sendPrompt(prompt: AcpSendContentBlock[]): Promise<boolean> {
+  private sendPrompt(prompt: AcpSendContentBlock[], kind: 'human' | 'system'): Promise<boolean> {
     if (!this.process?.isRunning() || !this.sessionId) {
       const message = 'ACP runtime not initialized';
       console.error(`[ACP ${this.options.agentName}] ${message}`);
@@ -783,11 +910,41 @@ export class AcpRuntimeManager extends EventEmitter {
       // WITHOUT touching promptInFlight. Older runtimes that still
       // busy-reject fall back to the classic queue + drain path — and the
       // renderer's queued indicator now means ONLY that backstop state.
-      return this.steerThrough(prompt);
+      if (this.steerUnsupported) {
+        // Learned no-steer runtime: skip the doomed steer (a guaranteed
+        // turn.agent_busy round-trip plus adapter stderr spam) and take the
+        // queue backstop directly.
+        return this.enqueueBehindActiveTurn(prompt, kind);
+      }
+      return this.steerThrough(prompt, kind);
     }
 
-    this.executePrompt(prompt);
+    this.executePrompt(prompt, undefined, false, kind);
     return Promise.resolve(true);
+  }
+
+  /**
+   * Queue a prompt behind the active turn without attempting a steer — the
+   * path taken once the runtime has taught us it busy-rejects mid-turn
+   * prompts. Identical settlement to the steer busy-fallback: the waiter
+   * resolves when the entry drains (or false on drop), and prompt_queued is
+   * the renderer's only queued-indicator signal.
+   */
+  private enqueueBehindActiveTurn(
+    prompt: AcpSendContentBlock[],
+    kind: 'human' | 'system',
+  ): Promise<boolean> {
+    const sessionId = this.sessionId ?? '';
+    console.log(`[ACP ${this.options.agentName}] no-steer runtime — queuing ${kind} prompt behind active turn (session=${sessionId})`);
+    const promise = new Promise<boolean>((resolve) => {
+      this.promptQueue.push({ prompt, resolve, kind });
+    });
+    this.emitAcpEvent({
+      sessionUpdate: 'prompt_queued',
+      sessionId,
+      queueDepth: this.promptQueue.length,
+    });
+    return promise;
   }
 
   /**
@@ -801,13 +958,15 @@ export class AcpRuntimeManager extends EventEmitter {
    */
   private steerThrough(
     prompt: AcpSendContentBlock[],
+    kind: 'human' | 'system',
     opts?: { queueOnBusy?: boolean },
   ): Promise<boolean> {
     const sessionId = this.sessionId ?? '';
     const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);
     console.log(`[ACP ${this.options.agentName}] >>> session/prompt (steer into active turn, session=${sessionId}): ${preview}`);
-    const entry: { prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void } = {
+    const entry: { prompt: AcpSendContentBlock[]; resolve: (dispatched: boolean) => void; kind: 'human' | 'system' } = {
       prompt,
+      kind,
       resolve: () => {},
     };
     const promise = new Promise<boolean>((resolve) => {
@@ -827,6 +986,10 @@ export class AcpRuntimeManager extends EventEmitter {
       .then(() => done(true))
       .catch((err: unknown) => {
         if (isAgentBusyError(err)) {
+          // The first busy rejection teaches the manager this runtime cannot
+          // steer (kimi ACP ≤0.31.x): later prompts queue directly and the
+          // human-reply backstop switches to its no-steer shape.
+          this.steerUnsupported = true;
           if (opts?.queueOnBusy === false) {
             // Deferral path (mail never stacks turns, WO 11622): no queue, no
             // prompt_queued — the mail waits in the inbox and the catch-up
@@ -837,7 +1000,7 @@ export class AcpRuntimeManager extends EventEmitter {
           }
           console.log(`[ACP ${this.options.agentName}] steer unsupported (turn.agent_busy) — queued behind active turn`);
           this.pendingSteers.delete(entry);
-          this.promptQueue.push({ prompt: entry.prompt, resolve: entry.resolve });
+          this.promptQueue.push({ prompt: entry.prompt, resolve: entry.resolve, kind: entry.kind });
           this.emitAcpEvent({
             sessionUpdate: 'prompt_queued',
             sessionId,
@@ -859,11 +1022,15 @@ export class AcpRuntimeManager extends EventEmitter {
    * steers deliberately do NOT extend it: a chatty human messaging every few
    * seconds would otherwise push the boundary out forever and the backstop
    * would never fire (observed: 16 rapid human steers, zero cancels). On
-   * expiry the turn is cancelled: the steered messages are already in the
-   * session's context, ending the turn flushes any pending text, and the
-   * front-of-queue nudge then drains as a dedicated reply turn. Mail
-   * (injectMail) deliberately never arms this — mail is background work, the
-   * human is not.
+   * expiry the turn is cancelled and a front-of-queue nudge drains as a
+   * dedicated reply turn. Mail (injectMail) deliberately never arms this —
+   * mail is background work, the human is not.
+   *
+   * The nudge's shape depends on the learned steer capability: on a
+   * steer-capable runtime the human's messages are already in the session's
+   * context (ending the turn flushes any pending text); on a no-steer runtime
+   * they sit in promptQueue, so their text is folded INTO the nudge — see
+   * takeQueuedHumanTexts.
    */
   private armHumanWaitBackstop(): void {
     if (this.humanWaitTimer) return;
@@ -872,10 +1039,17 @@ export class AcpRuntimeManager extends EventEmitter {
     this.humanWaitWarnTimer = setTimeout(() => {
       this.humanWaitWarnTimer = null;
       if (!this.promptInFlight || !this.process?.isRunning()) return;
+      if (this.steerUnsupported) {
+        // The warning can only reach the agent as a steer, and this runtime
+        // busy-rejects steers — skip the doomed request (guaranteed rejection
+        // plus adapter stderr spam for zero effect). The grace cancel below
+        // still bounds the human's wait.
+        return;
+      }
       console.warn(
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_WARN_MS}ms inside a busy turn — sending wrap-up warning steer`,
       );
-      void this.steerThrough([{ type: 'text', text: HUMAN_WAIT_WARNING }], { queueOnBusy: false });
+      void this.steerThrough([{ type: 'text', text: HUMAN_WAIT_WARNING }], 'system', { queueOnBusy: false });
     }, HUMAN_REPLY_WARN_MS);
     // Stage 2 (60s): last resort. Cancel, and the nudge tells the agent it was
     // cut off so it can resume after answering.
@@ -883,14 +1057,33 @@ export class AcpRuntimeManager extends EventEmitter {
       this.humanWaitTimer = null;
       // Turn ended in the meantime — the natural turn flow owned the reply.
       if (!this.promptInFlight || !this.process?.isRunning() || !this.sessionId) return;
+      if (this.replyTurnActive) {
+        // The in-flight turn IS the dedicated reply turn carrying the human's
+        // folded messages. Cancelling it only beheads the reply the human is
+        // waiting for and re-arms the same nudge — the chatty-episode loop
+        // (BAPert 2026-08-01: five reply turns cancelled mid-composition in
+        // one episode, zero answers delivered). Newer human messages queue
+        // and drain after this reply; the 300s idle watchdog owns real wedges.
+        console.log(
+          `[ACP ${this.options.agentName}] reply turn already in flight — leaving it alone; newer human prompts drain after it`,
+        );
+        return;
+      }
       const sessionId = this.sessionId;
       console.warn(
         `[ACP ${this.options.agentName}] human prompt unanswered for ${HUMAN_REPLY_GRACE_MS}ms inside a busy turn — cancelling so the human gets a dedicated reply turn`,
       );
       this.process.notify('session/cancel', { sessionId });
+      // On a no-steer runtime the human's messages never reached the agent —
+      // they are waiting in promptQueue. Fold their text into the reply-turn
+      // nudge so the reply turn answers what was actually said, and so the
+      // backlog does not drain one stale message per turn afterwards.
+      const missedTexts = this.takeQueuedHumanTexts();
       this.promptQueue.unshift({
-        prompt: [{ type: 'text', text: HUMAN_WAITING_NUDGE }],
+        prompt: [{ type: 'text', text: buildHumanWaitingNudge(missedTexts) }],
         resolve: () => {},
+        kind: 'system',
+        replyNudge: true,
       });
     }, HUMAN_REPLY_GRACE_MS);
   }
@@ -906,10 +1099,42 @@ export class AcpRuntimeManager extends EventEmitter {
     }
   }
 
+  /**
+   * Remove the text-only human prompts waiting in the queue and return their
+   * text in arrival order, settling their waiters as dispatched — the content
+   * rides inside the reply-turn nudge instead of a turn of its own.
+   * Image-bearing prompts stay queued: an image cannot ride a text nudge, and
+   * a late delivery beats a silently dropped attachment.
+   */
+  private takeQueuedHumanTexts(): string[] {
+    const texts: string[] = [];
+    const kept: typeof this.promptQueue = [];
+    for (const entry of this.promptQueue) {
+      if (entry.kind === 'human' && entry.prompt.every((b) => b.type === 'text')) {
+        const text = entry.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('\n').trim();
+        if (text) texts.push(text.length > 1000 ? `${text.slice(0, 1000)}…` : text);
+        entry.resolve(true);
+      } else {
+        kept.push(entry);
+      }
+    }
+    if (kept.length !== this.promptQueue.length) {
+      this.promptQueue = kept;
+      // Keep the renderer's queued indicator honest about the new depth.
+      this.emitAcpEvent({
+        sessionUpdate: 'prompt_dequeued',
+        sessionId: this.sessionId ?? '',
+        queueDepth: this.promptQueue.length,
+      });
+    }
+    return texts;
+  }
+
   private executePrompt(
     prompt: AcpSendContentBlock[],
     resolveDispatched?: (dispatched: boolean) => void,
     isAgentBusyRetry = false,
+    kind: 'human' | 'system' = 'system',
   ): void {
     if (!this.process?.isRunning() || !this.sessionId) {
       const message = 'ACP runtime not initialized';
@@ -923,6 +1148,16 @@ export class AcpRuntimeManager extends EventEmitter {
     }
 
     this.promptInFlight = true;
+    if (kind === 'human') {
+      // The human's own prompt is becoming the active turn — they are being
+      // SERVED, not waiting behind someone else's busy turn. A backstop armed
+      // while they sat in the queue must not fire against their answer turn
+      // (BAPert 2026-08-01: the 60s grace cancel killed the turn that was
+      // mid-answer to the human's question; the nudge turn that followed only
+      // carried the later "be precise"). If the human speaks again mid-turn,
+      // prompt() re-arms the backstop for the new wait — no re-arm needed here.
+      this.clearHumanWaitBackstop();
+    }
     resolveDispatched?.(true);
     const sessionId = this.sessionId;
     const preview = prompt.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ').slice(0, 120);
@@ -948,6 +1183,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // Send prompt without awaiting — the response arrives as streaming notifications.
     // Pass timeoutMs=0 so the per-request timeout in AcpProcess doesn't fire while
     // a healthy turn is still streaming; the manager-level watchdog handles hangs.
+    // turn_started tells the renderer a dispatch happened NOW — the busy pill
+    // must not wait for the first streamed chunk (card 182119).
+    this.dispatchAttemptsThisProcess++;
+    this.emitAcpEvent({ sessionUpdate: 'turn_started', sessionId });
     this.process.request('session/prompt', { sessionId, prompt }, 0)
       .then((result) => {
         if (settledRef.current) return;
@@ -971,12 +1210,29 @@ export class AcpRuntimeManager extends EventEmitter {
         // actually returned when the transcript appears empty.
         console.log(`[ACP ${this.options.agentName}] <<< session/prompt raw result (session=${sessionId}):`, JSON.stringify(result ?? null).slice(0, 2000));
         this.promptInFlight = false;
+        this.replyTurnActive = false;
         this.clearHumanWaitBackstop();
+        if (this.stalledTurnNudgePending) {
+          this.stalledTurnNudgePending = false;
+          this.cancelGraceTicksLeft = null;
+          // The stall honored the cancel: same process, session and context
+          // intact — NO restart. Tell the agent its turn was cut and to
+          // report + continue (Jon's rule: never let an agent wonder why its
+          // turn died), ahead of anything queued.
+          this.promptQueue.unshift({
+            prompt: [{ type: 'text', text: STALLED_TURN_NUDGE }],
+            resolve: () => {},
+            kind: 'system',
+          });
+        }
         this.drainPromptQueue();
       })
       .catch((err) => {
         if (settledRef.current) return;
         settledRef.current = true;
+        // Any error settle ends the watchdog ladder episode without the nudge.
+        this.cancelGraceTicksLeft = null;
+        this.stalledTurnNudgePending = false;
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[ACP ${this.options.agentName}] session/prompt failed (session=${sessionId}):`, err);
         if (this.process?.isRunning()) {
@@ -1002,24 +1258,28 @@ export class AcpRuntimeManager extends EventEmitter {
             console.warn(
               `[ACP ${this.options.agentName}] turn.agent_busy — re-queueing prompt and re-syncing (session=${sessionId}, rejection ${this.agentBusyRejectionCount}/${MAX_AGENT_BUSY_REJECTIONS})`,
             );
-            this.promptQueue.unshift({ prompt, resolve: resolveDispatched ?? (() => {}) });
+            this.promptQueue.unshift({ prompt, resolve: resolveDispatched ?? (() => {}), kind });
             this.promptInFlight = true;
             // The watchdog consults promptSettledRef each tick and stops when
             // it is set — hand it a live ref or the re-sync ends on the next
             // tick. The idle tick count is deliberately NOT reset.
             this.promptSettledRef = { current: false };
-            if (this.agentBusyRejectionCount === AGENT_BUSY_CANCEL_AFTER) {
-              // A busy turn that outlives a few probes is almost always a
-              // zombie left over from a previous incarnation (the process is
-              // gone; the session file still thinks the turn is live). Cancel
-              // it NOW and keep probing: if the cancel frees the session, the
-              // next retry dispatches and the resumed context survives. If the
-              // busy turn is real (or the cancel doesn't take), the episode
-              // escalates at the cap exactly as before — the cancel the
-              // escalation already sends makes this a no-op policy-wise, just
-              // early enough to actually do some good.
+            const resumeZombie = this.dispatchAttemptsThisProcess <= 1;
+            if (resumeZombie || this.agentBusyRejectionCount === AGENT_BUSY_CANCEL_AFTER) {
+              // A busy turn on the FIRST dispatch after a fresh spawn is
+              // definitionally a zombie — no live turn can exist on a new
+              // process; the resumed session file just still thinks one is
+              // active. Cancel it NOW (not after 3 probes): every mail defers
+              // against the ghost while we wait. The few-probes path remains
+              // for mid-process episodes, where a busy turn could be real.
+              // If the cancel frees the session, the next retry dispatches and
+              // the resumed context survives; if the busy turn somehow is real
+              // (or the cancel doesn't take), the episode escalates at the cap
+              // exactly as before.
               console.warn(
-                `[ACP ${this.options.agentName}] busy turn survived ${AGENT_BUSY_CANCEL_AFTER} probes — sending session/cancel to free the session`,
+                resumeZombie
+                  ? `[ACP ${this.options.agentName}] first dispatch after spawn busy-rejected — cancelling the resume-zombie turn immediately`
+                  : `[ACP ${this.options.agentName}] busy turn survived ${AGENT_BUSY_CANCEL_AFTER} probes — sending session/cancel to free the session`,
               );
               this.process?.notify('session/cancel', { sessionId });
               this.agentBusyCancelSent = true;
@@ -1161,7 +1421,8 @@ export class AcpRuntimeManager extends EventEmitter {
       sessionId: this.sessionId ?? '',
       queueDepth: this.promptQueue.length,
     });
-    this.executePrompt(next.prompt, next.resolve, true);
+    if (next.replyNudge) this.replyTurnActive = true;
+    this.executePrompt(next.prompt, next.resolve, true, next.kind);
   }
 
   private drainPromptQueue(): void {
@@ -1180,11 +1441,16 @@ export class AcpRuntimeManager extends EventEmitter {
         sessionId: this.sessionId ?? '',
         queueDepth: this.promptQueue.length,
       });
-      this.executePrompt(next.prompt, next.resolve);
+      if (next.replyNudge) this.replyTurnActive = true;
+      this.executePrompt(next.prompt, next.resolve, false, next.kind);
     }
   }
 
   cancel(): void {
+    // A deliberate human cancel supersedes any armed watchdog ladder — the
+    // resume nudge must not fire after a turn the USER chose to end.
+    this.cancelGraceTicksLeft = null;
+    this.stalledTurnNudgePending = false;
     const sessionId = this.sessionId;
     if (this.process && sessionId) {
       this.process.notify('session/cancel', { sessionId });
@@ -1208,6 +1474,7 @@ export class AcpRuntimeManager extends EventEmitter {
     this.intentionalKill = true;
     this.stopPromptWatchdog();
     this.clearHumanWaitBackstop();
+    this.replyTurnActive = false;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -1256,7 +1523,7 @@ export class AcpRuntimeManager extends EventEmitter {
           // and steered prompts must be re-dispatched: the turn they were
           // steered into died with the old process.
           for (const steer of this.pendingSteers) {
-            this.promptQueue.push({ prompt: steer.prompt, resolve: steer.resolve });
+            this.promptQueue.push({ prompt: steer.prompt, resolve: steer.resolve, kind: steer.kind });
           }
           this.pendingSteers.clear();
           console.log(`[ACP ${this.options.agentName}] session resumed; draining ${this.promptQueue.length} queued prompt(s)`);
@@ -1639,13 +1906,58 @@ const HUMAN_WAIT_WARNING =
 
 /**
  * Front-of-queue nudge dispatched after the human-reply backstop cancels a
- * busy turn. The human's steered message is already in the session's context;
- * this opens the dedicated reply turn, TELLS the agent it was cut off (Jon's
- * rule: never let an agent wonder why its turn died), and pins the resume.
+ * busy turn. This opens the dedicated reply turn, TELLS the agent it was cut
+ * off (Jon's rule: never let an agent wonder why its turn died), and pins the
+ * resume.
  */
 const HUMAN_WAITING_NUDGE =
   '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
   'Answer the human’s message now — briefly, in text, no tools — then resume the task from where you were cut off.';
+
+/**
+ * Watchdog ladder (cancel-first, kill-last + throttle-aware grace).
+ */
+/** Ticks (× the 15s watchdog interval) a cancelled stall gets to settle before the kill+restart escalates. */
+const WATCHDOG_CANCEL_GRACE_TICKS = 2;
+/** How long stderr throttle evidence (429/quota/backoff) stays fresh enough to extend grace. */
+const THROTTLE_EVIDENCE_FRESH_MS = 10 * 60_000;
+/**
+ * Consecutive full-budget throttle extensions before the ladder treats the
+ * stall as a wedge anyway (bounds a misclassified wait at ~25 min).
+ */
+const MAX_THROTTLE_EXTENSIONS = 4;
+/** Provider-throttle signatures in adapter stderr. */
+const THROTTLE_STDERR_PATTERN = /\b429\b|rate.?limit|too many requests|quota|balance|overload|retry.?after/i;
+
+/**
+ * Nudge unshifted after a stalled turn HONORS the watchdog's session/cancel:
+ * the runtime proved itself alive, so it keeps its process, session and
+ * context — no restart. It is told why its turn died and to report +
+ * continue (same rule as HUMAN_WAITING_NUDGE).
+ */
+const STALLED_TURN_NUDGE =
+  '[ACP] Your previous turn produced no output for over 5 minutes, so the platform cancelled it — your process, session and context are intact, nothing was restarted. ' +
+  'Briefly tell the human where things stand, then continue your work.';
+
+/**
+ * Build the reply-turn nudge. Steer-capable runtime: the human's steered
+ * messages are already in the session's context, the plain nudge suffices.
+ * No-steer runtime (kimi ACP ≤0.31.x): the messages sat in the manager's
+ * queue, so their text must ride inside the nudge — otherwise the agent is
+ * told to answer a message it never received.
+ */
+function buildHumanWaitingNudge(missedTexts: string[]): string {
+  if (missedTexts.length === 0) return HUMAN_WAITING_NUDGE;
+  const single = missedTexts.length === 1;
+  const list = missedTexts.map((t, i) => `${i + 1}. "${t}"`).join('\n');
+  return (
+    '[ACP] The platform ended your previous turn MID-TASK so the human could get a direct reply — your work is intact in your context above, nothing was lost. ' +
+    `While you were busy the human sent ${single ? 'this message' : `these ${missedTexts.length} messages`}; ` +
+    `the runtime could not deliver ${single ? 'it' : 'them'} mid-turn, so here ${single ? 'it is' : 'they are'}:\n` +
+    `${list}\n` +
+    'Answer the human now — briefly, in text, no tools — then resume the task from where you were cut off.'
+  );
+}
 
 /**
  * Detect a turn.agent_busy rejection. AcpProcess flattens JSON-RPC errors to

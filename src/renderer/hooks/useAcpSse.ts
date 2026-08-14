@@ -14,8 +14,8 @@ import { useAcpSessionStore } from '../stores/acpSessionStore';
 import { resolveAgentProvider, shouldInjectMailToPty } from '../lib/agentProviders';
 import {
   buildMailDeliveryFailedText,
+  buildMailDeliveryDeferredText,
   buildMailNoticeText,
-  collectUnreadNotices,
   createMailEventDeduper,
   decideMailDeliveryRoute,
   deliverAcpMailNotice,
@@ -61,6 +61,45 @@ function renderMailSurfaceLine(agentName: string, text: string): boolean {
 // across page reloads so an HMR reload doesn't re-deliver everything (WO 11473).
 const markMailEventSeen = createMailEventDeduper(200, 'acp.mail.seen');
 
+// Turn-stack defense (Jon 2026-08-01): the SSE catch-up replays recent mail
+// events 1:1 into every fresh session, burying agents under history they
+// already processed (50-turn boot holes, measured twice in one day). Message
+// ids are chronological, so ONE cheap watermark kills the replay: on first
+// contact per agent, read the newest message id exactly once; only mail
+// ABOVE that id is allowed to inject. Historical events never fire a turn.
+const mailWatermark = new Map<string, number>();
+const watermarkPending = new Set<string>();
+
+// Boot grace (Jon 2026-08-01): mail injected into an agent that has not
+// finished booting is the same turn-stack disease at a different stage —
+// the notice queues ahead of the agent's own settling. Mail is durable;
+// it can wait. Suppress injection for GRACE_MS after an agent first
+// appears; after that, live mail flows normally.
+const BOOT_GRACE_MS = 60_000;
+let sseConnectedAt: number | null = null;
+function inBootGrace(): boolean {
+  return sseConnectedAt != null && Date.now() - sseConnectedAt < BOOT_GRACE_MS;
+}
+async function initMailWatermark(agentName: string): Promise<void> {
+  try {
+    const headers: Record<string, string> = { 'X-ACP-Agent': agentName };
+    const secret = await getSecret();
+    if (secret) headers['Authorization'] = `Bearer ${secret}`;
+    const res = await fetch(`http://127.0.0.1:3001/v1/mail/inbox/${agentName}?sort=newest&limit=1`, { headers });
+    if (!res.ok) return;
+    const json = (await res.json()) as { data?: { messages?: Array<{ message_id?: number }> } };
+    const msgs = json?.data?.messages ?? [];
+    const maxId = msgs.reduce((m, x) => Math.max(m, x?.message_id ?? 0), 0);
+    mailWatermark.set(agentName, maxId);
+    console.log(`[AcpSse] mail watermark ${agentName}: ${maxId} — older is history, suppressed`);
+  } catch {
+    // Leave unset — the next event retries. Better to suppress a live mail
+    // for a second than to open the historical flood.
+  } finally {
+    watermarkPending.delete(agentName);
+  }
+}
+
 /**
  * Fetch a mail message's body so the notice can carry the CONTENT, not just a
  * "go read it" pointer (Jon: agents see alerts but don't go read them — bring
@@ -91,7 +130,7 @@ async function fetchMailBody(agentName: string, id: string | number): Promise<st
  *
  * Exported for the wiring tests (WO 11517) — not part of the hook's API.
  */
-export async function routeMailNotice(agentName: string, from: string, subject: string, id: string | number): Promise<void> {
+export async function routeMailNotice(agentName: string, from: string, subject: string, id: string | number, redriveAttempt = 0): Promise<void> {
   const body = typeof id === 'number' ? await fetchMailBody(agentName, id) : null;
   const noticeText = buildMailNoticeText(agentName, from, subject, id, body ?? undefined);
   const agentState = useAppStore.getState().agents.find((a) => a.name === agentName);
@@ -121,17 +160,35 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
       inject: (sessionId, text) =>
         window.electronAPI.injectAcpMail({ agent: agentName, sessionId, text }),
       onDelivered: () => renderMailSurfaceLine(agentName, noticeText),
+      onDeferred: () => {
+        // Mid-turn defer (WO 11622): the push was skipped BY DESIGN — the
+        // pane line must say that, not cry failure. Unsee the id so a future
+        // re-delivery path may re-fire the notice (WO 11629).
+        console.log(`[AcpSse] Mail notice deferred for ${agentName} (mid-turn; mail waits in inbox)`);
+        markMailEventSeen.unsee(agentName, mailDedupeKey(id, from, subject));
+        markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
+        const deferredText = buildMailDeliveryDeferredText(agentName, id, from, subject);
+        renderMailLineWithRetry({
+          render: () => renderMailSurfaceLine(agentName, deferredText),
+        });
+        // The idle catch-up synthesis is gone — park the notice and re-drive
+        // it when this agent's turn ends, or a defer means the notice NEVER
+        // arrives (Jon 2026-08-07: "mails falling through the cracks").
+        parkDeferredNotice(agentName, from, subject, id, redriveAttempt);
+      },
       onFailed: () => {
         console.warn(`[AcpSse] Mail notice delivery failed for ${agentName} after all retries`);
-        // WO 11629: unsee the id so the catch-up synthesis RE-FIRES this
-        // notice at the next reconnect — a deferred mail (old runtime,
-        // busy-reject) must not be lost between 'already seen' and the next
-        // natural delivery window. Both key forms, mirroring synthesis.
+        // WO 11629: unsee the id so a future re-delivery path may RE-FIRE
+        // this notice — a deferred mail (old runtime, busy-reject) must not
+        // get stuck between 'already seen' and a delivery that never landed.
+        // (The catch-up synthesis that used to re-fire these was removed
+        // 2026-08-01; live SSE events remain the only notice source.)
+        // Both key forms, mirroring the live event path.
         markMailEventSeen.unsee(agentName, mailDedupeKey(id, from, subject));
         markMailEventSeen.unsee(agentName, mailDedupeKey(null, from, subject));
         // The pane may still be repopulating post-restart — retry briefly so
         // the failure is visible there, not just in the console (WO 11462 #3).
-        const failureText = buildMailDeliveryFailedText(agentName);
+        const failureText = buildMailDeliveryFailedText(agentName, id, from, subject);
         renderMailLineWithRetry({
           render: () => renderMailSurfaceLine(agentName, failureText),
         });
@@ -140,42 +197,57 @@ export async function routeMailNotice(agentName: string, from: string, subject: 
     return;
   }
 
-  // pty-echo: PTY bridge — the main-process inbox poller (kimi/codex) or the
-  // MCP channel (claude) delivers out-of-band; the line is the visual echo.
-  // provider-fallback-echo: no live surface and a claude registration — rely
-  // on the MCP channel push once the agent is up. Either way the echo goes
-  // through the retry loop: in the no-surface case a single render attempt
-  // would die silently in console.warn (WO 11491 P2).
-  renderMailLineWithRetry({
-    render: () => renderMailSurfaceLine(agentName, noticeText),
-  });
+  // pty-echo / provider-fallback-echo: the main-process inbox poller (kimi/codex)
+  // or the MCP channel (claude) delivers out-of-band AND already prints the
+  // human-visible "[ACP Mail] New message from …" chat line in the pane (pty.ts).
+  // The SSE hook USED to also paint a second "You have a message from …" echo box
+  // here — a redundant duplicate notice that, with a 7-agent team, firehosed the
+  // pane and slid under the UI. Removed (Jon 2026-08-05): keep the chat notice
+  // (pty.ts), drop the duplicate box. Delivery is unaffected — this route never
+  // delivered, it only echoed; the acp-inject route above still delivers + echoes.
 }
 
 /**
- * WO 11473: recover mail events lost in SSE disconnect/page-reload windows.
- * After a (re)connect's inbox refetch, synthesize delivery notices for every
- * unread the deduper has not seen yet — same routing as a live SSE event, so
- * a notice that would have vanished is delivered. The persisted dedupe set
- * keeps this from re-firing on every reload.
+ * Deferred-mail re-drive (Jon 2026-08-07: "mails falling through the cracks").
+ * The idle catch-up synthesis that used to re-surface deferred notices is gone,
+ * so a mid-turn defer with no re-drive meant the notice NEVER arrived — wake-up
+ * mail vanished against busy/zombie turns while the pane claimed "re-surfaces
+ * at idle catch-up". Now a defer parks the notice here; the next moment the
+ * agent has no active turn, the oldest parked notice is re-routed through the
+ * full routeMailNotice path (routing + echo semantics intact). A re-drive that
+ * defers again re-parks via onDeferred; attempts are bounded per notice so a
+ * permanently-wedged lane can't loop forever.
  */
-function synthesizeNoticesForUnreads(): void {
-  if (!useProjectStore.getState().pickerHasStarted) return;
-  // Scoped to the ACTIVE project — mailboxes are composite-keyed pid:agent and
-  // never cleared on switch, so an unscoped sweep would route stale-project
-  // unreads against the current roster (WO 11491 P2).
-  const activeProjectId = useProjectStore.getState().activeProject?.id ?? null;
-  const unreads = collectUnreadNotices(useMailStore.getState().mailboxes, activeProjectId);
-  for (const unread of unreads) {
-    // Mark BOTH key forms before deciding: an id-less live notice for the same
-    // mail was marked `noid:<from>:<subject>`, so checking only the raw id
-    // would double-fire here (WO 11517 minor). Marking both regardless keeps
-    // the two channels' dedupe sets consistent.
-    const idSeen = !markMailEventSeen(unread.agentName, mailDedupeKey(unread.id, unread.from, unread.subject));
-    const noidSeen = !markMailEventSeen(unread.agentName, mailDedupeKey(null, unread.from, unread.subject));
-    if (idSeen || noidSeen) continue;
-    console.log(`[AcpSse] Catch-up notice for ${unread.agentName}: unread id=${unread.id}`);
-    void routeMailNotice(unread.agentName, unread.from, unread.subject, unread.id);
-  }
+const parkedNotices = new Map<string, Array<{ from: string; subject: string; id: string | number; attempts: number }>>();
+const redriveArmed = new Set<string>();
+const MAX_REDRIVE_ATTEMPTS = 8;
+
+function parkDeferredNotice(agentName: string, from: string, subject: string, id: string | number, attempts: number): void {
+  const parked = parkedNotices.get(agentName) ?? [];
+  parked.push({ from, subject, id, attempts });
+  parkedNotices.set(agentName, parked);
+  armRedrive(agentName);
+}
+
+function armRedrive(agentName: string): void {
+  if (redriveArmed.has(agentName)) return;
+  redriveArmed.add(agentName);
+  const unsub = useAcpSessionStore.subscribe(() => {
+    const session = useAcpSessionStore.getState().sessions.get(agentName);
+    if (session?.activeTurnId) return; // still busy — wait for the turn end
+    unsub();
+    redriveArmed.delete(agentName);
+    const parked = parkedNotices.get(agentName);
+    const next = parked?.shift();
+    if (parked && parked.length === 0) parkedNotices.delete(agentName);
+    if (!next) return;
+    const attempt = next.attempts + 1;
+    if (attempt > MAX_REDRIVE_ATTEMPTS) {
+      console.warn(`[AcpSse] Deferred notice for ${agentName} gave up after ${MAX_REDRIVE_ATTEMPTS} re-drives (id=${next.id}) — mail waits in inbox`);
+      return;
+    }
+    void routeMailNotice(agentName, next.from, next.subject, next.id, attempt);
+  });
 }
 
 /**
@@ -263,13 +335,12 @@ export function useAcpSse() {
     };
 
     // #225: full catch-up on reconnect — fetch every configured agent's inbox
-    // so messages missed while disconnected appear immediately, not only on the
-    // next per-event push. Scoped to active project + gated on boot confirm,
-    // same as the per-event path. Returns the store's promise so notice
-    // synthesis (WO 11473) can run once the unread data has actually landed.
-    // Promise.resolve().then wraps it so a non-promise short-return from the
-    // store (cooldown/429-backoff bare `return;` paths) can never throw a
-    // TypeError into the SSE error path (WO 11491 P1).
+    // so messages missed while disconnected appear immediately in the sidebar,
+    // not only on the next per-event push. Scoped to active project + gated on
+    // boot confirm, same as the per-event path. Promise.resolve().then wraps
+    // it so a non-promise short-return from the store (cooldown/429-backoff
+    // bare `return;` paths) can never throw a TypeError into the SSE error
+    // path (WO 11491 P1).
     const catchUp = (): Promise<void> =>
       Promise.resolve().then(() => {
         if (!useProjectStore.getState().pickerHasStarted) return;
@@ -373,17 +444,12 @@ export function useAcpSse() {
 
         console.log('[AcpSse] Connected');
         setConn('connected');
-        // #225 + WO 11473: catch up on anything missed while down — on
-        // RE-connects and on FIRST connect alike (a vite-HMR page reload is a
-        // first connect with a fresh module state, indistinguishable from a
-        // cold load; mail that landed during the reload would otherwise
-        // vanish). The refetch is gated/coalesced store-side; notice synthesis
-        // runs only after unread data landed and is deduped across reloads.
-        void catchUp()
-          .catch(() => {})
-          .then(() => {
-            if (!disposed) synthesizeNoticesForUnreads();
-          });
+        // #225: catch up on anything missed while down — the inbox refetch
+        // feeds the MailSidebar only. The unread→notice synthesis that used to
+        // run here (WO 11473) was removed 2026-08-01 (Jon): it replayed the
+        // backlog as mail turns and buried fresh sessions before they finished
+        // booting; session resume already carries the agent's context.
+        void catchUp().catch(() => {});
         retryCount = 0;
         lastPingRef.current = Date.now(); // treat connect as implicit ping
 
@@ -421,6 +487,32 @@ export function useAcpSse() {
                 const from = mail.from_agent ?? mail.from ?? 'unknown';
                 const subject = mail.subject ?? '(no subject)';
 
+                // Boot grace: a fresh SSE connection means the world is still
+                // settling. Mail waits in the inbox, durable.
+                if (inBootGrace()) {
+                  console.log(`[AcpSse] boot grace: holding mail for ${agentName} (<60s since SSE connect)`);
+                  continue;
+                }
+
+                // Turn-stack gate: only mail NEWER than the agent's watermark
+                // may inject. Everything else is catch-up replay — suppressed
+                // without firing a turn. Watermark advances on live mail.
+                if (typeof id === 'number') {
+                  if (!mailWatermark.has(agentName)) {
+                    if (!watermarkPending.has(agentName)) {
+                      watermarkPending.add(agentName);
+                      void initMailWatermark(agentName);
+                    }
+                    continue;
+                  }
+                  const wm = mailWatermark.get(agentName)!;
+                  if (id <= wm) {
+                    console.log(`[AcpSse] suppressed historical mail for ${agentName} id=${id} (<= watermark ${wm})`);
+                    continue;
+                  }
+                  mailWatermark.set(agentName, id);
+                }
+
                 // Skip replayed/duplicate deliveries of the same message.
                 // Id-less events dedupe on a content key so a later id'd
                 // catch-up of the same mail doesn't double-notify (WO 11491).
@@ -430,13 +522,16 @@ export function useAcpSse() {
                 }
 
                 console.log(`[AcpSse] Mail for ${agentName}: ${from} — ${subject} (id=${id})`);
-                void routeMailNotice(agentName, from, subject, id);
 
                 const projectId = useProjectStore.getState().activeProject?.id;
                 // Gate on confirmation (WO 1560 R3 / AC5): no inbox GETs before
                 // [Start], even if a mail push lands while the boot confirm
                 // picker is still open. pickerHasStarted flips true on [Start].
+                // routeMailNotice joins the gate: it fires a body GET that
+                // stamps read_at cloud-side — a pre-Start side effect on a
+                // project the user has not engaged.
                 if (useProjectStore.getState().pickerHasStarted) {
+                  void routeMailNotice(agentName, from, subject, id);
                   useMailStore.getState().fetchInbox(agentName, projectId);
                 }
               } catch (err) {
@@ -625,15 +720,12 @@ export function useAcpSse() {
     }
 
     // WO 11473: inbox GETs are gated on the boot picker ([Start]); when it
-    // flips, run the same catch-up + notice synthesis so reload-window mail is
-    // recovered promptly instead of waiting for the next SSE reconnect.
+    // flips, run the catch-up so the sidebar reflects reload-window mail
+    // promptly instead of waiting for the next SSE reconnect. (The notice
+    // synthesis that also ran here was removed — see the Connected site.)
     const unsubPicker = useProjectStore.subscribe((state, prev) => {
       if (state.pickerHasStarted && !prev.pickerHasStarted) {
-        void catchUp()
-          .catch(() => {})
-          .then(() => {
-            if (!disposed) synthesizeNoticesForUnreads();
-          });
+        void catchUp().catch(() => {});
       }
     });
 

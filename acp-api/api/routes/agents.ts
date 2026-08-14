@@ -1,13 +1,85 @@
 import { Router, type Request, type Response } from 'express';
 import { success, error } from '../response.js';
+import { getLatestSessionSummary } from './sessionSummary.js';
 import { config } from '../../config.js';
 import { ensureValidToken, forceRefresh, getSession, requireTokenClientId } from '../auth/tokenManager.js';
 import * as projectsCache from '../projects/cache.js';
+import { requireStartedProjectId, ProjectNotEngagedError } from '../projects/startedProject.js';
 
 import { fileURLToPath } from 'url';
+import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 
+
+// ===========================================================================
+// DISABLED - agent memory briefing (pgvector handoff). Uncomment to enable.
+//
+// WHY IT IS HERE AND OFF: this block lives on `main`. This branch does not have
+// it, so agents spawned from this branch receive NO memory briefing - they get
+// only the one-line agent-memory skill pointer and never learn that MEMORY.md
+// is retired. Measured 2026-08-09 on a full team ramp-up: all 7 transcripts had
+// 0 hits for "MEMORY.md is retired". It was delivered by mail (message 26053)
+// as a one-off, which fixes THAT team and not the next restart. Parked here so
+// the gap stops being re-discovered on every ramp-up.
+//
+// TO ENABLE - both steps, or it compiles and does nothing:
+//   1. Uncomment MEMORY_BRIEFING and withMemoryBriefing below.
+//   2. Wrap EVERY profile return with withMemoryBriefing(...). On main there are
+//      FIVE - the four `basic` returns and the full `profile` return in the
+//      agent-profile route. Missing one is invisible: that agent simply never
+//      gets briefed and nothing errors.
+//
+// VERIFY BY RESULT, not by reading the diff. The briefing renders MEMORY.md in
+// backticks, so grepping a live response for "MEMORY.md is retired" returns 0
+// even when it IS deployed. Grep the served profile for: shared vector store on 93
+// ===========================================================================
+// const MEMORY_BRIEFING = `
+//
+// ---
+//
+// ## Memory — the shared vector store on 93 (NOT MEMORY.md)
+//
+// **\`MEMORY.md\` is retired. Do not write to it.** It is a flat index at its hard size
+// cap; anything appended is dropped silently, so a write there looks like it worked and
+// is simply lost.
+//
+// **To store a memory** (works from any runtime):
+// \`\`\`
+// python "E:\\Repos\\.claude\\hooks\\kb_remember.py" --title "<the fact, as a sentence>" \\
+//   --scope agent|project|standard --id <AgentName|projectId|feedback> \\
+//   --source "<who, when, measured how>" [--ttl 7d]   # body on stdin
+// \`\`\`
+// Write the chunk to stand alone: it is retrieved without its neighbours, so put the
+// identifiers, file names, env vars and error strings in it VERBATIM. No credentials —
+// the store is readable by every agent. \`--source\` is REQUIRED: a memory with no
+// provenance is a rumour.
+//
+// **Decide permanent vs note AT WRITE TIME, while you still know which it is:**
+// - **omit \`--ttl\`** → PERMANENT. Doctrine, references, facts you paid to learn.
+// - **\`--ttl 7d\` / \`48h\`** → a QUICK NOTE. Stops being retrieved once it passes. Use it
+//   for anything with a shelf life — a pending task, a checklist for a window, "X is
+//   mid-flight". Without it, that note outranks nothing and outlives everything: it keeps
+//   surfacing beside doctrine long after it went stale.
+//
+// Nobody ever goes back and retro-classifies, so there is no "mark it stale later".
+// Expired is NOT deleted — the row stays and stays queryable, it just stops being injected.
+//
+// **Superseding a memory is DELETE-then-write, not write.** Dedupe is keyed on content, so
+// an edited body inserts a NEW row and the stale one sits there forever, still retrievable,
+// still asserting the old thing.
+//
+// **To recall:**
+// - **Claude Code:** automatic. Relevant memories are injected each turn by a
+//   UserPromptSubmit hook. You do nothing.
+// - **Kimi / other runtimes:** NOT automatic — there is no hook. Search explicitly with
+//   \`python "E:\\Repos\\_tmp\\kb-ask.py" "<question>" 5\` when you need prior context.
+//
+// Retrieved memories are point-in-time notes, not live state. Verify any \`file:line\`
+// claim against current code before asserting it as fact.
+//
+// Detail: the \`agent-memory\` skill. Background: \`E:\\Repos\\about_acp_vector_project.md\`.`;
+//
 // Decision-C / no-unjustified-fallback: NO dev-box default in a public build (the off-LAN
 // Praveen-class hazard + the SOURCE==ARTIFACT residue gate scans for these literals). null
 // when unset -> queryVibeSql hard-fails with a surfaced error. The day-one read path (profile
@@ -112,14 +184,6 @@ async function proxyAgentCloud(
   res.status(result.status).json(result.body);
 }
 
-function resolveCurrentProjectId(): number | null {
-  const session = getSession();
-  if (!session?.userId) return null;
-  const entry = projectsCache.current.getFresh(session.userId)
-    ?? projectsCache.current.getStale(session.userId);
-  return entry?.current_project_id ?? null;
-}
-
 async function resolveAgentNameToId(name: string): Promise<number | null> {
   const normalizedName = name.toLowerCase();
   const cached = nameToIdCache.get(normalizedName);
@@ -127,12 +191,10 @@ async function resolveAgentNameToId(name: string): Promise<number | null> {
     return cached;
   }
 
-  // Project-scope the roster when possible so name resolution matches the
-  // project-scoped sidebar/mail view. Falls back to the full tenant roster
-  // when no current project is cached.
-  const projectId = resolveCurrentProjectId();
-  const query = projectId != null ? `?project_id=${projectId}` : '';
-  const result = await cloudFetch(`/v1/agentmail/agents${query}`);
+  // Resolve names against the started project's roster only. The full-tenant
+  // roster would resolve a name that belongs to another project's team.
+  const projectId = requireStartedProjectId('resolving an agent name');
+  const result = await cloudFetch(`/v1/agentmail/agents?project_id=${projectId}`);
   if ('error' in result) return null;
   if (result.status < 200 || result.status >= 300) return null;
   const agents = result.body?.data?.agents;
@@ -187,6 +249,92 @@ interface CloudProfileShape {
  * POST /v1/status instructions are no longer mounted and should not be
  * surfaced to avoid confusion.
  */
+/**
+ * Appends the agent's OWN git worktree location to its profile.
+ *
+ * WHY THIS IS SERVED, not documented: every agent shared ONE checkout per repo,
+ * and that produced measured collisions - NextPert branched/merged inside the
+ * tree the rig runs from and left it detached; DotNetPert's card-204368 commits
+ * landed on a branch belonging to someone else because the shared tree was on
+ * it. Telling agents once by mail fixes that day's team and nobody after.
+ *
+ * DERIVED, NOT HARDCODED. The root comes from ACP_AGENT_REPOS_ROOT, defaulting
+ * to <home>/AgentRepos, and the repos listed are the directories that ACTUALLY
+ * EXIST under <root>/<agent>/. An agent with no worktree gets no section rather
+ * than a promise of a path that isn't there — a wrong path is worse than none,
+ * because it sends someone to create work in a folder nobody reads.
+ *
+ * FAILS SOFT. Any error returns the profile untouched: a missing worktree is a
+ * degraded onboarding, an exception here is a dead agent.
+ */
+function withWorktreeHome<T>(profile: T, agentName: string): T {
+  try {
+    // ===================== JONS-MACBOOK-SWITCH =====================
+    // Grep this token to find every machine-specific path decision when
+    // setting up or switching between the Windows box and jons-macbook.
+    //
+    // Windows box : C:\Users\jon-local\AgentRepos\<Agent>\<repo>
+    // jons-macbook: NOT DECIDED YET. Set ACP_AGENT_REPOS_ROOT in the Mac's
+    //               environment rather than editing this line, so the two
+    //               machines never need different code.
+    //
+    // The default below already resolves per-machine (os.homedir()), so a Mac
+    // with no env var lands on /Users/<you>/AgentRepos. That is a sane landing
+    // spot, NOT a decision - change it deliberately when you pick one.
+    // ===============================================================
+    const root = process.env.ACP_AGENT_REPOS_ROOT
+      || path.join(os.homedir(), 'AgentRepos');
+    const mine = path.join(root, agentName);
+
+    let existing: string[] = [];
+    try {
+      existing = fs.readdirSync(mine, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch { /* no folder yet — expected; the agent makes it */ }
+
+    const have = existing.length
+      ? 'You already have: ' + existing.map((r) => path.join(mine, r)).join(', ')
+      : 'You do not have one yet. Make it before you edit anything.';
+
+    const section = [
+      '',
+      '---',
+      '',
+      '## Work in YOUR OWN git worktree, never the shared repo',
+      '',
+      'Pattern:  ' + path.join(root, '<YourAgentName>', '<repo>'),
+      'Yours:    ' + path.join(mine, '<repo>'),
+      '',
+      have,
+      '',
+      'If it does not exist, create it yourself from the canonical repo:',
+      '',
+      '    cd <canonical repo, e.g. E:\Repos\PayEz-Core>',
+      '    git worktree add -b home/<youragentname> "' + path.join(mine, '<repo>') + '" <base-branch>',
+      '',
+      'A worktree shares the object store and refs with the canonical repo but has',
+      'its own working directory and its own checked-out branch. Commit in yours and',
+      'it is visible everywhere immediately. Switch branches in yours freely.',
+      '',
+      'DO NOT check out branches in the canonical trees under E:\Repos. They are shared,',
+      'and acp-desktop is the tree the ACP itself runs from — switching it has already',
+      'broken a live session. Read from them; never switch them.',
+      '',
+      'IF YOU ARE ON MORE THAN ONE PROJECT and they use the same repo, the path above',
+      'collides with itself. Suffix the project id — <repo>-<projectId> — and say so in',
+      'your next report so the convention gets settled rather than guessed at twice.',
+      '',
+    ].join(String.fromCharCode(10));
+
+    const p2 = profile as unknown as { profile?: string };
+    const prev = typeof p2?.profile === 'string' ? p2.profile : '';
+    return { ...(profile as object), profile: prev + section } as T;
+  } catch {
+    return profile;
+  }
+}
+
 function stripSelfManagedStatus(profile: string): string {
   // Match the section from a `---` rule followed by `## Self-managed status`
   // up to the next `---` rule or end of string. Then tidy leftover whitespace.
@@ -269,6 +417,55 @@ function withMemoryBriefing<T>(profile: T): T {
   const p = profile as Record<string, unknown>;
   const existing = typeof p.profile === 'string' ? p.profile : '';
   return { ...p, profile: existing + MEMORY_BRIEFING } as T;
+}
+
+/**
+ * Append the agent's stored session summary to the ONBOARD RESPONSE.
+ *
+ * WHY HERE AND NOT IN THE BOOT PROMPT — the boot-prompt path cannot carry it
+ * reliably, and this is structural, not a bug to chase. `spawnAgent` in pty.ts
+ * is SYNCHRONOUS (`export function spawnAgent(...): string`), so when a caller
+ * does not supply a prompt it falls back to `buildAgentBootPrompt(agentName)`
+ * with no options — it CANNOT await a summary fetch. Measured 2026-08-10: only
+ * 1 of 7 agents came through orchestrateSpawn (the other 6 logged "already has
+ * ACP … skipping orchestrator spawn"), so six kickoffs were built by that
+ * synchronous fallback and arrived with `session-summary ABSENT` even though
+ * the orchestrator's own prompt had it (`localHasSummary=true`).
+ *
+ * The onboard response is PATH-INDEPENDENT: every agent fetches its profile
+ * however it was spawned, and `profile=present` is logged on every boot. So the
+ * summary rides a rail that is proven to arrive rather than one that depends on
+ * which caller won the race.
+ *
+ * FRAMED AS A PREVIOUS SESSION, in the same words the kb_recall hook uses: an
+ * agent that reads a summary as live state acts on a world that has moved.
+ *
+ * FAILS SOFT. A profile without a summary is degraded; a profile that never
+ * arrives is a dead agent.
+ */
+async function withSessionSummary<T>(profile: T, agentName: string): Promise<T> {
+  if (!profile || typeof profile !== 'object') return profile;
+  try {
+    const found = await getLatestSessionSummary(agentName);
+    const summary = found?.summary?.trim();
+    if (!summary) return profile;
+    const p = profile as Record<string, unknown>;
+    const existing = typeof p.profile === 'string' ? p.profile : '';
+    const section = [
+      '',
+      '',
+      '## Where you left off',
+      '',
+      'This is a stored summary of a PREVIOUS session, not live state. The rig has restarted and other agents have moved since. Verify anything here against the live system before acting on it.',
+      '',
+      summary,
+      '',
+    ].join('\n');
+    return { ...p, profile: existing + section } as T;
+  } catch (err: any) {
+    console.warn(`[agents] session summary append failed for ${agentName}:`, err?.message);
+    return profile;
+  }
 }
 
 function mapCloudProfile(
@@ -643,7 +840,7 @@ export default function agentRoutes(_storage: any): Router {
           console.warn(`[agent_profile] Could not resolve name "${identifier}" to id via cloud /v1/agentmail/agents — falling back to SessionManager thin shape`);
           const basic = await _storage.getAgentProfileFromGlobal(identifier);
           if (basic) {
-            res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
+            res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
             return;
           }
           res.status(404).json(error('NOT_FOUND', `Agent '${identifier}' not found`, 'agent_profile', (req as any).requestId));
@@ -673,7 +870,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud unreachable for /v1/agents/${agentId}/profile (${profileResult.error}) — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(503).json(error('UPSTREAM_UNAVAILABLE', `Cloud unreachable: ${profileResult.error}`, 'agent_profile', (req as any).requestId));
@@ -689,7 +886,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud returned HTTP ${profileResult.status} for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(profileResult.status).json(error('UPSTREAM_ERROR', `Cloud returned HTTP ${profileResult.status}`, 'agent_profile', (req as any).requestId));
@@ -702,7 +899,7 @@ export default function agentRoutes(_storage: any): Router {
         console.warn(`[agent_profile] Cloud response missing data.profile for agent ${agentId} — thin fallback`);
         const basic = await _storage.getAgentProfileFromGlobal(resolvedName || String(agentId));
         if (basic) {
-          res.json(success(withMemoryBriefing(basic), 'agent_profile', (req as any).requestId));
+          res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(basic, identifier)), identifier), 'agent_profile', (req as any).requestId));
           return;
         }
         res.status(502).json(error('UPSTREAM_BAD_SHAPE', 'Cloud response missing profile data', 'agent_profile', (req as any).requestId));
@@ -714,8 +911,12 @@ export default function agentRoutes(_storage: any): Router {
         displayName: displayName,
       });
 
-      res.json(success(withMemoryBriefing(profile), 'agent_profile', (req as any).requestId));
+      res.json(success(await withSessionSummary(withMemoryBriefing(withWorktreeHome(profile, identifier)), identifier), 'agent_profile', (req as any).requestId));
     } catch (err: any) {
+      if (err instanceof ProjectNotEngagedError) {
+        res.status(err.status).json(error(err.code, err.message, 'agent_profile', (req as any).requestId));
+        return;
+      }
       res.status(500).json(error('INTERNAL_ERROR', err.message, 'agent_profile', (req as any).requestId));
     }
   });

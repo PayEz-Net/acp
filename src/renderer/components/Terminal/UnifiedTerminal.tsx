@@ -504,7 +504,11 @@ export function UnifiedTerminal({
   const acpActiveTurn = isAcpMode
     ? (acpSession?.turns.find((t) => t.id === acpSession?.activeTurnId) ?? null)
     : null;
-  const acpIsThinkingLive = acpActiveTurn?.status === 'thinking';
+  // Busy = a turn is ACTIVE, full stop (turn_started → turn_complete). Keying
+  // on status === 'thinking' dropped the pill to 'Ready' the moment the turn
+  // moved to answering/tool — the agent visibly working while the pill said
+  // Ready (Jon 2026-08-07, screenshot-evidenced).
+  const acpIsThinkingLive = acpActiveTurn != null;
   const footerThinkingCount = isAcpMode ? 0 : thinkingCount;
 
   const computeDimensions = useCallback(() => {
@@ -1566,6 +1570,14 @@ export function isInterruptText(value: string): boolean {
 }
 
 function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
+  // Info lines (boot prompts, injected [ACP Mail] notices) arrive as one long,
+  // dimmed string that renders as a full-height wall and buries the live
+  // conversation. Collapse to a one-line preview; click to expand. (Jon 2026-08-05)
+  const [infoExpanded, setInfoExpanded] = useState(false);
+  const infoIsLong = line.source === 'info' && (line.line ?? '').length > 100;
+  const infoPreview = infoIsLong
+    ? (line.line ?? '').split('\n')[0].slice(0, 100).replace(/\s+\S*$/, '').trimEnd() + ' …'
+    : '';
   // Live thinking placeholders are updated in-place by the store and
   // surfaced as a single-line indicator in the footer. They do not render as
   // repeated blocks inside the stream.
@@ -1622,15 +1634,17 @@ function TerminalLine({ line, compact, showThinking }: TerminalLineProps) {
           `slate-300` for agent output was mid-grey on a near-black pane: legible
           if you stopped to read, invisible if you were skimming. */}
       <span
+        onClick={infoIsLong ? () => setInfoExpanded((v) => !v) : undefined}
+        title={infoIsLong ? (infoExpanded ? 'Click to collapse' : 'Click to expand') : undefined}
         className={`min-w-0 whitespace-pre-wrap leading-relaxed font-terminal overflow-x-auto ${
           isInfo
-            ? 'text-slate-500 italic text-[12px]'
+            ? `text-slate-500 italic text-[12px]${infoIsLong ? ' cursor-pointer hover:text-slate-400 select-none' : ''}`
             : isListItem
               ? 'text-slate-100 font-medium pl-1'
               : 'text-slate-100 font-medium'
         }`}
       >
-        {line.line}
+        {infoIsLong && !infoExpanded ? infoPreview : line.line}
       </span>
       {showThinking && line.thinking && (
         <div className="ml-2 mt-0.5">

@@ -386,7 +386,7 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     const injected = await manager.injectMail('you have mail');
 
-    expect(injected).toBe(true);
+    expect(injected).toBe('delivered');
     expect(getProcess().requests).toContainEqual(
       expect.objectContaining({
         method: 'session/prompt',
@@ -398,7 +398,7 @@ describe('AcpRuntimeManager', () => {
     );
   });
 
-  it('defers a mail inject instead of queueing when the runtime busy-rejects (mail never stacks, WO 11622)', async () => {
+  it('defers a mail inject mid-turn without ever attempting a steer (mail never interrupts, WO 11622)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-mail-defer' });
     await manager.start();
@@ -411,20 +411,16 @@ describe('AcpRuntimeManager', () => {
     const userPrompt = manager.prompt('hello');
     await Promise.resolve();
 
-    // The runtime busy-rejects the steer: mail DEFERS (no queue, no stacked
-    // turn) — it will be picked up by the catch-up synthesis at idle.
-    mockState.setResponse(
-      'session/prompt',
-      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
-    );
+    // Mail mid-turn defers immediately — no steer attempt, no queue, no
+    // stacked turn (the steer path beheaded the in-flight step, Jon
+    // 2026-08-01). The idle catch-up synthesis re-notifies when the turn
+    // completes.
     const mailPromise = manager.injectMail('you have mail');
-    await Promise.resolve();
-    await Promise.resolve();
+    await expect(mailPromise).resolves.toBe('deferred');
 
-    await expect(mailPromise).resolves.toBe(false);
     const process = getProcess();
-    // Boot + user + the rejected steer attempt — and nothing more, ever.
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    // Boot + user prompt — and nothing more, ever.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
     // After the turn ends, the deferred mail is NOT re-dispatched.
@@ -432,7 +428,7 @@ describe('AcpRuntimeManager', () => {
     deferredResolve({ stopReason: 'end_turn' });
     await userPrompt;
     await new Promise((r) => setImmediate(r));
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
 
     manager.kill();
   });
@@ -443,59 +439,30 @@ describe('AcpRuntimeManager', () => {
     mockState.setResponse('session/new', { sessionId: 'sess-steer-new' });
     await manager.start();
 
-    // In-flight user turn (never settles) → mail steers through and pends.
+    // In-flight user turn (never settles) → a human prompt steers through and
+    // pends (only human prompts still attempt steers — mail defers upfront).
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('you have mail');
+    const humanPromise = manager.prompt('steered message');
     await Promise.resolve();
 
     // Restart: the resume succeeds, so the pending steer migrates into the
     // queue and drains — it must resolve TRUE via dispatch, never false-settle
-    // from the old process's rejected steer request.
+    // from the old process's orphaned steer request.
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
     await manager.restart();
 
-    await expect(mailPromise).resolves.toBe(true);
-    const mailDispatches = getProcess().requests.filter(
+    // Resolves once the migrated entry drains (void — prompt() erases the
+    // dispatched flag); the dispatch assertion below is the real check.
+    await humanPromise;
+    const dispatches = getProcess().requests.filter(
       (r) =>
         r.method === 'session/prompt' &&
-        (r.params as { prompt: Array<{ text: string }> }).prompt[0].text === 'you have mail',
+        (r.params as { prompt: Array<{ text: string }> }).prompt[0].text === 'steered message',
     );
-    expect(mailDispatches.length).toBeGreaterThan(0);
+    expect(dispatches.length).toBeGreaterThan(0);
 
     manager.kill();
-  });
-
-  it('steers mail notices through while a prompt is in flight (slice B)', async () => {
-    mockState.setResponse('initialize', {});
-    mockState.setResponse('session/new', { sessionId: 'sess-mail-cooldown' });
-    await manager.start();
-
-    // Hold the first user prompt open so mail arrives mid-turn.
-    let deferredResolve: (value: unknown) => void = () => {};
-    const deferredPromise = new Promise<unknown>((resolve) => {
-      deferredResolve = resolve;
-    });
-    mockState.setResponse('session/prompt', deferredPromise);
-    const userPrompt = manager.prompt('hello');
-    await Promise.resolve();
-
-    // Mail that arrives while the prompt is in flight is STEERED through
-    // immediately — never manager-queued.
-    const mailPromise = manager.injectMail('you have mail');
-    await Promise.resolve();
-
-    const process = getProcess();
-    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
-
-    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
-    deferredResolve({ stopReason: 'end_turn' });
-    await userPrompt;
-    await expect(mailPromise).resolves.toBe(true);
-
-    const promptRequests = process.requests.filter((r) => r.method === 'session/prompt');
-    expect((promptRequests[2].params as any).prompt[0].text).toBe('you have mail');
   });
 
   it('forces a turn boundary when a steered human prompt goes unanswered (human-reply backstop)', async () => {
@@ -645,6 +612,302 @@ describe('AcpRuntimeManager', () => {
     expect(completes.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('learns the runtime cannot steer and queues later human prompts directly', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-no-steer' });
+    await manager.start();
+
+    let settleTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+    const first = manager.prompt('first');
+    await Promise.resolve();
+
+    const process = getProcess();
+    // Boot + first user prompt have both been dispatched.
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+
+    // The runtime busy-rejects the steer (kimi ACP ≤0.31.x): the prompt queues
+    // and the manager LEARNS the runtime cannot steer.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const second = manager.prompt('second');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+    // The next human prompt skips the doomed steer entirely — queued with NO
+    // new session/prompt request (no guaranteed-rejection round-trip, no
+    // adapter stderr spam).
+    const third = manager.prompt('third');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(2);
+
+    // The turn ends: both queued prompts drain in order as their own turns.
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    settleTurn({ stopReason: 'end_turn' });
+    await first;
+    await second;
+    await third;
+    const texts = process.requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+    expect(texts).toContain('second');
+    expect(texts).toContain('third');
+
+    manager.kill();
+  });
+
+  it('folds queued human messages into the reply-turn nudge on grace cancel (no-steer runtime)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-fold' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Both human prompts busy-reject / queue directly — they never reach the
+      // agent's context.
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+      );
+      const second = manager.prompt('what we have is a disaster');
+      await vi.advanceTimersByTimeAsync(0);
+      const third = manager.prompt('total shit');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      // Stage 1 at 45s: NO warning steer on a no-steer runtime — it could only
+      // ever be rejected. Requests stay at boot + task + the one rejected steer.
+      await vi.advanceTimersByTimeAsync(45_000);
+      const texts45 = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts45.some((t) => t.includes('Wrap up your current step'))).toBe(false);
+      expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(3);
+
+      // Stage 2 at 60s: cancel, and the queued human text folds INTO the
+      // reply-turn nudge — the agent must see what was actually said.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(process.notifications).toContainEqual({
+        method: 'session/cancel',
+        params: { sessionId: 'sess-fold' },
+      });
+      // Folded messages settle here — their content rides the nudge (prompt()
+      // returns void; the nudge content assertions below are the real check).
+      await second;
+      await third;
+
+      // The cancelled turn settles; the nudge drains carrying both messages.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      const nudge = texts.find((t) => t.includes('MID-TASK'));
+      expect(nudge).toBeDefined();
+      expect(nudge).toContain('what we have is a disaster');
+      expect(nudge).toContain('total shit');
+      expect(nudge).toContain('resume the task from where you were cut off');
+      // ...and the folded messages never drain as stale turns of their own —
+      // the first appears only as its rejected steer attempt, the second
+      // (queued directly) never hits the wire standalone at all.
+      expect(texts.filter((t) => t === 'what we have is a disaster')).toHaveLength(1);
+      expect(texts.filter((t) => t === 'total shit')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
+  it('keeps image-bearing human prompts queued instead of folding them into the nudge', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-fold-img' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+      );
+      const textMsg = manager.prompt('look at this');
+      await vi.advanceTimersByTimeAsync(0);
+      const imgMsg = manager.prompt('what do you see', [{ data: 'aW1n', mimeType: 'image/png' }]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Grace cancel: the text-only message folds; the image prompt cannot ride
+      // a text nudge and stays queued.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await textMsg;
+
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await imgMsg;
+
+      const process = getProcess();
+      const reqs = process.requests.filter((r) => r.method === 'session/prompt');
+      const texts = reqs.map(
+        (r) => (r.params as { prompt: Array<{ type: string; text?: string }> }).prompt[0].text ?? '',
+      );
+      const nudge = texts.find((t) => t.includes('MID-TASK'));
+      expect(nudge).toBeDefined();
+      expect(nudge).toContain('look at this');
+      expect(nudge).not.toContain('what do you see');
+      // The image prompt drains as its own turn afterwards, image block intact.
+      const imgReq = reqs.find(
+        (r) => (r.params as { prompt: Array<{ type: string; text?: string }> }).prompt[0].text === 'what do you see',
+      );
+      expect(imgReq).toBeDefined();
+      expect(
+        (imgReq!.params as { prompt: Array<{ type: string }> }).prompt.some((b) => b.type === 'image'),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
+  it('clears the human-reply backstop when the queued human question becomes the active turn (BAPert 2026-08-01)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-backstop-retry' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      // The runtime insists a (zombie) turn is still active: the human's
+      // question is rejected turn.agent_busy and re-queued — the manager
+      // never started a turn (the BAPert 2026-08-01 trace).
+      mockState.setResponse(
+        'session/prompt',
+        new Error('Cannot launch a new turn while another turn (ID 50) is active'),
+      );
+      const question = manager.prompt('so you are suggesting i start my test');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // A second human message mid-episode steers, busy-rejects, queues —
+      // and ARMS the 60s human-reply backstop.
+      const second = manager.prompt('be precise');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The next busy probe (5s) re-dispatches the question and the runtime
+      // accepts: the human's own question becomes the active turn.
+      let endQuestionTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { endQuestionTurn = resolve; }));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const process = getProcess();
+      const texts = () =>
+        process.requests
+          .filter((r) => r.method === 'session/prompt')
+          .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts().some((t) => t.includes('so you are suggesting'))).toBe(true);
+
+      // The answer turn runs long, well past the 60s deadline: the backstop
+      // must NOT cancel it — the human is being served, not waiting.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+      expect(texts().some((t) => t.includes('MID-TASK'))).toBe(false);
+
+      // Natural end; the queued 'be precise' drains as its own turn.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      endQuestionTurn({ stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(0);
+      await question;
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
+  it('never cancels the reply-turn nudge itself — newer messages drain after the reply (BAPert 2026-08-01)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-nosteer-loop' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      // Agent's long turn in flight (settles only when we say so).
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      const first = manager.prompt('long task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Two human messages busy-reject / queue — backstop armed.
+      mockState.setResponse('session/prompt', new Error('Cannot launch a new turn while another turn (ID 1) is active'));
+      const second = manager.prompt('what we have is a disaster');
+      await vi.advanceTimersByTimeAsync(0);
+      const third = manager.prompt('total shit');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      // Stage 2 at 60s: the FIRST grace cancel fires (designed — it batches
+      // the queued human messages into the reply-turn nudge).
+      await vi.advanceTimersByTimeAsync(60_000);
+      const cancels = () => process.notifications.filter((n) => n.method === 'session/cancel');
+      expect(cancels().length).toBe(1);
+
+      // The cancelled turn settles; the nudge (carrying both messages)
+      // dispatches and becomes the active turn — it stays in flight.
+      let endNudgeTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { endNudgeTurn = resolve; }));
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      await second;
+      await third;
+      const texts = () =>
+        process.requests
+          .filter((r) => r.method === 'session/prompt')
+          .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      const nudges = () => texts().filter((t) => t.includes('MID-TASK'));
+      expect(nudges().length).toBe(1);
+
+      // The human speaks again mid-reply: queued, backstop re-armed. The
+      // reply turn runs long (composition + tools), past the 60s deadline.
+      mockState.setResponse('session/prompt', new Error('Cannot launch a new turn while another turn (ID 2) is active'));
+      const fourth = manager.prompt('keep going');
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // The grace cancel must NOT fire against the reply turn — that turn IS
+      // the answer the human is waiting for. No second cancel, no second nudge.
+      expect(cancels().length).toBe(1);
+      expect(nudges().length).toBe(1);
+
+      // Natural reply-turn end: the newer message drains as its own turn.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      endNudgeTurn({ stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(0);
+      await fourth;
+      expect(texts().some((t) => t === 'keep going')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('emits turn_complete with default stopReason when session/prompt resolves without one', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-no-stop' });
@@ -662,32 +925,180 @@ describe('AcpRuntimeManager', () => {
     });
   });
 
+  it('emits turn_started on every dispatch so the renderer busy pill spans the silent front-end (card 182119)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-ts' });
+    await manager.start();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    await manager.prompt('hello');
+
+    const started = events.filter((e) => e.update.sessionUpdate === 'turn_started');
+    // Boot prompt + the human prompt — one turn_started per dispatch.
+    expect(started.length).toBeGreaterThanOrEqual(2);
+    expect(started[0]?.update).toMatchObject({ sessionUpdate: 'turn_started', sessionId: 'sess-ts' });
+
+    manager.kill();
+  });
+
   it('emits an error event when session/prompt hangs (image-paste Answering spinner bug)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-hang' });
     await manager.start();
 
     vi.useFakeTimers();
-    // Prevent the automatic restart from leaving fake timers behind in this test.
-    const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
-    // Simulate a runtime that streams content but never returns a session/prompt result.
-    mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
-    manager.prompt('hello');
+    try {
+      // Prevent the automatic restart from leaving fake timers behind in this test.
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      // Simulate a runtime that streams content but never returns a session/prompt result.
+      mockState.setResponse('session/prompt', new Promise<unknown>(() => {}));
+      manager.prompt('hello');
 
-    await vi.advanceTimersByTimeAsync(300_001);
+      // Ladder stage A at 300s: cancel-first — NO error, NO restart yet.
+      await vi.advanceTimersByTimeAsync(300_001);
+      const process = getProcess();
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+      expect(restartSpy).not.toHaveBeenCalled();
 
-    const error = events.find((e) => e.update.sessionUpdate === 'error');
-    expect(error).toBeDefined();
-    expect(error?.update).toMatchObject({
-      sessionUpdate: 'error',
-      sessionId: 'sess-hang',
-      error: expect.stringContaining('No response'),
-    });
-    expect(restartSpy).toHaveBeenCalled();
+      // The cancel goes unanswered (truly hung) — the grace ticks expire and
+      // the kill+restart escalates.
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = events.find((e) => e.update.sessionUpdate === 'error');
+      expect(error).toBeDefined();
+      expect(error?.update).toMatchObject({
+        sessionUpdate: 'error',
+        sessionId: 'sess-hang',
+        error: expect.stringContaining('No response'),
+      });
+      expect(restartSpy).toHaveBeenCalled();
 
-    restartSpy.mockRestore();
-    manager.kill();
-    vi.useRealTimers();
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancel-first: a stalled turn that honors the cancel is NOT restarted (resume nudge, same session)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-stall' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 300s of silence → stage A: session/cancel, but NO restart.
+      await vi.advanceTimersByTimeAsync(300_001);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(restartSpy).not.toHaveBeenCalled();
+
+      // The runtime honors the cancel inside the grace window: it proved
+      // itself alive, so it keeps process, session and context.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(getProcess()).toBe(process);
+      expect(manager.getSessionId()).toBe('sess-stall');
+      // The resume nudge drains as its own turn, telling the agent why its
+      // turn died — and nothing shows as a [Send failed] error.
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('produced no output for over 5 minutes'))).toBe(true);
+      expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('extends grace instead of restarting when stderr shows provider throttling (429/quota)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-throttle' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never settles
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The adapter reports a 429 on stderr mid-stall.
+      process.emit('stderr', 'HTTP 429 Too Many Requests: rate limit exceeded, retrying in 20s');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 300s of silence: NO cancel, NO restart — throttle extension instead,
+      // surfaced to the pane as a wait_state.
+      await vi.advanceTimersByTimeAsync(300_001);
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(false);
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(events.some((e) => e.update.sessionUpdate === 'wait_state')).toBe(true);
+
+      // Extensions are bounded (4 × 300s, fresh 429 evidence each time); the
+      // NEXT trip falls through to the cancel ladder — a bounded wait, not an
+      // infinite one.
+      for (let i = 0; i < 4; i++) {
+        process.emit('stderr', 'HTTP 429 Too Many Requests: rate limit exceeded, retrying in 40s');
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      expect(process.notifications.some((n) => n.method === 'session/cancel')).toBe(true);
+      expect(restartSpy).not.toHaveBeenCalled(); // grace still running
+      await vi.advanceTimersByTimeAsync(30_000); // grace expiry → restart
+      expect(restartSpy).toHaveBeenCalled();
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fire the stalled-turn nudge when the human cancels during the grace window', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-user-cancel' });
+    await manager.start();
+
+    vi.useFakeTimers();
+    try {
+      const restartSpy = vi.spyOn(manager as unknown as { restart: () => Promise<void> }, 'restart').mockResolvedValue(undefined);
+      const process = getProcess();
+      let settleTurn: (value: unknown) => void = () => {};
+      mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+      await manager.prompt('slow task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Ladder arms at 300s; then the HUMAN cancels (Esc) inside the grace
+      // window — the turn is theirs to end, so no platform nudge follows.
+      await vi.advanceTimersByTimeAsync(300_001);
+      manager.cancel();
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      settleTurn({ stopReason: 'cancelled' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(restartSpy).not.toHaveBeenCalled();
+      const texts = process.requests
+        .filter((r) => r.method === 'session/prompt')
+        .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+      expect(texts.some((t) => t.includes('produced no output for over 5 minutes'))).toBe(false);
+
+      restartSpy.mockRestore();
+    } finally {
+      manager.kill();
+      vi.useRealTimers();
+    }
   });
 
   it('completes a turn that stays active past 10 minutes with the same session', async () => {
@@ -1020,6 +1431,32 @@ describe('AcpRuntimeManager', () => {
     vi.useRealTimers();
   });
 
+  it('cancels a resume-zombie on the FIRST busy rejection after a fresh spawn (no 3-probe wait)', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-zombie' });
+    // The very first dispatch (the boot kickoff) hits the zombie turn marker
+    // from the session file — no live turn can exist on a fresh process, so
+    // the cancel must go out immediately, not after 3 probes.
+    mockState.setResponse('session/prompt', new Error('turn.agent_busy (code -32600)'));
+
+    vi.useFakeTimers();
+    try {
+      await manager.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const process = getProcess();
+      expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+
+      // The next probe (5s) re-dispatches the re-queued kickoff cleanly.
+      mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(process.requests.filter((r) => r.method === 'session/prompt').length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+    manager.kill();
+  });
+
   it('trips the idle watchdog mid-busy-episode and restarts with session/new (skip resume once)', async () => {
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/new', { sessionId: 'sess-busy-wedged' });
@@ -1046,15 +1483,17 @@ describe('AcpRuntimeManager', () => {
     expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(0);
     expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
 
-    // Past 300s of true silence, the watchdog trips: best-effort cancel +
-    // failPendingTurn + restart, as today.
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Past 300s of true silence, the watchdog ladder arms: session/cancel +
+    // 30s grace. The wedged turn never settles, so the grace expiry escalates
+    // to failPendingTurn + restart.
+    await vi.advanceTimersByTimeAsync(45_000);
     const error = events.find((e) => e.update.sessionUpdate === 'error');
     expect(error?.update).toMatchObject({
       sessionUpdate: 'error',
       error: expect.stringContaining('No response'),
     });
-    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(1);
+    // One cancel from the ladder arm, one belt-and-braces at escalation.
+    expect(process.notifications.filter((n) => n.method === 'session/cancel')).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill pause + start
 
     // A busy episode that consumed the whole idle budget is a property of the
@@ -1316,7 +1755,10 @@ describe('AcpRuntimeManager', () => {
     expect(latestBootPrompt.prompt[0].text).toContain('Restart context');
   });
 
-  it('hydrates the persisted session id and resumes it on start', async () => {
+  it('starts FRESH at app launch even with a persisted session id (session-rotation policy)', async () => {
+    // Jon 2026-08-07: immortal resumed sessions grew past 1k messages and
+    // ~250k cached-read tokens per turn. Launch always opens session/new;
+    // the persisted id stays on disk as the manual emergency-reload handle.
     mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-persisted' };
     manager = new AcpRuntimeManager('rt-persist', getProviderConfig('kimi'), {
       agentName: 'NextPert',
@@ -1326,26 +1768,22 @@ describe('AcpRuntimeManager', () => {
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
     mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
+    mockState.setResponse('session/new', { sessionId: 'sess-fresh-rotation' });
 
     await manager.start();
 
+    expect(getProcess().requests.find((r) => r.method === 'session/resume')).toBeUndefined();
     expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({
-        method: 'session/resume',
-        params: expect.objectContaining({ sessionId: 'sess-persisted' }),
-      }),
+      expect.objectContaining({ method: 'session/new' }),
     );
-    expect(getProcess().requests.find((r) => r.method === 'session/new')).toBeUndefined();
-    expect(manager.getSessionId()).toBe('sess-persisted');
-    // App-launch resume: a lightweight wake-up nudge goes out so the agent
-    // visibly comes online — but NOT the full boot prompt (the resumed
-    // session already carries identity and history).
-    const nudgeRequest = getProcess().requests.find((r) => r.method === 'session/prompt');
-    expect(nudgeRequest).toBeDefined();
-    const nudgeText = ((nudgeRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
-    expect(nudgeText).toContain('NextPert');
-    expect(nudgeText).toContain('session resumed');
-    expect(nudgeText).not.toContain('Load Identity');
+    expect(manager.getSessionId()).toBe('sess-fresh-rotation');
+    // A fresh session gets the FULL boot prompt (identity + mail instructions),
+    // which now leads with the ACP-<agent> session label.
+    const bootRequest = getProcess().requests.find((r) => r.method === 'session/prompt');
+    expect(bootRequest).toBeDefined();
+    const bootText = ((bootRequest?.params as any).prompt as Array<{ type: string; text: string }>)[0].text;
+    expect(bootText).toContain('Load Identity');
+    expect(bootText).toMatch(/^\[ACP-NextPert — /);
   });
 
   it('does not re-nudge after an in-process restart of a resumed session', async () => {
@@ -1357,19 +1795,24 @@ describe('AcpRuntimeManager', () => {
     });
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
-    mockState.setResponse('session/resume', { sessionId: 'sess-persisted' });
+    mockState.setResponse('session/new', { sessionId: 'sess-launched-fresh' });
+    mockState.setResponse('session/resume', { sessionId: 'sess-launched-fresh' });
     mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
 
     await manager.start();
-    // App-launch resume sent exactly one wake-up nudge.
+    // Launch is fresh (rotation policy): session/new + exactly one boot prompt.
     expect(getProcess().requests.filter((r) => r.method === 'session/prompt')).toHaveLength(1);
 
     await manager.restart();
 
-    // In-process restart resumes again (new process), but stays silent: the
-    // renderer still holds the transcript, so no nudge and no boot prompt.
+    // In-process restart resumes the session born this run (young and cheap),
+    // and stays silent: the renderer still holds the transcript, so no nudge
+    // and no second boot prompt.
     expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({ method: 'session/resume' }),
+      expect.objectContaining({
+        method: 'session/resume',
+        params: expect.objectContaining({ sessionId: 'sess-launched-fresh' }),
+      }),
     );
     expect(getProcess().requests.find((r) => r.method === 'session/prompt')).toBeUndefined();
   });
@@ -1383,7 +1826,7 @@ describe('AcpRuntimeManager', () => {
     expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-new-persist');
   });
 
-  it('falls back to session/new and re-persists when resume of the persisted id fails', async () => {
+  it('overwrites the persisted id with the fresh session at launch (emergency handle stays current)', async () => {
     mockSettings.data.acpSessionIds = { 'NextPert::/repo': 'sess-stale' };
     manager = new AcpRuntimeManager('rt-stale', getProviderConfig('kimi'), {
       agentName: 'NextPert',
@@ -1392,14 +1835,11 @@ describe('AcpRuntimeManager', () => {
     });
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
     mockState.setResponse('initialize', { agentCapabilities: { loadSession: true } });
-    mockState.setResponse('session/resume', new Error('invalid params: session not found'));
     mockState.setResponse('session/new', { sessionId: 'sess-fresh' });
 
     await manager.start();
 
-    expect(getProcess().requests).toContainEqual(
-      expect.objectContaining({ method: 'session/new' }),
-    );
+    expect(getProcess().requests.find((r) => r.method === 'session/resume')).toBeUndefined();
     expect(manager.getSessionId()).toBe('sess-fresh');
     expect(mockSettings.data.acpSessionIds['NextPert::/repo']).toBe('sess-fresh');
   });
@@ -1469,9 +1909,11 @@ describe('AcpRuntimeManager', () => {
     // prompt_queued event on the steer path.
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Trip the 300s idle watchdog: failPendingTurn + restart. The restart
-    // starts a FRESH session (no resume capability), so the queue drops.
-    await vi.advanceTimersByTimeAsync(320_000);
+    // Trip the 300s idle watchdog: the ladder arms (cancel + 30s grace), the
+    // hung turn never settles, so the grace expiry escalates to
+    // failPendingTurn + restart. The restart starts a FRESH session (no
+    // resume capability), so the queue drops.
+    await vi.advanceTimersByTimeAsync(345_000);
     await vi.advanceTimersByTimeAsync(1_000); // restart's post-kill 500ms pause + start
 
     const cleared = events.filter((e) => e.update.sessionUpdate === 'queue_cleared');
@@ -1493,38 +1935,45 @@ describe('AcpRuntimeManager', () => {
     await manager.prompt('in-flight');
     const mailPromise = manager.injectMail('you have mail');
     await vi.advanceTimersByTimeAsync(0);
-    // The mail inject steers through (pendingSteer), not the queue.
+    // The mail inject defers upfront (mail never interrupts) — nothing queued
+    // or pended.
     expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
-    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The steered
-    // mail inject must settle false (not hang) so the renderer's retry /
-    // delivery-failed path can fire.
+    // Trip the 300s idle watchdog → restart → dropQueuedPrompts. The deferred
+    // mail inject stays settled false (it must not hang or resurrect) so the
+    // renderer's retry / delivery-failed path can fire.
     await vi.advanceTimersByTimeAsync(320_000);
     await vi.advanceTimersByTimeAsync(1_000);
 
-    await expect(mailPromise).resolves.toBe(false);
+    await expect(mailPromise).resolves.toBe('deferred');
 
     manager.kill();
     vi.useRealTimers();
   });
 
-  it('settles a queued injectMail as false on intentional kill (WO 11483)', async () => {
+  it('settles a queued human prompt as false on intentional kill (WO 11483)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-mail-kill' });
     await manager.start();
 
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('you have mail');
+    // Busy-reject steers so the human prompt lands in the queue.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const msgPromise = manager.prompt('queued message');
     await Promise.resolve();
-    // Steered through as a pendingSteer, not queued.
-    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
+    await Promise.resolve();
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
 
-    // An intentional kill has no later drain path — the steered notice must
-    // settle false immediately, not hang.
+    // An intentional kill has no later drain path — the queued prompt must
+    // settle immediately, not hang (prompt() returns void; resolving at all
+    // is the check).
     manager.kill();
 
-    await expect(mailPromise).resolves.toBe(false);
+    await msgPromise;
   });
 
   it('purgeQueue settles every queued prompt as false and returns the count (WO 11572)', async () => {
@@ -1534,19 +1983,28 @@ describe('AcpRuntimeManager', () => {
 
     mockState.setResponse('session/prompt', new Promise<unknown>(() => {})); // never resolves
     await manager.prompt('in-flight');
-    const mailPromise = manager.injectMail('mail one');
-    const mailPromise2 = manager.injectMail('mail two');
+    // Human prompts mid-turn: the first busy-rejects into the queue, the
+    // second queues directly (no-steer learned from the first rejection).
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Cannot launch a new turn while another turn (ID 1) is active'),
+    );
+    const msgPromise = manager.prompt('msg one');
     await Promise.resolve();
-    // Both steer through as pendingSteers — no prompt_queued events.
-    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(0);
+    await Promise.resolve();
+    const msgPromise2 = manager.prompt('msg two');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events.filter((e) => e.update.sessionUpdate === 'prompt_queued')).toHaveLength(2);
 
     // The human's interrupt purges the backlog: both settle false, the count
     // comes back for the UI flash, and queue_cleared fires for the renderer.
     const dropped = manager.purgeQueue();
 
     expect(dropped).toBe(2);
-    await expect(mailPromise).resolves.toBe(false);
-    await expect(mailPromise2).resolves.toBe(false);
+    // prompt() returns void — resolving at all (not hanging) is the settle check.
+    await msgPromise;
+    await msgPromise2;
     expect(events.some((e) => e.update.sessionUpdate === 'queue_cleared')).toBe(true);
 
     manager.kill();
@@ -1565,7 +2023,7 @@ describe('AcpRuntimeManager', () => {
       await manager.prompt('in-flight');
       const mailPromise = manager.injectMail('you have mail');
       await vi.advanceTimersByTimeAsync(0);
-      // Steered through as a pendingSteer, not queued.
+      // Deferred upfront (mail never interrupts a live turn) — nothing queued.
       expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(false);
 
       // Every subsequent start attempt fails → each restart re-schedules until
@@ -1584,7 +2042,7 @@ describe('AcpRuntimeManager', () => {
         typeof e.update.error === 'string' &&
         e.update.error.includes('keeps failing'),
       )).toBe(true);
-      await expect(mailPromise).resolves.toBe(false);
+      await expect(mailPromise).resolves.toBe('deferred');
     } finally {
       manager.kill();
       vi.useRealTimers();

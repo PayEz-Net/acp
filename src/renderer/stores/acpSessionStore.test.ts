@@ -236,6 +236,36 @@ describe('acpSessionStore', () => {
     expect(store.getSession('NextPert')?.waitState).toBeUndefined();
   });
 
+  it('opens an assistant turn on turn_started even when the previous turn is done (card 182119)', () => {
+    const store = useAcpSessionStore.getState();
+    // A completed turn, then a manager dispatch for a NEW turn (mail-injected
+    // or queue-drained — no user send): the pill must go busy.
+    store.startAssistantTurn('NextPert', 's1');
+    store.applyEvent(
+      makeUpdate('NextPert', { sessionUpdate: 'turn_complete', sessionId: 's1', stopReason: 'end_turn' }),
+    );
+    expect(store.getSession('NextPert')?.activeTurnId).toBeNull();
+
+    store.applyEvent(makeUpdate('NextPert', { sessionUpdate: 'turn_started', sessionId: 's1' }));
+    const session = store.getSession('NextPert');
+    expect(session?.activeTurnId).not.toBeNull();
+    expect(session?.turns.at(-1)?.role).toBe('assistant');
+    expect(session?.turns.at(-1)?.status).toBe('thinking');
+  });
+
+  it('turn_started is a no-op while a turn is already active', () => {
+    const store = useAcpSessionStore.getState();
+    store.startAssistantTurn('NextPert', 's1');
+    const activeId = store.getSession('NextPert')?.activeTurnId;
+    const turnCount = store.getSession('NextPert')?.turns.length;
+
+    store.applyEvent(makeUpdate('NextPert', { sessionUpdate: 'turn_started', sessionId: 's1' }));
+
+    const session = store.getSession('NextPert');
+    expect(session?.activeTurnId).toBe(activeId);
+    expect(session?.turns.length).toBe(turnCount);
+  });
+
   it('ignores a wait_state update with a missing kind', () => {
     const store = useAcpSessionStore.getState();
     store.startAssistantTurn('NextPert', 's1');
