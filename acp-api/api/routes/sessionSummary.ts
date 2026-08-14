@@ -80,15 +80,27 @@ export async function getLatestSessionSummary(
          from kb
         where scope = 'agent'
           and scope_id = $1
-          and title like '%session summary%'
+          and title like '%session summary (short)%'
           and (expires_at is null or expires_at > now())
         order by created_at desc
         limit 1`,
       [agent],
     );
     if (!rows.length) return null;
+
+    // Defensive size limit: even if a summary slipped past the shutdown guard,
+    // cap it here. Prevents accidental budget drain at boot. ~4 chars per token.
+    // Keep the tail (recent context), drop the head (older background).
+    const MAX_SUMMARY_TOKENS = 2000;
+    const MAX_CHARS = MAX_SUMMARY_TOKENS * 4;
+    let chunk = String(rows[0].chunk ?? '').trim();
+    if (chunk.length > MAX_CHARS) {
+      console.warn(`[session-summary] ${agent} summary oversized (${Math.round(chunk.length / 4)} tokens), truncating to ${MAX_SUMMARY_TOKENS}`);
+      chunk = '[… truncated]\n\n' + chunk.slice(-MAX_CHARS);
+    }
+
     return {
-      summary: String(rows[0].chunk ?? '').trim(),
+      summary: chunk,
       source: rows[0].source ?? null,
       createdAt: new Date(rows[0].created_at).toISOString(),
     };
@@ -107,6 +119,8 @@ export default function sessionSummaryRoutes(_storage?: unknown): Router {
       res.json(success({ summary: null }, 'session_summary', (req as any).requestId));
       return;
     }
+    // Query for short summary (title = "*session summary (short)*") — all agents get this at boot.
+    // They can query the full session from the KB if they need detailed context.
     const found = await getLatestSessionSummary(agent);
     res.json(
       success(

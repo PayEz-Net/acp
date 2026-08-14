@@ -22,7 +22,7 @@ PREV=$(cat "$LASTRUN" 2>/dev/null || echo 0)
 # count moving while nothing real happens — treat growth that is ONLY noise as
 # quiet, else the idle detector never fires (Jon 2026-08-13).
 NEWBYTES=""
-[ "$SIZE" != "$PREV" ] && NEWBYTES=$(tail -c $((SIZE - PREV)) "$LOG" 2>/dev/null | grep -avE 'notification: (available_commands_update|usage_update)' | grep -av '^$' || true)
+[ "$SIZE" != "$PREV" ] && NEWBYTES=$(tail -c $((SIZE - PREV)) "$LOG" 2>/dev/null | grep -vE 'notification: (available_commands_update|usage_update)' | grep -v '^$' || true)
 if [ "$SIZE" = "$PREV" ] || [ -z "$NEWBYTES" ]; then
   echo "$SIZE" > "$LASTRUN"
   QUIET=$(( $(cat "$STATE/quiet-count.txt" 2>/dev/null || echo 0) + 1 ))

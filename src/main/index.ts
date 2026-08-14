@@ -674,6 +674,17 @@ app.on('before-quit', () => {
   // POST /v1/projects/:id/lifecycle, which no shutdown path calls — dropping
   // the /internal/shutdown round-trip changes nothing there (no regression).
   console.log('[ACP] Quit teardown (synchronous, kill-first)...');
+
+  // Generate session summaries before shutdown (Qwen → kb)
+  console.log('[ACP] Generating session summaries...');
+  try {
+    const { execSync } = require('child_process');
+    const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'shutdown-with-summaries.py');
+    execSync(`python "${scriptPath}" --no-kill`, { stdio: 'inherit', timeout: 90000 });
+  } catch (err) {
+    console.warn('[ACP] Session summary generation failed (non-fatal):', err);
+  }
+
   try { stopSpawnOrchestrator(); } catch (err) { console.error('[ACP] stopSpawnOrchestrator:', err); }
   try { void stopLifecycleHub(); } catch (err) { console.error('[ACP] stopLifecycleHub:', err); }
   try { killAllPty(); } catch (err) { console.error('[ACP] killAllPty:', err); }
