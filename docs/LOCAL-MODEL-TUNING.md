@@ -85,6 +85,23 @@ the answer is at `.message.content`, not `.choices[0].message.content`.
 *Verify the rule with `ollama ps`, not by reading the caller's source — the
 request looked correct in every file.*
 
+**The same defect in `bootbrief.sh` was far worse, and the spot.sh fix did not
+carry to it** (found by the Mac team reviewing `104773a`, 2026-08-15). That
+caller runs the **7b**, so one boot brief on the compat endpoint did this:
+
+| | 7b | 1.5b | nomic | total |
+|---|---|---|---|---|
+| before | ctx 8192, 4.99 GB | 1.29 GB | 0.32 GB | 6.60 GB, 3 models |
+| after ONE compat call | **ctx 32768, 6.25 GB** | **evicted** | **evicted** | 6.25 GB, 1 model |
+| after the fix | ctx 8192, 5.13 GB | | | |
+
+It did not merely bloat the 7b — it **evicted the spotter's model and the
+embedder**. No `nomic-embed-text` means kb recall and every kb write stop until
+it reloads. So a single boot brief could blind the monitor and silently stop
+memory, and **neither of those failures names a boot brief as its cause.** When
+the rig misbehaves in three unrelated-looking ways at once, suspect one caller
+that disagreed about context size.
+
 **Never put a comment inside a shell line-continuation.** Same script, same day:
 a `#` block was inserted between `curl … \` and its `-d …` line. Backslash-newline
 joins the lines, so the `#` commented out the rest of the logical line including
