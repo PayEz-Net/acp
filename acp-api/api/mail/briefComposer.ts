@@ -171,8 +171,18 @@ export async function summariseMails(agent: string, mails: BriefMessage[]): Prom
   // an agent losing its ENTIRE brief to a raw subject list. Deliberately small:
   // if two consecutive attempts both degenerate, something real is wrong and the
   // honest fallback should fire rather than the caller stalling on retries.
+  // BACK OFF BETWEEN ATTEMPTS — measured 2026-08-15, a defect in the first cut
+  // of this retry. AbortController stops US waiting; it does NOT stop Ollama
+  // generating. A retry fired the instant the client gave up therefore arrives
+  // while the model is still busy with the previous prompt and comes back
+  // `ollama HTTP 500`. Observed live: attempt 1 aborted at the 120s ceiling,
+  // attempt 2 500'd immediately, and QAPert-NightHawk got a raw list for nine
+  // messages — one slow generation turned into two failures by the retry meant
+  // to rescue it. The pause lets the server finish and clear.
   const ATTEMPTS = 2;
+  const RETRY_BACKOFF_MS = 15_000;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    if (attempt > 1) await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
     try {
       const raw = await callOllama(prompt);
       // Strip a corrupted tail BEFORE judging the whole, so a good answer with a
