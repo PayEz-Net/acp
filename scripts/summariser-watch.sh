@@ -60,6 +60,49 @@ probe_emb() {
     | python -c "import sys,json;v=json.load(sys.stdin).get('embedding') or [];print(len(v))" 2>/dev/null
 }
 
+# Evict a loaded model instance. `keep_alive: 0` unloads it; the next request
+# reloads from scratch.
+evict() {
+    curl -s --max-time 60 "$OLLAMA/api/generate" \
+        -d "{\"model\":\"$1\",\"prompt\":\"x\",\"keep_alive\":0,\"stream\":false}" >/dev/null 2>&1
+    sleep 3
+}
+
+# DIAGNOSED 2026-08-15, and the first time this fault was ever caught LIVE rather
+# than after it had already cleared. The '@@@@@@@@' degeneracy is a property of
+# the RESIDENT INSTANCE, not of the prompt, the sampler, the card, or the context
+# size. Measured while it was happening:
+#
+#     7b, canary prompt        -> @@@@@@@@@@@@
+#     7b, a different prompt   -> @@@@@@@@@@@@
+#     7b, temperature 0        -> @@@@@@@@@@@@
+#     1.5b, same prompt        -> HEALTHY          (same GPU, same moment)
+#     embedder                 -> 768 dims, fine
+#     7b EVICTED then reloaded -> HEALTHY
+#
+# Three earlier investigations failed because they tested conditions after the
+# instance had already been replaced by an idle unload — they were measuring a
+# healthy model and concluding the hypothesis was falsified. The instance is the
+# variable, and eviction is the recovery.
+#
+# SO THE WATCHDOG NOW REPAIRS ONCE BEFORE IT ALARMS. This is deliberately NOT a
+# retry loop: one eviction, one re-probe. If the model comes back clean the
+# episode is a self-healed blip and is logged as one. If it does NOT, the fault
+# is something else and the alarm must still fire — a self-healer that hides a
+# real outage is worse than no self-healer.
+repair_gen() {
+    say "[watch] GEN unusable — evicting $GEN_MODEL and reloading (instance-level degeneracy, see notes above)"
+    evict "$GEN_MODEL"
+    local after
+    after="$(probe_gen)"
+    if is_bad "$after"; then
+        say "[watch] eviction did NOT fix it -> $(printf '%.60s' "${after:-<empty>}") — this is not the known instance fault"
+        return 1
+    fi
+    say "[watch] SELF-HEALED: $GEN_MODEL clean after eviction. Briefs are working again."
+    return 0
+}
+
 say "[watch] starting. gen=$GEN_MODEL emb=$EMB_MODEL every ${INTERVAL}s, alert after $FAILS_TO_ALERT consecutive failures"
 
 gen_fails=0
@@ -72,7 +115,17 @@ while true; do
         gen_fails=$((gen_fails + 1))
         say "[watch] GEN probe failed ($gen_fails/$FAILS_TO_ALERT) -> $(printf '%.60s' "${out:-<empty>}")"
         if [ "$gen_fails" -ge "$FAILS_TO_ALERT" ]; then
+            # ONE repair attempt per episode, then the alarm stands or stands down.
+            # repairs_this_episode gates it so a model that degenerates again
+            # immediately after an eviction escalates instead of looping — an
+            # endlessly self-healing watchdog reports nothing and fixes nothing.
+            if [ "${repairs_this_episode:-0}" -eq 0 ] && repair_gen; then
+                repairs_this_episode=1
+                gen_fails=0
+                continue
+            fi
             say "[watch] ALERT: $GEN_MODEL is producing unusable output on $gen_fails consecutive probes."
+            [ "${repairs_this_episode:-0}" -gt 0 ] && say "[watch] An eviction was already attempted and did not fix it."
             say "[watch] Mail briefs are falling back to raw subject lists RIGHT NOW."
             say "[watch] Last response: ${out:-<empty>}"
             exit 1
@@ -80,6 +133,10 @@ while true; do
     else
         [ "$gen_fails" -gt 0 ] && say "[watch] GEN recovered after $gen_fails failed probe(s)"
         gen_fails=0
+        # Clean probe ends the episode, so the NEXT degeneracy gets its own
+        # repair attempt. Without this reset the self-heal fires once per
+        # process lifetime and every later episode goes straight to the alarm.
+        repairs_this_episode=0
     fi
 
     # --- embeddings ---
