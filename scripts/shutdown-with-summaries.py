@@ -27,7 +27,11 @@ OLLAMA = os.environ.get("KB_OLLAMA_URL", "http://10.0.0.220:11434")
 # last resort when the fast one collapses on a long transcript. Both local,
 # both free — no account tokens are spent summarising.
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen2.5-coder:7b")
-SUMMARY_FALLBACK_MODEL = os.environ.get("SUMMARY_FALLBACK_MODEL", "gemma4:26b")
+# MUST FIT IN VRAM. Default was gemma4:26b — 17GB on an 8GB card, so it was never
+# resident and its every use evicted the models that were. If you override this,
+# check `ollama list` against `nvidia-smi` first: a model larger than the card does
+# not degrade gracefully, it takes the working models down with it.
+SUMMARY_FALLBACK_MODEL = os.environ.get("SUMMARY_FALLBACK_MODEL", "qwen2.5-coder:7b")
 KB_REMEMBER = Path("E:/Repos/.claude/hooks/kb_remember.py")
 OLLAMA_HEALTH_TIMEOUT = 2  # Don't wait long for health check
 
@@ -137,10 +141,27 @@ Rules:
     # work and most need a handoff. Shrinking the input fixes most of those; the
     # bigger local model catches the rest. Both are free and this runs once, at
     # shutdown, so the only cost of trying harder is a little wall-clock.
+    # RUNG 3 SHRINKS THE INPUT AGAIN — IT DOES NOT REACH FOR A BIGGER MODEL.
+    #
+    # It used to be (gemma4:26b, convo[-14000:], 600). gemma4:26b is SEVENTEEN
+    # GIGABYTES and this box has an 8GB card. It can never be resident, so every
+    # time that rung fired Ollama evicted qwen and nomic, spilled the model to CPU
+    # (measured 73%/27% CPU/GPU), and ground for up to ten minutes PER AGENT.
+    #
+    # Worse than slow: that eviction window is almost certainly the source of the
+    # '@@@@@@@@' degeneracy that has been corrupting mail briefs. A concurrent qwen
+    # generation issued while the card is being torn down for a model that does not
+    # fit returns garbage rather than an error. It reproduced nowhere in isolated
+    # testing precisely because gemma4 was not loaded during those tests.
+    #
+    # A fallback that cannot fit in memory is not a fallback, it is an outage with
+    # a retry's name on it. Rung 3 now attacks the ACTUAL failure mode — rungs 1
+    # and 2 fail on the longest, noisiest transcripts — by cutting the input
+    # further on a model that is already resident.
     attempts = [
         (SUMMARY_MODEL, convo, 180),
         (SUMMARY_MODEL, convo[-9000:], 180),
-        (SUMMARY_FALLBACK_MODEL, convo[-14000:], 600),
+        (SUMMARY_FALLBACK_MODEL, convo[-5000:], 300),
     ]
     for model, text, timeout in attempts:
         try:
