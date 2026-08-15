@@ -31,6 +31,27 @@ LASTRUN="$STATE/last-size.txt"
 
 SIZE=$(stat -c '%s' "$LOG")
 PREV=$(cat "$LASTRUN" 2>/dev/null || echo 0)
+
+# ROTATION DETECTION. This tracks progress by BYTE COUNT against a fixed path,
+# so a rotated log (mv acp-dev.log acp-dev.prev-X.log; new file at the same
+# path) silently breaks it: the new file starts at 0 while $PREV holds the old
+# file's size. Two failure modes, both quiet —
+#   new file SMALLER than PREV  -> SIZE-PREV is NEGATIVE, `tail -c -N` errors,
+#                                  NEWBYTES is empty, and every cycle is scored
+#                                  "quiet" no matter how much the rig logs. The
+#                                  spotter reports OK while blind.
+#   new file LARGER than PREV   -> only the difference is read, so the whole
+#                                  head of the new log is never examined.
+# Measured 2026-08-15: acp-dev.log rotated twice during a restart; tracked size
+# 10815 against a live file of 10985, i.e. the spotter judged the rig on a
+# 170-byte tail of a file it had never seen the start of.
+# A shrink cannot happen by appending, so it is unambiguous: treat it as a new
+# file and read from the beginning.
+if [ "$SIZE" -lt "$PREV" ]; then
+  echo "$(date '+%H:%M') NOTE: log rotated or truncated (${PREV} -> ${SIZE} bytes) — resetting to read from start" >> "$STATUS"
+  PREV=0
+fi
+
 # Noise lines (available_commands_update / usage_update floods) keep the byte
 # count moving while nothing real happens — treat growth that is ONLY noise as
 # quiet, else the idle detector never fires (Jon 2026-08-13).

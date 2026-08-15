@@ -517,7 +517,16 @@ export class SessionManager {
       milestone: row.milestone,
       filesChanged: Array.isArray(row.files_changed) ? row.files_changed : (typeof row.files_changed === 'string' ? JSON.parse(row.files_changed) : []),
       blockers: row.blockers,
-      archived: row.archived === true,
+      // ABSENT != FALSE. The cloud LIST-ALL endpoint
+      // (GET /v1/projects/{id}/kanban/tasks) does not carry `archived` at all,
+      // while the single-task GET does. `row.archived === true` turned that
+      // silence into a confident "not archived" for every card in every list —
+      // so archived cards kept showing on the board and in the sidebar, and the
+      // includeArchived/archived filters below had nothing real to filter on.
+      // MEASURED 2026-08-15: 42 cards archived, single GET reports archived=true
+      // for each, list-all returns 675 rows with archived=true on ZERO of them.
+      // Undefined here means UNKNOWN, and unknown is what we actually have.
+      archived: row.archived === undefined ? undefined : row.archived === true,
       created_at: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at,
