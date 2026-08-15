@@ -25,7 +25,13 @@ ACP_API="${ACP_API:-http://127.0.0.1:3001}"
 # no brief. KB_OLLAMA_URL first so one setting moves the whole rig; OLLAMA kept
 # as an override because this script documented it.
 OLLAMA="${KB_OLLAMA_URL:-${OLLAMA:-http://10.0.0.220:11434}}"
-MODEL="${BOOTBRIEF_MODEL:-qwen2.5-coder:7b}"
+# NOTE THE VARIABLE NAME: this is BOOTBRIEF_MODEL, not BRIEFR_MODEL. Setting
+# BRIEFR_MODEL repoints briefComposer.ts and summariser-watch.sh and does NOT
+# move the boot brief. The defaults are identical today, so nothing breaks — the
+# hazard is someone repointing BRIEFR_MODEL to a different model, seeing four of
+# five callers follow, and concluding the rig is on one model when boot briefs
+# are still pulling the 7b. If you change the model, change both.
+MODEL="${BOOTBRIEF_MODEL:-${BRIEFR_MODEL:-qwen2.5-coder:7b}}"
 
 log() { echo "$(date '+%F %H:%M') $*" >> "$LOGF"; }
 
@@ -93,9 +99,22 @@ Rules: use only the corpus below; cite card/message ids; if a section has nothin
 CORPUS:
 $CORPUS"
 
-RESP=$(curl -s -m 120 "$OLLAMA/v1/chat/completions" -H 'Content-Type: application/json' \
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'$MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':8192},'max_tokens':700,'temperature':0}))" <<< "$PROMPT")" \
-  | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip())" 2>/dev/null)
+# NATIVE /api/chat, NOT the OpenAI-compat /v1/chat/completions. The compat shim
+# silently DISCARDS Ollama's native `options`, so the num_ctx below was decorative:
+# the request looked compliant in the source while the model actually loaded at its
+# 32768 default. Found by the Mac team on 104773a, 2026-08-15 — the same defect was
+# fixed in spot.sh that morning and the fix did not carry here.
+#
+# IT IS WORSE HERE THAN IN THE SPOTTER. This caller runs the 7b (BOOTBRIEF_MODEL),
+# so a 32768 instance is ~6.8GB on an 8GB card and EVICTS the mail composer's 8192
+# instance — the eviction thrash docs/LOCAL-MODEL-TUNING.md attributes the brief
+# failures to. Fixing the spotter freed 0.73GB; this is worth several times that.
+#
+# Three edits move together or not at all: the endpoint, num_predict replacing
+# max_tokens, and .message.content replacing .choices[0].message.content.
+RESP=$(curl -s -m 120 "$OLLAMA/api/chat" -H 'Content-Type: application/json' \
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'$MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'stream':False,'options':{'num_ctx':8192,'num_predict':700,'temperature':0}}))" <<< "$PROMPT")" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['message']['content'].strip())" 2>/dev/null)
 
 # Guard: no model, empty answer, or missing sections => send NOTHING.
 if [ -z "${RESP:-}" ] || ! grep -q '## Move first' <<< "$RESP"; then
