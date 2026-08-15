@@ -18,7 +18,13 @@ STATE="${1:-Q:/repos-stuff/_tmp/spotter}"
 mkdir -p "$STATE"
 LOGF="$STATE/bootbrief.log"
 ACP_API="${ACP_API:-http://127.0.0.1:3001}"
-OLLAMA="${OLLAMA:-http://localhost:11434}"
+# Default to the LAN address, not localhost, and honour the same env var as
+# every other caller. 10.0.0.220 IS the Windows rig, so on that box the two
+# spellings are identical — but a second machine with no local Ollama (the Mac
+# team) gets a connection refused from `localhost` and boots every agent with
+# no brief. KB_OLLAMA_URL first so one setting moves the whole rig; OLLAMA kept
+# as an override because this script documented it.
+OLLAMA="${KB_OLLAMA_URL:-${OLLAMA:-http://10.0.0.220:11434}}"
 MODEL="${BOOTBRIEF_MODEL:-qwen2.5-coder:7b}"
 
 log() { echo "$(date '+%F %H:%M') $*" >> "$LOGF"; }

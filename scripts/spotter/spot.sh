@@ -131,7 +131,18 @@ $DIGEST"
 # docs/LOCAL-MODEL-TUNING.md was being violated by the one caller whose job is
 # noticing trouble. `options` is honoured here; `num_predict` replaces
 # `max_tokens`, and the answer is at .message.content, not .choices[0].
-RESP=$(curl -s -m 90 http://localhost:11434/api/chat -H 'Content-Type: application/json' \
+# HOST IS CONFIGURABLE, and the default is the LAN address, not localhost.
+# 10.0.0.220 IS the Windows rig — so on that box localhost and 10.0.0.220 are
+# the same Ollama. On any OTHER machine sharing this rig (the Mac team has no
+# local Ollama) `localhost` resolves to a box with no model and the spotter
+# goes permanently blind, reporting the same failure every cycle. Same env var
+# as every other caller (KB_OLLAMA_URL) so one setting moves the whole rig.
+#
+# Sharing one card across two machines is SAFE PRECISELY BECAUSE of the
+# num_ctx rule above: same context size means the same loaded instance, so a
+# second rig QUEUES against it rather than loading its own and evicting ours.
+OLLAMA="${KB_OLLAMA_URL:-http://10.0.0.220:11434}"
+RESP=$(curl -s -m 90 "$OLLAMA/api/chat" -H 'Content-Type: application/json' \
   -d "$(python -c "import json,sys; print(json.dumps({'model':'$SPOT_MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'stream':False,'options':{'num_ctx':8192,'num_predict':120,'temperature':0}}))" <<< "$PROMPT")" \
   | python -c "import json,sys; print(json.load(sys.stdin)['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
 
