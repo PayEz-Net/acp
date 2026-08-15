@@ -93,7 +93,16 @@ Recent log lines:
 $DIGEST"
 
 RESP=$(curl -s -m 90 http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' \
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'qwen2.5-coder:7b','messages':[{'role':'user','content':sys.stdin.read()}],'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
+# NUM_CTX MUST MATCH EVERY OTHER CALLER ON THIS BOX (16384).
+# Ollama keeps a SEPARATE loaded instance per context size. qwen2.5-coder:7b's
+# default is 32768, so a caller that omits num_ctx loads a 6.8GB instance and
+# EVICTS the 5.5GB 16384 instance the mail-brief composer uses — which then
+# reloads and evicts this one back. On an 8GB card the two thrash, and requests
+# issued during a swap come back as a timeout or a bare HTTP 500. Measured
+# 2026-08-15: brief failures for two agents began the minute this script was
+# restarted. If you change this number, change it in briefComposer.ts and
+# shutdown-with-summaries.py in the same commit.
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'qwen2.5-coder:7b','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':16384},'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
   | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
 
 [ -n "${RESP:-}" ] || RESP="ALERT: local model call failed — spotter is blind"
