@@ -49,3 +49,16 @@ src/main/env.generated.ts
 release-win/
 release-smoke/
 acp-api/data/*.sqlite*
+
+# Spotter RUNTIME STATE — per-machine, never shared.
+# These were tracked. With two rigs sharing this repo (Windows + the Mac team)
+# that is a live collision: both write every cycle, so both trees are
+# permanently dirty and conflict on pull — and if either side commits, the
+# other's spotter inherits a BYTE COUNT TAKEN FROM A DIFFERENT MACHINE'S LOG.
+# spot.sh tracks progress by comparing that count to the local file size, so an
+# inherited number makes it read a bogus delta or go silently blind. A git pull
+# should never be able to blind the monitor.
+scripts/spotter/last-size.txt
+scripts/spotter/quiet-count.txt
+scripts/spotter/spotter-alert.txt
+scripts/spotter/spotter-status.log
