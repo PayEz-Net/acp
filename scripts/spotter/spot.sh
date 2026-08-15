@@ -105,18 +105,35 @@ $BA_LAST
 Recent log lines:
 $DIGEST"
 
-RESP=$(curl -s -m 90 http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' \
-# NUM_CTX MUST MATCH EVERY OTHER CALLER ON THIS BOX (16384).
+# NUM_CTX MUST MATCH EVERY OTHER CALLER ON THIS BOX (8192).
 # Ollama keeps a SEPARATE loaded instance per context size. qwen2.5-coder:7b's
 # default is 32768, so a caller that omits num_ctx loads a 6.8GB instance and
-# EVICTS the 5.5GB 16384 instance the mail-brief composer uses — which then
-# reloads and evicts this one back. On an 8GB card the two thrash, and requests
-# issued during a swap come back as a timeout or a bare HTTP 500. Measured
+# EVICTS the instance the mail-brief composer uses — which then reloads and
+# evicts this one back. On an 8GB card the two thrash, and requests issued
+# during a swap come back as a timeout or a bare HTTP 500. Measured
 # 2026-08-15: brief failures for two agents began the minute this script was
 # restarted. If you change this number, change it in briefComposer.ts and
 # shutdown-with-summaries.py in the same commit.
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'$SPOT_MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':8192},'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
-  | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
+#
+# KEEP THIS COMMENT ABOVE THE ASSIGNMENT, NOT INSIDE THE curl CONTINUATION.
+# It used to sit between `curl ... \` and `-d ...`. A backslash-newline joins
+# the next line onto the command, so a `#` line there comments out the REST of
+# the logical line — including the -d body. curl then issued a bodyless GET,
+# Ollama answered 405 Method Not Allowed, and every verdict for four hours read
+# "ALERT: unparseable verdict: 405 method not allowed". The spotter was blind
+# and its alarm was indistinguishable from noise. Do not put a comment inside a
+# line-continuation.
+#
+# NATIVE /api/chat, NOT THE OPENAI-COMPAT /v1/chat/completions. The compat
+# endpoint silently IGNORES Ollama's native `options`, so num_ctx never applied
+# and this model loaded at its 32768 default — measured 2026-08-15: 2.02GB
+# instead of ~1GB, with the card already at 7.33GB of 8GB. The rule in
+# docs/LOCAL-MODEL-TUNING.md was being violated by the one caller whose job is
+# noticing trouble. `options` is honoured here; `num_predict` replaces
+# `max_tokens`, and the answer is at .message.content, not .choices[0].
+RESP=$(curl -s -m 90 http://localhost:11434/api/chat -H 'Content-Type: application/json' \
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'$SPOT_MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'stream':False,'options':{'num_ctx':8192,'num_predict':120,'temperature':0}}))" <<< "$PROMPT")" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
 
 [ -n "${RESP:-}" ] || RESP="ALERT: local model call failed — spotter is blind"
 case "$RESP" in

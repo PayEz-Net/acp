@@ -4,6 +4,11 @@ The rig runs three local-model services against **one 8 GB card** (RTX 3070
 laptop, `10.0.0.220:11434`). It bursts: .NET builds and mail floods arrive
 together. Everything below exists because a specific thing broke.
 
+**`10.0.0.220` is this laptop.** `localhost:11434` and `10.0.0.220:11434` are the
+same Ollama and the same card — callers use both spellings and neither is wrong.
+There is no second GPU box to fall back to, which is why every rule here is about
+sharing one 8 GB card rather than distributing load.
+
 ## The one rule that matters
 
 > **Every Ollama caller on this box MUST request the same `num_ctx`.**
@@ -67,6 +72,27 @@ two failures. 15 s pause before the second attempt.
 **Check `ollama list` against `nvidia-smi` before choosing any model.** A model
 larger than the card does not degrade gracefully; it takes the working models
 down with it.
+
+**`options` only works on Ollama's NATIVE endpoints.** `/v1/chat/completions` is
+the OpenAI-compatibility shim and it **silently ignores `options`** — including
+`num_ctx`. Sending it there is not an error and returns a normal answer, so the
+caller looks compliant while loading the model at its 32768 default. Measured
+2026-08-15: `spot.sh` had been posting `options.num_ctx: 8192` to the compat
+endpoint and the 1.5b was resident at **ctx 32768, 2.02 GB**; moved to
+`/api/chat` it became **ctx 8192, 1.29 GB**, and the card went 7.33 GB → 6.60 GB.
+Use `/api/chat` or `/api/generate`; note `num_predict` replaces `max_tokens` and
+the answer is at `.message.content`, not `.choices[0].message.content`.
+*Verify the rule with `ollama ps`, not by reading the caller's source — the
+request looked correct in every file.*
+
+**Never put a comment inside a shell line-continuation.** Same script, same day:
+a `#` block was inserted between `curl … \` and its `-d …` line. Backslash-newline
+joins the lines, so the `#` commented out the rest of the logical line including
+the body. curl issued a bodyless GET, Ollama answered `405 Method Not Allowed`,
+and the spotter emitted `ALERT: unparseable verdict: 405 method not allowed`
+every five minutes for four hours. *It failed loudly and was still ignored,
+because a monitor that cries the same thing on a timer is indistinguishable from
+one that is broken.* `bash -n` does not catch this — the script is valid.
 
 ## Diagnosing
 
