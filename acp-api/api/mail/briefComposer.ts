@@ -138,6 +138,13 @@ async function callOllama(prompt: string): Promise<string> {
  * honest where a silently dropped one is not.
  */
 export async function summariseMails(agent: string, mails: BriefMessage[]): Promise<{ summary: string; modelOk: boolean }> {
+  // The budget SCALES WITH THE BATCH. A flat cap was the same 200 words whether the
+  // batch was 2 messages or 18, so a busy agent's brief got compressed hardest at
+  // exactly the moment it carried the most decisions — the failure is invisible,
+  // because a 200-word summary of 18 messages reads perfectly well and simply
+  // omits things. Floor keeps a 1-2 message brief from being padded into a report.
+  const wordBudget = Math.min(400, Math.max(120, mails.length * 35));
+
   const prompt =
     `You are briefing ${agent}, a software agent returning to their inbox after ` +
     `heads-down work. Turn these ${mails.length} messages into ONE action brief.\n\n` +
@@ -146,22 +153,48 @@ export async function summariseMails(agent: string, mails: BriefMessage[]): Prom
     '- Name the sender and the message id for anything that needs a reply.\n' +
     '- Keep decisions and blockers; drop pleasantries, acks and status noise.\n' +
     '- If nothing needs action, say so in one line.\n' +
-    '- No preamble, no sign-off. Under 200 words.\n\n' +
+    `- No preamble, no sign-off. Under ${wordBudget} words.\n\n` +
     `MESSAGES:\n${renderMails(mails)}`;
 
-  try {
-    const raw = await callOllama(prompt);
-    // Strip a corrupted tail BEFORE judging the whole, so a good answer with a
-    // bad ending is salvaged instead of thrown away.
-    const { text, truncated } = stripRepetitionRun(raw ?? '');
-    if (truncated) {
-      console.warn(`[mailBrief] ${agent}: model emitted a repetition run — brief truncated at ${text.length} chars`);
+  // RETRY, because the observed failure is TRANSIENT and undiagnosed.
+  //
+  // 2026-08-14: a brief to the observer came back as the raw-list fallback. The
+  // model was up and answering, but returned a run of '@' to a trivial prompt —
+  // and the response carried `done:false` on a NON-STREAMING call, which is a
+  // generation that broke mid-flight rather than a model emitting bad tokens.
+  // Two root-cause theories (num_ctx too large; VRAM contention with the
+  // embedder) were each tested and FALSIFIED — the exact failing conditions were
+  // reproduced deliberately and produced clean output.
+  //
+  // So this is not a fix for a known cause. It is a second roll of a die that
+  // came up bad once, and it is worth taking because the cost of one bad roll is
+  // an agent losing its ENTIRE brief to a raw subject list. Deliberately small:
+  // if two consecutive attempts both degenerate, something real is wrong and the
+  // honest fallback should fire rather than the caller stalling on retries.
+  const ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const raw = await callOllama(prompt);
+      // Strip a corrupted tail BEFORE judging the whole, so a good answer with a
+      // bad ending is salvaged instead of thrown away.
+      const { text, truncated } = stripRepetitionRun(raw ?? '');
+      if (truncated) {
+        console.warn(`[mailBrief] ${agent}: model emitted a repetition run — brief truncated at ${text.length} chars`);
+      }
+      if (text && !isDegenerate(text)) {
+        if (attempt > 1) console.warn(`[mailBrief] ${agent}: recovered on attempt ${attempt}`);
+        return { summary: text, modelOk: true };
+      }
+      console.warn(`[mailBrief] ${agent}: local model returned ${raw ? 'degenerate' : 'empty'} output (attempt ${attempt}/${ATTEMPTS})`);
+    } catch (err: any) {
+      console.warn(`[mailBrief] ${agent}: summariser unreachable (${OLLAMA_MODEL} @ ${OLLAMA_URL}): ${err.message} (attempt ${attempt}/${ATTEMPTS})`);
     }
-    if (text && !isDegenerate(text)) return { summary: text, modelOk: true };
-    console.warn(`[mailBrief] ${agent}: local model returned ${raw ? 'degenerate' : 'empty'} output`);
-  } catch (err: any) {
-    console.warn(`[mailBrief] ${agent}: summariser unreachable (${OLLAMA_MODEL} @ ${OLLAMA_URL}): ${err.message}`);
   }
+
+  // Every attempt failed. This line is the WATCHDOG'S HOOK — scripts/summariser-watch.sh
+  // greps for this exact token, so the operator learns from a monitor rather than
+  // from an agent receiving a degraded brief. Do not reword it without updating that.
+  console.error(`[mailBrief] SUMMARISER_DOWN agent=${agent} mails=${mails.length} model=${OLLAMA_MODEL} url=${OLLAMA_URL}`);
 
   const raw = mails
     .map((m) => `- [id ${m.message_id ?? '?'}] ${m.from_agent ?? '?'}: ${m.subject ?? '(no subject)'}`)
