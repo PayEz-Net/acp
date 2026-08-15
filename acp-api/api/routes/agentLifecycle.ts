@@ -223,6 +223,51 @@ export default function agentLifecycleRoutes(deps: LifecycleDeps): Router {
     }
   });
 
+  // POST /v1/lifecycle/agents/:name/inject  { text }
+  // Delivery leg for ProjectBriefr (scripts/project-briefer.py): the router
+  // batches an agent's mail while it works and hands over ONE brief at a
+  // natural breakpoint. N push notices cost N turns and N context reloads —
+  // that is the burn documented in
+  // docs/a_very_important_hard_lesson_learned_about_ai_rigs.md.
+  //
+  // Deliberately NOT routed through the backoff registry the way kill/restart
+  // are: `backoff` tracks agents THIS sidecar spawned, and a brief must also
+  // reach an agent spawned by the renderer or recovered across a sidecar
+  // restart. Electron owns the live-session truth, so ask Electron and relay
+  // its answer verbatim.
+  //
+  // The runtime tri-state survives the hop intact (200 delivered / 202 deferred
+  // / 404 no live session / 502 failed). A deferred brief is PARKED BY DESIGN,
+  // not lost: the caller must keep it and re-offer, never mark it read.
+  router.post('/:name/inject', async (req: Request, res: Response) => {
+    const name = req.params.name as string;
+    const text = req.body?.text;
+
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      res.status(400).json(
+        error('VALIDATION_ERROR', 'text is required and must be a non-empty string', 'agent_inject', (req as any).requestId)
+      );
+      return;
+    }
+
+    try {
+      const result = await callElectron(cfg, callbackPort, '/internal/mail/inject', {
+        agentName: name,
+        text,
+      });
+      // Relay Electron's status verbatim. success() on a 202 would tell the
+      // router "delivered" for mail that is still sitting undelivered.
+      res.status(result.status).json(
+        success({ agent_name: name, result: result.data?.result ?? 'unknown' }, 'agent_inject', (req as any).requestId)
+      );
+    } catch (err: any) {
+      const msg = err.name === 'AbortError' ? 'Electron callback timeout' : err.message;
+      res.status(502).json(
+        error('INJECT_FAILED', `Inject failed: ${msg}`, 'agent_inject', (req as any).requestId)
+      );
+    }
+  });
+
   // POST /v1/lifecycle/agents/:name/restart
   router.post('/:name/restart', async (req: Request, res: Response) => {
     const name = req.params.name as string;

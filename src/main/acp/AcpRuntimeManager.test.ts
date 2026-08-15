@@ -564,6 +564,41 @@ describe('AcpRuntimeManager', () => {
     manager.kill();
   });
 
+  it('queues a steer rejected with the newer adapter busy wording ("another turn is already in progress")', async () => {
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-newbusy' });
+    await manager.start();
+
+    let settleTurn: (value: unknown) => void = () => {};
+    mockState.setResponse('session/prompt', new Promise<unknown>((resolve) => { settleTurn = resolve; }));
+    const first = manager.prompt('first');
+    await Promise.resolve();
+
+    // Newer adapter wording for the same -32600 busy reject — must take the
+    // queue path, NOT the generic [Send failed] path.
+    mockState.setResponse(
+      'session/prompt',
+      new Error('Invalid request: another turn is already in progress (code -32600)'),
+    );
+    const second = manager.prompt('second');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events.some((e) => e.update.sessionUpdate === 'prompt_queued')).toBe(true);
+    expect(events.find((e) => e.update.sessionUpdate === 'error')).toBeUndefined();
+
+    mockState.setResponse('session/prompt', { stopReason: 'end_turn' });
+    settleTurn({ stopReason: 'end_turn' });
+    await first;
+    await second;
+    const texts = getProcess().requests
+      .filter((r) => r.method === 'session/prompt')
+      .map((r) => (r.params as { prompt: Array<{ text: string }> }).prompt[0].text);
+    expect(texts).toContain('second');
+
+    manager.kill();
+  });
+
   it('falls back to queueing when the runtime busy-rejects a steer (slice B backstop)', async () => {
     mockState.setResponse('initialize', {});
     mockState.setResponse('session/new', { sessionId: 'sess-serial' });
@@ -2118,12 +2153,18 @@ describe('AcpRuntimeManager', () => {
     expect(getProcess().options.args).toContain('kimi-code/k3');
   });
 
-  it('does not inject thinking effort for non-k3 models', async () => {
+  // Effort is NOT k3-only. This test used to assert the opposite, encoding our
+  // own K3_FAMILY_MODELS gate as if it were a vendor constraint. Measured in
+  // the shipped kimi.exe (2026-08-11): resolveKimiEnvThinkingEffort gates only
+  // on "is a Kimi provider" and "thinking is not off", and the vendor comment
+  // says it "intentionally bypasses support_efforts". The gate cost us two
+  // agents stuck at the model DEFAULT thinking budget with no way to lower it.
+  it('injects thinking effort for non-k3 kimi models too', async () => {
     manager = new AcpRuntimeManager('rt-k27-effort', getProviderConfig('kimi'), {
       agentName: 'NextPert',
       workDir: '/repo',
       projectId: 42,
-      effort: 'high',
+      effort: 'low',
       modelOverride: 'kimi-for-coding',
     });
     manager.on('event', (payload: AcpEventPayload) => events.push(payload));
@@ -2132,8 +2173,25 @@ describe('AcpRuntimeManager', () => {
 
     await manager.start();
 
-    expect(getProcess().options.env).not.toHaveProperty('KIMI_MODEL_THINKING_EFFORT');
+    expect(getProcess().options.env?.KIMI_MODEL_THINKING_EFFORT).toBe('low');
     expect(getProcess().options.args).toContain('kimi-code/kimi-for-coding');
+  });
+
+  it('skips an effort value kimi does not accept, rather than spawning it', async () => {
+    manager = new AcpRuntimeManager('rt-bad-effort', getProviderConfig('kimi'), {
+      agentName: 'NextPert',
+      workDir: '/repo',
+      projectId: 42,
+      effort: 'medium',
+      modelOverride: 'kimi-for-coding',
+    });
+    manager.on('event', (payload: AcpEventPayload) => events.push(payload));
+    mockState.setResponse('initialize', {});
+    mockState.setResponse('session/new', { sessionId: 'sess-bad' });
+
+    await manager.start();
+
+    expect(getProcess().options.env).not.toHaveProperty('KIMI_MODEL_THINKING_EFFORT');
   });
 
   it('emits spawn_info with the exact launch command (pane banner)', async () => {

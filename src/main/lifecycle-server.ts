@@ -7,7 +7,7 @@
  */
 
 import http from 'http';
-import { spawnAgent, killTerminal, resizeTerminal, getAgentSessionByAgent, getActiveTerminals, setOnPtyExit, WorkDirError, RuntimeNotSetError } from './pty';
+import { spawnAgent, killTerminal, resizeTerminal, getAgentSessionByAgent, getActiveTerminals, setOnPtyExit, injectMailToAgent, WorkDirError, RuntimeNotSetError } from './pty';
 import { getLocalSecret } from './api-server';
 import { getSettings } from './store';
 import { narrowClaudeEffort } from '../shared/types';
@@ -248,6 +248,38 @@ export async function startLifecycleServer(): Promise<number | null> {
 
       if (url === '/internal/pty/list' && req.method === 'GET') {
         sendJson(res, 200, { terminals: getActiveTerminals() });
+        return;
+      }
+
+      // POST /internal/mail/inject — deliver one composed notice into an
+      // agent's live ACP turn. This is the delivery leg of ProjectBriefr: the
+      // router batches an agent's mail while it works and hands over ONE brief
+      // at a natural breakpoint, instead of N push notices costing N turns
+      // (see docs/a_very_important_hard_lesson_learned_about_ai_rigs.md).
+      //
+      // The runtime's tri-state is passed through UNCHANGED and the HTTP status
+      // encodes it, because the router's next move differs for each:
+      //   200 delivered  — landed in a turn; the caller may mark the mail read.
+      //   202 deferred   — agent mid-turn, parked BY DESIGN. Not an error. The
+      //                    caller must NOT mark it read; re-offer next sweep.
+      //   404 no-runtime — no live ACP session for that name (unspawned).
+      //   502 failed     — runtime genuinely unreachable.
+      // Collapsing 202 into 200 would let a router bin mail it never delivered.
+      if (url === '/internal/mail/inject' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const agentName = (body.agentName as string | undefined)?.trim();
+        const text = body.text as string | undefined;
+        if (!agentName || typeof text !== 'string' || text.trim().length === 0) {
+          sendJson(res, 400, { error: 'agentName and non-empty text required' });
+          return;
+        }
+        const result = await injectMailToAgent(agentName, text);
+        const status = result === 'delivered' ? 200
+          : result === 'deferred' ? 202
+          : result === 'no-runtime' ? 404
+          : 502;
+        console.log(`[Lifecycle] mail inject -> ${agentName}: ${result} (${text.length} chars)`);
+        sendJson(res, status, { result, agent_name: agentName });
         return;
       }
 

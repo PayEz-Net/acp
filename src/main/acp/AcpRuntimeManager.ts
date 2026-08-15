@@ -18,7 +18,7 @@ import { AcpProcess, type AcpJsonRpcMessage } from './AcpProcess';
 import { sanitizeAcpDisplayText } from '../../shared/acpSanitize';
 import {
   getProviderConfig,
-  kimiK3ThinkingEffortEnv,
+  kimiThinkingEffortEnv,
   kimiSpawnArgs,
   ModelNotRecognizedError,
   type ProviderConfig,
@@ -176,6 +176,13 @@ export class AcpRuntimeManager extends EventEmitter {
   // fresh CLI straight into the same wall (the restart churn IS the bog-down).
   private cancelGraceTicksLeft: number | null = null;
   private stalledTurnNudgePending = false;
+  // Consecutive watchdog-stalled turns whose session/cancel WAS honored. That
+  // pattern means the runtime answers cancels but never produces output (QAPert
+  // 2026-08-13: 4+ cancel→nudge→silent loops overnight) — the unanswered-cancel
+  // restart path never fires, so the streak escalates to a restart instead.
+  // Any settle that is NOT a stalled-cancel (normal end_turn, human-backstop
+  // cancel) proves the runtime responds and resets the streak.
+  private silentCancelStreak = 0;
   private lastThrottleAt: number | null = null;
   private throttleExtensions = 0;
 
@@ -538,12 +545,12 @@ export class AcpRuntimeManager extends EventEmitter {
       CI: 'true',
     };
     // K3 thinking effort rides effort_override via env (no CLI flag exists).
-    const k3Effort = kimiK3ThinkingEffortEnv(
+    const kimiEffort = kimiThinkingEffortEnv(
       this.options.modelOverride ?? null,
       this.options.effort,
       (msg) => console.warn(`[ACP ${this.options.agentName}] ${msg}`),
     );
-    if (k3Effort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = k3Effort;
+    if (kimiEffort) spawnEnv.KIMI_MODEL_THINKING_EFFORT = kimiEffort;
     // Effort rides an ENV VAR, so it never appears in the spawn command line the
     // way --model does. Until this line existed, the ONLY output was a warning on
     // an INVALID value — which meant "no warning" read identically for "applied
@@ -552,10 +559,10 @@ export class AcpRuntimeManager extends EventEmitter {
     // as evidence instead of inference.
     console.log(
       `[ACP ${this.options.agentName}] thinking effort: ` +
-      (k3Effort
-        ? `${k3Effort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
+      (kimiEffort
+        ? `${kimiEffort} (KIMI_MODEL_THINKING_EFFORT, model=${this.options.modelOverride})`
         : `NONE INJECTED (model=${this.options.modelOverride ?? 'inherit'}, effort_override=${this.options.effort ?? 'unset'})` +
-          ` — effort applies only to k3-family models explicitly overridden`),
+          ` — effort needs an explicit kimi model override to apply`),
     );
     this.process = new AcpProcess({
       command,
@@ -571,7 +578,7 @@ export class AcpRuntimeManager extends EventEmitter {
     // re-resolved overrides is visible too.
     this.emitAcpEvent({
       sessionUpdate: 'spawn_info',
-      command: `${command} ${args.join(' ')}${k3Effort ? `  KIMI_MODEL_THINKING_EFFORT=${k3Effort}` : ''}`,
+      command: `${command} ${args.join(' ')}${kimiEffort ? `  KIMI_MODEL_THINKING_EFFORT=${kimiEffort}` : ''}`,
     });
 
     if (this.provider.autoApprove) {
@@ -1222,6 +1229,22 @@ export class AcpRuntimeManager extends EventEmitter {
         if (this.stalledTurnNudgePending) {
           this.stalledTurnNudgePending = false;
           this.cancelGraceTicksLeft = null;
+          this.silentCancelStreak++;
+          if (this.silentCancelStreak >= MAX_SILENT_CANCELS) {
+            // The runtime keeps HONORING cancels but never producing output:
+            // cancel → nudge → 5 min silence → cancel, forever (QAPert's
+            // overnight loop, 2026-08-13). The unanswered-cancel restart path
+            // never fires for this wedge, so the streak escalates instead.
+            // skipResumeOnce: a session that hangs on every turn is likely
+            // poisoned — fall back to session/new for this start.
+            const message = `${this.options.agentName} honored ${this.silentCancelStreak} consecutive stall cancels without producing output; restarting runtime with a fresh session`;
+            console.warn(`[ACP ${this.options.agentName}] ${message}`);
+            this.emitAcpEvent({ sessionUpdate: 'error', sessionId, error: message });
+            this.silentCancelStreak = 0;
+            this.skipResumeOnce = true;
+            void this.restart();
+            return;
+          }
           // The stall honored the cancel: same process, session and context
           // intact — NO restart. Tell the agent its turn was cut and to
           // report + continue (Jon's rule: never let an agent wonder why its
@@ -1231,6 +1254,11 @@ export class AcpRuntimeManager extends EventEmitter {
             resolve: () => {},
             kind: 'system',
           });
+        } else {
+          // A settle that is not a stalled-cancel (normal end_turn, or a
+          // human-backstop cancel that produced a reply) proves the runtime
+          // answers — the silent-stall streak resets.
+          this.silentCancelStreak = 0;
         }
         this.drainPromptQueue();
       })
@@ -1625,7 +1653,23 @@ export class AcpRuntimeManager extends EventEmitter {
     // per tool-progress tick and flood the terminal. One-shot lifecycle
     // updates (tool_call, turn_complete, plan, ...) stay logged.
     if (!NOISY_SESSION_UPDATES.has(sessionUpdate)) {
-      console.log(`[ACP ${this.options.agentName}] notification: ${sessionUpdate}`);
+      // Name the tool, don't just say "tool_call". Logging the bare update TYPE
+      // makes this line structurally unable to answer the questions we actually
+      // ask of it: on 2026-08-11 it was used to check whether agents spawn
+      // subagents (deciding whether kimi's secondary-model tiering is worth
+      // enabling) and it could only ever have returned "no" -- it never carried
+      // a tool name to match against. An absence-grep against an instrument
+      // that cannot record the thing passes forever.
+      // Cheap, and it is also the per-tool visibility any cost analysis needs.
+      const toolName = typeof (updateParams as Record<string, unknown>).title === 'string'
+        ? (updateParams as Record<string, unknown>).title as string
+        : typeof (updateParams as Record<string, unknown>).toolName === 'string'
+          ? (updateParams as Record<string, unknown>).toolName as string
+          : undefined;
+      console.log(
+        `[ACP ${this.options.agentName}] notification: ${sessionUpdate}` +
+        (toolName ? ` (${toolName})` : ''),
+      );
     }
 
     switch (sessionUpdate) {
@@ -1926,6 +1970,13 @@ const HUMAN_WAITING_NUDGE =
  */
 /** Ticks (× the 15s watchdog interval) a cancelled stall gets to settle before the kill+restart escalates. */
 const WATCHDOG_CANCEL_GRACE_TICKS = 2;
+/**
+ * Consecutive honored-but-silent stall cancels before the ladder restarts
+ * anyway: the runtime answers session/cancel yet never emits output, so the
+ * unanswered-cancel path (above) never fires. 3 strikes ≈ 15+ min of a wedge
+ * that otherwise loops cancel→nudge→silence forever (QAPert 2026-08-13).
+ */
+const MAX_SILENT_CANCELS = 3;
 /** How long stderr throttle evidence (429/quota/backoff) stays fresh enough to extend grace. */
 const THROTTLE_EVIDENCE_FRESH_MS = 10 * 60_000;
 /**
@@ -1977,6 +2028,10 @@ function isAgentBusyError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return (
     /turn\.agent_busy/i.test(message) ||
-    /cannot launch a new turn while another turn/i.test(message)
+    /cannot launch a new turn while another turn/i.test(message) ||
+    // Newer adapter wording (kimi CLI ≥0.32.x-era): same -32600 busy reject,
+    // different text. Unmatched, every mid-turn human message hard-fails
+    // [Send failed] instead of queueing (Jon 2026-08-13).
+    /another turn is already in progress/i.test(message)
   );
 }

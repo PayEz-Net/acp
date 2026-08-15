@@ -449,6 +449,10 @@ async function withSessionSummary<T>(profile: T, agentName: string): Promise<T> 
     const found = await getLatestSessionSummary(agentName);
     const summary = found?.summary?.trim();
     if (!summary) return profile;
+
+    // Session summary found (structured: overall summary + detailed tails).
+    console.log(`[agents] session resumed for ${agentName}: ${Math.round(summary.length / 1024)}KB summary`);
+
     const p = profile as Record<string, unknown>;
     const existing = typeof p.profile === 'string' ? p.profile : '';
     const section = [
@@ -456,7 +460,7 @@ async function withSessionSummary<T>(profile: T, agentName: string): Promise<T> 
       '',
       '## Where you left off',
       '',
-      'This is a stored summary of a PREVIOUS session, not live state. The rig has restarted and other agents have moved since. Verify anything here against the live system before acting on it.',
+      'This is a stored summary of a PREVIOUS session (overall summary + detailed tails), not live state. The rig has restarted and other agents have moved since. Verify anything here against the live system before acting on it.',
       '',
       summary,
       '',

@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-# ACP spotter — local-model edition (qwen2.5-coder:7b via Ollama).
+# ACP spotter — local-model edition (light model via Ollama; see SPOT_MODEL).
 # Mechanical digest in bash; the model only judges the digest. Cheap by design:
 # no LLM call when the log hasn't moved since the last check.
 #
 # Usage: spot.sh <app-log-path> [state-dir]
 # Verdicts append to <state-dir>/spotter-status.log; ALERTs also to spotter-alert.txt.
+
+# MODEL: the spotter runs a LIGHT model on purpose (qwen2.5-coder:1.5b, ~1GB).
+# Its job is judging log health, not summarising mail — and on an 8GB card it
+# was competing for the same 7b instance the mail-brief composer needs. Two
+# callers, one card, and the loser gets a timeout or a bare HTTP 500 (measured
+# 2026-08-15: brief failures for two agents began when this script restarted).
+# A separate 1GB model coexists with the 7b instead of evicting it.
+#
+# NOT the `1.5b-base` variant that was already on the box: base models continue
+# text rather than follow instructions, and this script needs a parseable
+# verdict. Its log already carries "ALERT: unparseable verdict" lines; a base
+# model would make that permanent.
+SPOT_MODEL="${SPOT_MODEL:-qwen2.5-coder:1.5b}"
 
 set -u
 LOG="${1:?usage: spot.sh <app-log-path> [state-dir]}"
@@ -18,10 +31,45 @@ LASTRUN="$STATE/last-size.txt"
 
 SIZE=$(stat -c '%s' "$LOG")
 PREV=$(cat "$LASTRUN" 2>/dev/null || echo 0)
-if [ "$SIZE" = "$PREV" ]; then
-  echo "$(date '+%H:%M') OK: no new output since last check" >> "$STATUS"
+# Noise lines (available_commands_update / usage_update floods) keep the byte
+# count moving while nothing real happens — treat growth that is ONLY noise as
+# quiet, else the idle detector never fires (Jon 2026-08-13).
+NEWBYTES=""
+[ "$SIZE" != "$PREV" ] && NEWBYTES=$(tail -c $((SIZE - PREV)) "$LOG" 2>/dev/null | grep -vE 'notification: (available_commands_update|usage_update)' | grep -v '^$' || true)
+if [ "$SIZE" = "$PREV" ] || [ -z "$NEWBYTES" ]; then
+  echo "$SIZE" > "$LASTRUN"
+  QUIET=$(( $(cat "$STATE/quiet-count.txt" 2>/dev/null || echo 0) + 1 ))
+  echo "$QUIET" > "$STATE/quiet-count.txt"
+  if [ "$QUIET" -ge 3 ]; then
+    # App still listening but nothing moving = the team went idle (Jon's main
+    # ask: know when BAPert/project stalls). App down = just park.
+    if netstat -ano | grep -qE ':40030 .*LISTENING'; then
+      echo "$(date '+%H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$STATUS"
+      echo "$(date '+%F %H:%M') ALERT: project idle — no agent output for $((QUIET * 5))+ min while the app is up" >> "$ALERTS"
+      # Jon: "if I'm not around, mail BAPert and nudge him along." One self-mail
+      # per idle episode; the flag clears when output resumes.
+      if [ ! -f "$STATE/idle-nudged.flag" ]; then
+        NUDGE=$(curl -s -m 10 -X POST "http://127.0.0.1:3001/v1/mail/send" \
+          -H "Content-Type: application/json" -H "X-ACP-Agent: BAPert" \
+          -d '{"from_agent":"BAPert","to":["BAPert"],"subject":"SPOTTER NUDGE: project idle 15+ min","body":"No agent output for 15+ minutes while the app is up (local spotter noticing, Jon away). Check the board, deal the next card, and get the lanes moving.","priority":"high"}' 2>/dev/null)
+        if echo "$NUDGE" | grep -q '"success":true'; then
+          echo "$(date '+%H:%M') nudged BAPert via self-mail (idle episode)" >> "$STATUS"
+          touch "$STATE/idle-nudged.flag"
+        else
+          echo "$(date '+%H:%M') ALERT: nudge mail FAILED: $(echo "$NUDGE" | head -c 120)" >> "$STATUS"
+          echo "$(date '+%F %H:%M') ALERT: nudge mail FAILED: $(echo "$NUDGE" | head -c 120)" >> "$ALERTS"
+        fi
+      fi
+    else
+      echo "$(date '+%H:%M') OK: app down, watch parked" >> "$STATUS"
+    fi
+  else
+    echo "$(date '+%H:%M') OK: no new output since last check" >> "$STATUS"
+  fi
   exit 0
 fi
+rm -f "$STATE/idle-nudged.flag"
+echo 0 > "$STATE/quiet-count.txt"
 echo "$SIZE" > "$LASTRUN"
 
 # --- mechanical digest (last 300 lines, tool-call noise removed) ---
@@ -57,9 +105,35 @@ $BA_LAST
 Recent log lines:
 $DIGEST"
 
-RESP=$(curl -s -m 90 http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' \
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'qwen2.5-coder:7b','messages':[{'role':'user','content':sys.stdin.read()}],'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
-  | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
+# NUM_CTX MUST MATCH EVERY OTHER CALLER ON THIS BOX (8192).
+# Ollama keeps a SEPARATE loaded instance per context size. qwen2.5-coder:7b's
+# default is 32768, so a caller that omits num_ctx loads a 6.8GB instance and
+# EVICTS the instance the mail-brief composer uses — which then reloads and
+# evicts this one back. On an 8GB card the two thrash, and requests issued
+# during a swap come back as a timeout or a bare HTTP 500. Measured
+# 2026-08-15: brief failures for two agents began the minute this script was
+# restarted. If you change this number, change it in briefComposer.ts and
+# shutdown-with-summaries.py in the same commit.
+#
+# KEEP THIS COMMENT ABOVE THE ASSIGNMENT, NOT INSIDE THE curl CONTINUATION.
+# It used to sit between `curl ... \` and `-d ...`. A backslash-newline joins
+# the next line onto the command, so a `#` line there comments out the REST of
+# the logical line — including the -d body. curl then issued a bodyless GET,
+# Ollama answered 405 Method Not Allowed, and every verdict for four hours read
+# "ALERT: unparseable verdict: 405 method not allowed". The spotter was blind
+# and its alarm was indistinguishable from noise. Do not put a comment inside a
+# line-continuation.
+#
+# NATIVE /api/chat, NOT THE OPENAI-COMPAT /v1/chat/completions. The compat
+# endpoint silently IGNORES Ollama's native `options`, so num_ctx never applied
+# and this model loaded at its 32768 default — measured 2026-08-15: 2.02GB
+# instead of ~1GB, with the card already at 7.33GB of 8GB. The rule in
+# docs/LOCAL-MODEL-TUNING.md was being violated by the one caller whose job is
+# noticing trouble. `options` is honoured here; `num_predict` replaces
+# `max_tokens`, and the answer is at .message.content, not .choices[0].
+RESP=$(curl -s -m 90 http://localhost:11434/api/chat -H 'Content-Type: application/json' \
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'$SPOT_MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'stream':False,'options':{'num_ctx':8192,'num_predict':120,'temperature':0}}))" <<< "$PROMPT")" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
 
 [ -n "${RESP:-}" ] || RESP="ALERT: local model call failed — spotter is blind"
 case "$RESP" in

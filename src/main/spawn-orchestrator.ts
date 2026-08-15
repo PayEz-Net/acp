@@ -19,7 +19,6 @@
  */
 
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { spawnAgent, killTerminal, getAgentSessionByAgent, WorkDirError, RuntimeNotSetError, emitSpawnFailed, emitNoTeamEngaged } from './pty';
 import { endAgentSession } from './agentSessionLifecycle';
@@ -399,20 +398,14 @@ async function orchestrateSpawn(projectId: number): Promise<void> {
     // exactly the kind of invisible regression that took all night to find.
     // Skills still resolve — they are registered globally via extra_skill_dirs
     // in ~/.kimi/config.toml, NOT discovered from cwd.
-    const agentReposRoot = process.env.ACP_AGENT_REPOS_ROOT
-      || path.join(os.homedir(), 'AgentRepos');
-    const agentHome = path.join(agentReposRoot, member.agent_name);
-    let workDir = workspaceRoot;
-    try {
-      if (fs.statSync(agentHome).isDirectory()) {
-        workDir = agentHome;
-      }
-    } catch { /* no home for this agent yet — reported below, never silent */ }
-    console.log(
-      workDir === agentHome
-        ? `[SpawnOrch] ${member.agent_name} workDir=${workDir} (own worktree home)`
-        : `[SpawnOrch] ${member.agent_name} workDir=${workDir} (PROJECT ROOT — no worktree home at ${agentHome}; searches will span the whole monorepo)`,
-    );
+    // Pass the PROJECT root. spawnAgent redirects to the agent's own worktree
+    // home when it has one — see resolveAgentWorktreeHome in pty.ts, which is
+    // the single authority for that decision because BOTH spawn paths
+    // (here and lifecycle-server.ts) must honour it. Do not re-implement the
+    // lookup here: an earlier version did, only this path used it, and every
+    // agent kept booting into the monorepo through the other caller while the
+    // change looked applied.
+    const workDir = workspaceRoot;
     // Project-driven runtime (feedback_runtime_choice_vs_platform_llm):
     // the WHOLE team runs the project's single runtime_choice. Per-member
     // runtime_override (mixed-mode: different runtimes within one project)

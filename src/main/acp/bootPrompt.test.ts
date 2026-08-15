@@ -76,14 +76,29 @@ describe('buildAgentBootPrompt — session summary (boot continuity)', () => {
   });
 
   it('emits NO summary section when there is no summary — an agent with no prior state boots clean', () => {
-    // Assert on the section HEADER, not the bare phrase: the static template
+    // Assert on the section HEADER, not the bare phrase. The static template
     // legitimately mentions "Where you left off" when it teaches the resume
-    // branch ("If your profile contains a section titled ..."). What must not
-    // appear without a summary is the section itself.
+    // branch ("If your profile contains a section titled ..."), and that
+    // conditional instruction is load-bearing: on the pty.ts fallback path
+    // spawnAgent is synchronous and cannot pre-fetch a summary, so the agent
+    // fetches its own profile and decides from what came back. What must not
+    // appear without a summary is the SECTION — an empty one invites an agent
+    // to read state that does not exist.
     for (const empty of [undefined, null, '', '   ']) {
       const out = buildAgentBootPrompt('QAPert', { sessionSummary: empty as any });
       expect(out).not.toContain('## Where you left off');
+      expect(out).not.toContain('This is a stored summary of a PREVIOUS session');
     }
+  });
+
+  it('a no-summary boot still tells the agent to WAIT, never to resume', () => {
+    // The other half of the same invariant, and the expensive one: "resume"
+    // wording on a cold start would send an agent off with no prior work.
+    // Measured 2026-08-10 — the inverse (wait-wording on a resume) idled all
+    // seven agents through a restart with 325 open cards.
+    const out = buildAgentBootPrompt('QAPert', { sessionSummary: '' });
+    expect(out).toMatch(/wait for the next user message/i);
+    expect(out).not.toContain('do this now, in THIS turn');
   });
 
   it('does not leak another agent\'s summary through the name', () => {

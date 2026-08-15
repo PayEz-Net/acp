@@ -6,18 +6,29 @@ export default function documentRoutes(storage: any): Router {
 
   function documentContext(req: Request): any {
     return {
-      // Agent-identity callers see only their own documents; bearer (human/renderer)
-      // callers see the unfiltered client/project view.
+      // agentName = the calling agent's AUTHOR identity. Used for attribution on
+      // create and as the author-scope guard on update/delete. NOT applied to
+      // reads — see readContext below.
       agentName: (req as any).authMethod === 'agent' ? (req as any).agentName : undefined,
       clientId: (req as any).clientId,
       userId: (req as any).userId,
     };
   }
 
+  // Docs are team-shared: any authenticated caller on the project can READ the
+  // full doc set, agents included (Jon, 2026-08-14: "everyone should be able to
+  // see all the docs in the project not just theirs"). Author scoping stays on
+  // update/delete only. Bearer (human/renderer) callers were already unscoped.
+  function readContext(req: Request): any {
+    const ctx = documentContext(req);
+    delete ctx.agentName;
+    return ctx;
+  }
+
   // GET /v1/documents — list agent documents (optionally filter by project_id)
   router.get('/', async (req: Request, res: Response) => {
     try {
-      const filter: any = documentContext(req);
+      const filter: any = readContext(req);
       if (req.query.project_id !== undefined) {
         const pid = parseInt(req.query.project_id as string, 10);
         if (!isNaN(pid)) filter.project_id = pid;
@@ -52,7 +63,7 @@ export default function documentRoutes(storage: any): Router {
         res.status(400).json(error('VALIDATION_ERROR', 'Invalid document ID', 'document_get', (req as any).requestId));
         return;
       }
-      const doc = await storage.getDocument(id, documentContext(req));
+      const doc = await storage.getDocument(id, readContext(req));
       if (!doc) {
         res.status(404).json(error('NOT_FOUND', 'Document not found', 'document_get', (req as any).requestId));
         return;

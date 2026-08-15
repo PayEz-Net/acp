@@ -533,7 +533,24 @@ export const useMailStore = create<MailStore>((set, get) => ({
       case 'archive':
       case 'mark_read':
         if (action.params?.id) {
-          await markMessageRead(action.params.id as number);
+          // action.params.id is a MESSAGE id; the route needs the INBOX id.
+          // Resolve it from the selected message rather than guessing — a wrong
+          // id here silently marks somebody else's mail read (see
+          // markMessageRead). If it cannot be resolved, do nothing and say so:
+          // a skipped read is recoverable, a wrong-row write is not.
+          const targetMessageId = action.params.id as number;
+          const inboxId =
+            selectedMessage && selectedMessage.message_id === targetMessageId
+              ? selectedMessage.inbox_id
+              : undefined;
+          if (inboxId == null) {
+            console.warn(
+              `[Mail] mark_read skipped: no inbox_id for message ${targetMessageId} ` +
+              `(selected message is ${selectedMessage?.message_id ?? 'none'})`,
+            );
+            break;
+          }
+          await markMessageRead(inboxId);
           // Refresh the inbox for the message recipient (scoped to active project)
           if (selectedMessage) {
             await fetchInbox(selectedMessage.to_agent, resolveProjectId());
@@ -554,10 +571,22 @@ export const useMailStore = create<MailStore>((set, get) => ({
   },
 }));
 
-// Mark message as read on server
-export async function markMessageRead(messageId: number): Promise<boolean> {
+/**
+ * Mark one message read on the server.
+ *
+ * TAKES THE **INBOX** ID, NOT THE MESSAGE ID. Every inbox entry carries both,
+ * from two different sequences (message 27804 lives in inbox row 87106). The
+ * route is `/inbox/{inbox_id}/read`, and handing it a message id does not fail
+ * — it names a REAL BUT UNRELATED inbox row and marks that one read, returning
+ * `200 {"success":true}` for the wrong mail. Measured 2026-08-14: POSTing
+ * message id 27785 marked the row holding message 11523.
+ *
+ * The parameter is named `inboxId` on purpose. It was `messageId`, and both
+ * call sites duly passed a message id.
+ */
+export async function markMessageRead(inboxId: number): Promise<boolean> {
   try {
-    const res = await mailRequest(`/inbox/${messageId}/read`, { method: 'POST' });
+    const res = await mailRequest(`/inbox/${inboxId}/read`, { method: 'POST' });
     if (!res.ok) {
       throw new Error(`Failed to mark as read: ${res.status}`);
     }
