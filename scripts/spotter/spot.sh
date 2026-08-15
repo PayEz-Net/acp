@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-# ACP spotter — local-model edition (qwen2.5-coder:7b via Ollama).
+# ACP spotter — local-model edition (light model via Ollama; see SPOT_MODEL).
 # Mechanical digest in bash; the model only judges the digest. Cheap by design:
 # no LLM call when the log hasn't moved since the last check.
 #
 # Usage: spot.sh <app-log-path> [state-dir]
 # Verdicts append to <state-dir>/spotter-status.log; ALERTs also to spotter-alert.txt.
+
+# MODEL: the spotter runs a LIGHT model on purpose (qwen2.5-coder:1.5b, ~1GB).
+# Its job is judging log health, not summarising mail — and on an 8GB card it
+# was competing for the same 7b instance the mail-brief composer needs. Two
+# callers, one card, and the loser gets a timeout or a bare HTTP 500 (measured
+# 2026-08-15: brief failures for two agents began when this script restarted).
+# A separate 1GB model coexists with the 7b instead of evicting it.
+#
+# NOT the `1.5b-base` variant that was already on the box: base models continue
+# text rather than follow instructions, and this script needs a parseable
+# verdict. Its log already carries "ALERT: unparseable verdict" lines; a base
+# model would make that permanent.
+SPOT_MODEL="${SPOT_MODEL:-qwen2.5-coder:1.5b}"
 
 set -u
 LOG="${1:?usage: spot.sh <app-log-path> [state-dir]}"
@@ -102,7 +115,7 @@ RESP=$(curl -s -m 90 http://localhost:11434/v1/chat/completions -H 'Content-Type
 # 2026-08-15: brief failures for two agents began the minute this script was
 # restarted. If you change this number, change it in briefComposer.ts and
 # shutdown-with-summaries.py in the same commit.
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'qwen2.5-coder:7b','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':16384},'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'$SPOT_MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':8192},'max_tokens':120,'temperature':0}))" <<< "$PROMPT")" \
   | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip().splitlines()[0].strip())" 2>/dev/null)
 
 [ -n "${RESP:-}" ] || RESP="ALERT: local model call failed — spotter is blind"

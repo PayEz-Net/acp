@@ -88,7 +88,7 @@ CORPUS:
 $CORPUS"
 
 RESP=$(curl -s -m 120 "$OLLAMA/v1/chat/completions" -H 'Content-Type: application/json' \
-  -d "$(python -c "import json,sys; print(json.dumps({'model':'$MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':16384},'max_tokens':700,'temperature':0}))" <<< "$PROMPT")" \
+  -d "$(python -c "import json,sys; print(json.dumps({'model':'$MODEL','messages':[{'role':'user','content':sys.stdin.read()}],'options':{'num_ctx':8192},'max_tokens':700,'temperature':0}))" <<< "$PROMPT")" \
   | python -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip())" 2>/dev/null)
 
 # Guard: no model, empty answer, or missing sections => send NOTHING.

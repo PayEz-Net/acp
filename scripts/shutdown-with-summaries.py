@@ -129,7 +129,7 @@ Rules:
                 "model": model,
                 "prompt": body,
                 "stream": False,
-                "options": {"num_ctx": 16384, "temperature": 0.3},
+                "options": {"num_ctx": 8192, "temperature": 0.3},
             }).encode(),
             headers={"Content-Type": "application/json"},
         )

@@ -118,7 +118,7 @@ async function callOllama(prompt: string): Promise<string> {
         // num_ctx must be explicit — Ollama's default context is far smaller
         // than a 25-message prompt, and an over-long prompt comes back as a
         // bare HTTP 500 (measured: it silently killed the two biggest inputs).
-        options: { num_ctx: 16384, temperature: 0.2 },
+        options: { num_ctx: 8192, temperature: 0.2 },
       }),
       signal: controller.signal,
     });

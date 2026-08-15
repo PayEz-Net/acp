@@ -50,7 +50,7 @@ is_bad() {
 
 probe_gen() {
     curl -s --max-time 90 "$OLLAMA/api/generate" \
-        -d "{\"model\":\"$GEN_MODEL\",\"prompt\":\"Reply with exactly: HEALTHY\",\"stream\":false,\"options\":{\"num_ctx\":16384,\"temperature\":0.2}}" \
+        -d "{\"model\":\"$GEN_MODEL\",\"prompt\":\"Reply with exactly: HEALTHY\",\"stream\":false,\"options\":{\"num_ctx\":8192,\"temperature\":0.2}}" \
     | python -c "import sys,json;print(json.load(sys.stdin).get('response','').strip())" 2>/dev/null
 }
 
