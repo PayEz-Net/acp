@@ -355,9 +355,43 @@ def started_project_id() -> int | None:
         req.add_header("X-ACP-Agent", "BAPert")
         with urllib.request.urlopen(req, timeout=15) as r:
             payload = json.load(r)
-        pid = ((payload.get("data") or {}).get("project") or {}).get("id")
+        data = payload.get("data") or {}
+        pid = (data.get("project") or {}).get("id")
+        source = data.get("source")
+
+        # `source` IS THE WHOLE ANSWER, and reading the id without it is how a
+        # rig writes another project's resume context.
+        #
+        # This endpoint answers from four places — 'started' | 'cloud' | 'cache'
+        # | 'defaults' — and only 'started' means A HUMAN CLICKED START ON THIS
+        # MACHINE. The other three are the cloud current-project pointer, which
+        # is a SINGLE PER-USER SLOT SHARED BY EVERY MACHINE ON THE ACCOUNT and
+        # exists to decide what the project picker shows first. It is display
+        # state. It is NOT what this rig is running.
+        #
+        # This code used to take .project.id and ignore source. So a shutdown
+        # with no SUMMARY_PROJECT_ID scoped every summary to whatever the picker
+        # last displayed — which any other machine, or any earlier switch on
+        # this one, could have set. Summaries are read back at boot as RESUME
+        # context, so the failure is not a missing summary: it is seven agents
+        # waking up with another project's marching orders and no reason to
+        # doubt them.
+        #
+        # MEASURED 2026-08-15: the slot was left reading 31 by an unrelated
+        # kanban workaround. A second rig came up, its picker offered 31, and it
+        # spent ~40 seconds on the wrong project — long enough for the mail
+        # router to brief that project's agents and MARK THE MAIL READ.
+        #
+        # None is the safe failure and every caller already treats it as "store
+        # nothing". A cold boot costs a session's context. A wrongly-scoped
+        # summary costs a day, and looks correct the whole time.
+        if source != "started":
+            print(f"[abort] /v1/projects/current answered from '{source}', not 'started' — "
+                  f"that is the project PICKER, not the running project. Storing nothing. "
+                  f"Re-run with SUMMARY_PROJECT_ID=<id> if you know what this rig is on.")
+            return None
         if isinstance(pid, int) and pid > 0:
-            print(f"[project] {pid} from {ACP_API}/v1/projects/current")
+            print(f"[project] {pid} from {ACP_API}/v1/projects/current (source=started)")
             return pid
         print("[warn] no project started (nothing was engaged) — storing nothing")
         return None
